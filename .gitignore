@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.venv/
+.venv-new/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+ffmpeg-*-essentials_build/
+data/runtime/
+integrations/*/vendor/*
+!integrations/*/vendor/.gitkeep

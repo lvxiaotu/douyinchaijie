@@ -1,0 +1,1 @@
+"""AI video analysis integration."""
