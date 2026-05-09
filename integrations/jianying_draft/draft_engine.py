@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Any
-from datetime import datetime
+
+from integrations.jianying_draft.name_utils import default_draft_name, safe_draft_name
 
 
 class JianyingDraftEngine:
@@ -22,8 +23,7 @@ class JianyingDraftEngine:
             return {"pyJianYingDraft": "missing", "error": str(exc)}
 
     def create_placeholder_draft(self, name: str) -> dict[str, Any]:
-        safe_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in name).strip("_")
-        draft_name = safe_name or self._timestamp_name()
+        draft_name = safe_draft_name(name, fallback=default_draft_name())
         draft_dir = self.output_dir / draft_name
         draft_dir.mkdir(parents=True, exist_ok=True)
         return {
@@ -67,7 +67,7 @@ class JianyingDraftEngine:
     def _create_with_pyjianying(self, payload: dict[str, Any]) -> dict[str, Any]:
         import pyJianYingDraft as draft  # type: ignore
 
-        name = self._safe_name(str(payload.get("name") or f"jianying_draft_{int(time.time())}"))
+        name = safe_draft_name(str(payload.get("name") or ""), fallback=default_draft_name())
         width, height = self._canvas_size(str(payload.get("aspect_ratio") or "9:16"))
         draft_root = self.draft_root
         draft_root.mkdir(parents=True, exist_ok=True)
@@ -167,13 +167,6 @@ class JianyingDraftEngine:
         if normalized in {"1:1", "square"}:
             return 1080, 1080
         return 1080, 1920
-
-    def _safe_name(self, name: str) -> str:
-        safe_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in name).strip("_")
-        return safe_name or self._timestamp_name()
-
-    def _timestamp_name(self) -> str:
-        return f"jianying_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     def _build_text_style(self, style_cls: Any, config: dict[str, Any]) -> Any:
         if not config:

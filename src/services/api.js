@@ -270,15 +270,6 @@ export function createJianyingDraftFromScript(payload) {
   });
 }
 
-export function generateRandomDraftJson(payload) {
-  return postJson("/api/tools/draft-playground/random-json", {
-    theme: payload.theme || "随机短视频剧情",
-    aspect_ratio: payload.aspectRatio || "9:16",
-    scene_count: Number(payload.sceneCount || 5),
-    provider: payload.provider || undefined,
-  });
-}
-
 export async function fetchJianyingDrafts(status) {
   const query = status ? `?status=${encodeURIComponent(status)}` : "";
   const response = await fetch(`${API_BASE}/api/tools/jianying/drafts${query}`);

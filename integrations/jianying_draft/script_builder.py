@@ -5,7 +5,8 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Any
-from datetime import datetime
+
+from integrations.jianying_draft.name_utils import default_draft_name, safe_draft_name
 
 
 class JianyingScriptDraftBuilder:
@@ -35,7 +36,7 @@ class JianyingScriptDraftBuilder:
         config = script_data.get("config") if isinstance(script_data.get("config"), dict) else {}
         scenes = script_data.get("scenes") if isinstance(script_data.get("scenes"), list) else []
         aspect_ratio = str(config.get("resolution") or "9:16")
-        draft_name = name or str(config.get("title") or "") or self._timestamp_name()
+        draft_name = name or str(config.get("title") or "") or default_draft_name()
 
         media: list[dict[str, Any]] = []
         audio: list[dict[str, Any]] = []
@@ -177,7 +178,7 @@ class JianyingScriptDraftBuilder:
 
         total_duration = float(config.get("total_duration_seconds") or cursor or 0)
         return {
-            "name": self._safe_name(draft_name),
+            "name": safe_draft_name(draft_name, fallback=default_draft_name()),
             "aspect_ratio": aspect_ratio,
             "default_media_duration_seconds": default_media_duration_seconds,
             "media": media,
@@ -234,13 +235,6 @@ class JianyingScriptDraftBuilder:
             if number > 0:
                 return number
         return float(default_value)
-
-    def _safe_name(self, value: str) -> str:
-        safe = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value).strip("_")
-        return safe or self._timestamp_name()
-
-    def _timestamp_name(self) -> str:
-        return f"jianying_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     def _material_id(self, kind: str, role: str, source: str) -> str:
         payload = f"{kind}|{role}|{source}".encode("utf-8", errors="ignore")

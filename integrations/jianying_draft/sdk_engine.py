@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from integrations.jianying_draft.name_utils import default_draft_name, safe_draft_name
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SDK_SCRIPTS_DIR = ROOT / "sdks" / "jianying-editor-skill" / "scripts"
@@ -45,7 +47,7 @@ class JianyingSdkDraftEngine:
         self._prepare_imports()
         from jy_wrapper import JyProject  # type: ignore
 
-        name = self._safe_name(str(payload.get("name") or "jianying_sdk_draft"))
+        name = safe_draft_name(str(payload.get("name") or ""), fallback=default_draft_name())
         width, height = self._canvas_size(str(payload.get("aspect_ratio") or "9:16"))
         self.draft_root.mkdir(parents=True, exist_ok=True)
 
@@ -379,10 +381,6 @@ class JianyingSdkDraftEngine:
         if normalized in {"1:1", "square"}:
             return 1080, 1080
         return 1080, 1920
-
-    def _safe_name(self, value: str) -> str:
-        safe_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value).strip("_")
-        return safe_name or "jianying_sdk_draft"
 
     def _build_sdk_text_style(self, config: dict[str, Any]) -> Any:
         import pyJianYingDraft as draft  # type: ignore

@@ -39,16 +39,6 @@ def get_workbench() -> WorkbenchSnapshot:
             integration_id="ai-prompt-reverse",
         ),
         ToolDefinition(
-            id="draft-generator",
-            icon="JD",
-            name="???????",
-            desc="?? AI ????????? draft JSON?????? pyJianYingDraft ???",
-            status="ready",
-            updated="??? AI JSON ?? + ????",
-            tags=["??", "??", "AI", "JSON"],
-            integration_id="jianying-draft",
-        ),
-        ToolDefinition(
             id="jianying-editor-sdk",
             icon="JY",
             name="剪映 Editor Skill SDK",

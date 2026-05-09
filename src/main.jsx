@@ -9,7 +9,6 @@ import {
   FileText,
   FolderCog,
   Home,
-  Sparkles,
   Plus,
   RefreshCw,
   Search,
@@ -22,8 +21,6 @@ import {
   createAiVideoBreakdownJob,
   createAiPromptReverseJob,
   createJianyingDraftFromScript,
-  createJianyingEditorSdkMovieCommentaryDraft,
-  createJianyingEditorSdkSmartZoomDraft,
   deleteVideoScript,
   deleteTask,
   downloadDouyinFavorites,
@@ -35,7 +32,6 @@ import {
   fetchAiProviderConfig,
   fetchDouyinConfig,
   fetchDouyinFavoriteItems,
-  fetchJianyingDrafts,
   fetchJianyingEditorSdkStatus,
   fetchDouyinUserProfile,
   fetchDouyinUserVideos,
@@ -46,25 +42,15 @@ import {
   fetchVideoScript,
   fetchVideoScripts,
   generateJianyingNaturalScript,
-  generateRandomDraftJson,
   inspectJianyingDraft,
-  exportJianyingEditorSdkDraft,
-  generateJianyingEditorSdkTts,
-  listJianyingEditorSdkDrafts,
   listJianyingDraftProjects,
   openJianyingDraftPath,
   prepareVideoScriptAssets,
-  recordJianyingEditorSdkWebVfx,
-  resolveJianyingEditorSdkCloudAsset,
-  runJianyingEditorSdkDiagnostics,
   saveDouyinConfig,
   saveAiVideoConfig,
   saveAiPromptReverseConfig,
   saveAiProviderConfig,
   saveVideoScript,
-  searchJianyingEditorSdkAssets,
-  syncJianyingEditorSdkCloudMusicLibrary,
-  summarizeJianyingEditorSdkDraft,
   testAiProviderConfig,
 } from "./services/api";
 import { fallbackWorkbench } from "./workbenchSeed";
@@ -75,9 +61,8 @@ const API_BASE = import.meta.env.VITE_API_BASE || "";
 const sections = {
   dashboard: ["首页", "查看最近任务、常用工具和素材状态。"],
   videoScript: ["灵感剧本", "把创作灵感生成可编辑的 script.json。"],
-  draftGenerator: ["草稿生成器", "用 AI 随机生成 draft JSON，并直接生成剪映草稿。"],
   draftInspector: ["查看草稿", "查看剪映草稿项目和画布详情。"],
-  jianyingEditor: ["剪映 Skill", "使用 JianYing Editor Skill SDK 的入口、CLI 和网页指南。"],
+  jianyingEditor: ["剪映 Skill", "围绕 AI 剧本、第三方素材补齐和剪映草稿生成的主工作流。"],
   tools: ["工具中心", "以后每个新功能都可以作为一个独立工具接入。"],
   jobs: ["任务中心", "统一查看后台任务、进度和失败状态。"],
   library: ["素材库", "沉淀下载、分析和处理后的内容。"],
@@ -88,7 +73,6 @@ const sections = {
 const navItems = [
   ["dashboard", Home, "首页"],
   ["videoScript", FileText, "灵感剧本"],
-  ["draftGenerator", Sparkles, "草稿生成器"],
   ["draftInspector", Database, "查看草稿"],
   ["jianyingEditor", Scissors, "剪映 Skill"],
   ["tools", Wrench, "工具中心"],
@@ -108,14 +92,16 @@ const settingItems = [
 
 const jianyingEditorItems = [
   ["script", "剧本生成"],
-  ["overview", "SDK 概览"],
-  ["entries", "功能入口"],
-  ["guide", "网页指南"],
+  ["reference", "开发者参考"],
 ];
 
 const statusText = {
   ready: "可用",
+  partial_ready: "部分补齐",
   script_ready: "剧本就绪",
+  waiting_assets: "待补齐",
+  waiting_audio: "待补音频",
+  waiting_visual: "待补画面",
   draft: "草稿",
   running: "运行中",
   done: "完成",
@@ -134,8 +120,34 @@ function generationModeLabel(mode) {
   return "本地";
 }
 
-function draftEngineLabel(engine) {
-  return engine === "sdk" ? "JyProject" : "pyJianYingDraft";
+function normalizeOptionalText(value) {
+  return cleanScriptValue(value).trim();
+}
+
+function deriveBgmKeywords(script) {
+  return normalizeOptionalText(script?.bible?.bgm_keywords || script?.config?.genre || "");
+}
+
+function deriveOptionalWorkflowFlags(script) {
+  const bible = script?.bible || {};
+  return {
+    hasBgm: Boolean(normalizeOptionalText(bible.bgm_keywords)),
+    hasVoice: Boolean(normalizeOptionalText(bible.voice_vibe)),
+    hasVisualStyle: Boolean(normalizeOptionalText(bible.art_style_prompt)),
+    hasOnscreenText: Boolean((script?.scenes || []).some((scene) => normalizeOptionalText(scene?.onscreen_text))),
+    hasNarration: Boolean((script?.scenes || []).some((scene) => normalizeOptionalText(scene?.audio_narration || scene?.narration))),
+  };
+}
+
+function createScriptFallbackBible(script) {
+  const title = script?.config?.title || "未命名剧本";
+  const genre = script?.config?.genre || "短视频";
+  return {
+    art_style_prompt: `${genre}, clean short-video visual style, readable framing, cinematic lighting`,
+    character_base_prompt: `${title} 的核心角色特征，保持镜头间一致`,
+    voice_vibe: "自然、清晰、稳定的中文旁白",
+    bgm_keywords: `${genre}, emotional, cinematic, uplifting`,
+  };
 }
 
 function sdkResultData(result) {
@@ -541,7 +553,18 @@ function sceneDuration(scene, fallback = 3) {
 }
 
 function sceneSummary(scene) {
-  return cleanScriptValue(scene?.summary || scene?.visual_prompt || scene?.audio_narration || scene?.narration).slice(0, 42) || "未填写镜头概括";
+  return cleanScriptValue(scene?.summary || scene?.visual_prompt || scene?.audio_narration || scene?.narration).slice(0, 42) || "未填写内容概括";
+}
+
+function formatTimelineMark(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "0s";
+  const rounded = Number.isInteger(seconds) ? seconds : seconds.toFixed(1);
+  return `${rounded}s`;
+}
+
+function createDateDraftName(date = new Date()) {
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日${date.getHours()}时${date.getMinutes()}分`;
 }
 
 function DouyinCollectorPanel({ onBreakdown, onPromptReverse }) {
@@ -2111,241 +2134,60 @@ function AiPromptReverseSettingsPanel() {
 }
 
 function JianyingDraftSettingsPanel() {
-  const [scriptPath, setScriptPath] = useState("G:\\ob-book\\codex-project\\data\\runtime\\video_pipeline\\projects\\006104ba1f624309bd1d900608dace15\\script.json");
-  const [name, setName] = useState("frontend-script-draft");
-  const [engine, setEngine] = useState("pyjianying");
-  const [defaultMediaDurationSeconds, setDefaultMediaDurationSeconds] = useState(3);
-  const [includeOnscreenText, setIncludeOnscreenText] = useState(true);
-  const [subtitleFromNarration, setSubtitleFromNarration] = useState(false);
-  const [textStyle, setTextStyle] = useState({
-    size: 8,
-    bold: true,
-    color: [1, 1, 1],
-    alpha: 1,
-    align: 1,
-    auto_wrapping: true,
-    max_line_width: 0.82,
-  });
-  const [textBackground, setTextBackground] = useState({
-    color: "#000000",
-    alpha: 0.45,
-    round_radius: 0.08,
-    height: 0.14,
-    width: 0.14,
-  });
-  const [drafts, setDrafts] = useState([]);
-  const [result, setResult] = useState(null);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  async function loadDrafts() {
-    const data = await fetchJianyingDrafts();
-    setDrafts(data.drafts || []);
-  }
-
-  useEffect(() => {
-    loadDrafts().catch(() => {});
-  }, []);
-
-  async function handleBuild() {
-    setLoading(true);
-    setMessage("");
-    setError("");
-    try {
-      const data = await createJianyingDraftFromScript({
-        name,
-        scriptPath,
-        engine,
-        includeOnscreenText,
-        subtitleFromNarration,
-        defaultMediaDurationSeconds,
-        textStyle,
-        textBackground,
-      });
-      setResult(data);
-      setMessage("剪映草稿已生成");
-      loadDrafts().catch(() => {});
-    } catch (err) {
-      setError(err.message || String(err));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleOpenDraftPath(path) {
-    try {
-      await openJianyingDraftPath(path);
-    } catch (err) {
-      setError(err.message || String(err));
-    }
-  }
-
-  async function handleCopyPath(path) {
-    try {
-      await navigator.clipboard.writeText(path);
-      setMessage("草稿路径已复制");
-    } catch (err) {
-      setError(err.message || String(err));
-    }
-  }
-
   return (
     <section className="panel settings-wide">
       <div className="panel-header">
         <div>
-          <h2>剪映草稿生成</h2>
-          <p>把现有 `script.json` 直接组装成剪映草稿，可切换 `pyJianYingDraft` 或 `JyProject`。</p>
+          <h2>剪映草稿说明</h2>
+          <p>草稿生成已经统一收口到 `剪映 Skill` 主流程，这里只保留查看路径、命名规则和使用说明，不再重复提供第二套生成入口。</p>
         </div>
-        <Badge status="ready">{draftEngineLabel(engine)}</Badge>
+        <Badge status="ready">Unified</Badge>
       </div>
 
       <section className="collector-card">
-        <h3>从剧本构建</h3>
-        <div className="collector-fields">
-          <label>
-            script.json 路径
-            <input value={scriptPath} onChange={(event) => setScriptPath(event.target.value)} placeholder="输入 script.json 的绝对路径" />
-          </label>
-          <label>
-            草稿名称
-            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：my-jianying-draft" />
-          </label>
-          <label>
-            生成引擎
-            <select value={engine} onChange={(event) => setEngine(event.target.value)}>
-              <option value="pyjianying">pyJianYingDraft</option>
-              <option value="sdk">JyProject</option>
-            </select>
-          </label>
-          <label>
-            默认镜头时长（秒）
-            <input
-              type="number"
-              min="0.1"
-              step="0.1"
-              value={defaultMediaDurationSeconds}
-              onChange={(event) => setDefaultMediaDurationSeconds(event.target.value)}
-            />
-          </label>
-          <label>
-            文字字号
-            <input
-              type="number"
-              step="0.1"
-              value={textStyle.size}
-              onChange={(event) => setTextStyle((current) => ({ ...current, size: Number(event.target.value) }))}
-            />
-          </label>
-          <label>
-            背景透明度
-            <input
-              type="number"
-              min="0"
-              max="1"
-              step="0.05"
-              value={textBackground.alpha}
-              onChange={(event) => setTextBackground((current) => ({ ...current, alpha: Number(event.target.value) }))}
-            />
-          </label>
-        </div>
-
-        <div className="jianying-option-row">
-          <label className="jianying-check">
-            <input type="checkbox" checked={includeOnscreenText} onChange={(event) => setIncludeOnscreenText(event.target.checked)} />
-            <span>生成 onscreen_text 文字轨</span>
-          </label>
-          <label className="jianying-check">
-            <input type="checkbox" checked={subtitleFromNarration} onChange={(event) => setSubtitleFromNarration(event.target.checked)} />
-            <span>用 narration 额外生成字幕轨</span>
-          </label>
-          <label className="jianying-check">
-            <input
-              type="checkbox"
-              checked={Boolean(textStyle.bold)}
-              onChange={(event) => setTextStyle((current) => ({ ...current, bold: event.target.checked }))}
-            />
-            <span>文字加粗</span>
-          </label>
-        </div>
-        {engine === "sdk" && (
-          <div className="running-note">
-            JyProject 引擎会尝试把 `script.json` 里的 `edit.transition / animation / camera` 映射进剪映工程。
-          </div>
-        )}
-
-        <div className="script-action-strip">
-          <button className="primary-button" type="button" onClick={handleBuild} disabled={loading || !scriptPath.trim()}>
-            {loading ? "生成中" : "生成剪映草稿"}
-          </button>
-          <button className="text-button" type="button" onClick={() => loadDrafts().catch((err) => setError(err.message || String(err)))}>
-            刷新草稿列表
-          </button>
+        <h3>当前统一链路</h3>
+        <div className="step-list">
+          {[
+            ["1", "AI 生成内部结构规范", "先得到可继续补素材、补配音并生成草稿的结构结果。"],
+            ["2", "输入第三方素材路径", "可以粘贴视频、图片、音频路径，也可以只给一部分。"],
+            ["3", "自动补齐并生成 JyProject 草稿", "缺失素材可交给 AI 补齐，生成前支持手动修改草稿名称。"],
+          ].map(([index, name, desc]) => (
+            <article className="step-item" key={index}>
+              <span>{index}</span>
+              <div>
+                <strong>{name}</strong>
+                <p>{desc}</p>
+              </div>
+            </article>
+          ))}
         </div>
       </section>
 
-      {message && <div className="running-note">{message}</div>}
-      {error && <div className="error-box">{error}</div>}
-
-      {result && (
-        <section className="collector-card">
-          <h3>本次结果</h3>
-          <div className="jianying-result-grid">
-            <div><strong>状态</strong><p>{result.status || "-"}</p></div>
-            <div><strong>草稿目录</strong><p>{result.draft_path || "-"}</p></div>
-            <div><strong>草稿名称</strong><p>{result.name || "-"}</p></div>
-            <div><strong>生成引擎</strong><p>{draftEngineLabel(result.engine)}</p></div>
-            <div><strong>来源剧本</strong><p>{result.source_script?.title || result.source_script?.project_id || "-"}</p></div>
-            <div><strong>文字字号</strong><p>{textStyle.size}</p></div>
-            <div><strong>文字底板</strong><p>{textBackground.color} / alpha {textBackground.alpha}</p></div>
-          </div>
-          {result.engine === "sdk" && Array.isArray(result.applied_edits) && result.applied_edits.length > 0 && (
-            <details className="raw-json" open>
-              <summary>查看已应用的 edit 映射</summary>
-              <pre className="result-box">{JSON.stringify(result.applied_edits, null, 2)}</pre>
-            </details>
-          )}
-          {result.engine === "sdk" && Array.isArray(result.failed_edits) && result.failed_edits.length > 0 && (
-            <details className="raw-json" open>
-              <summary>查看未应用的 edit 映射</summary>
-              <pre className="result-box">{JSON.stringify(result.failed_edits, null, 2)}</pre>
-            </details>
-          )}
-          <div className="script-action-strip">
-            <button className="primary-button" type="button" onClick={() => handleOpenDraftPath(result.draft_path)} disabled={!result.draft_path}>
-              打开草稿目录
-            </button>
-            <button className="text-button" type="button" onClick={() => handleCopyPath(result.draft_path)} disabled={!result.draft_path}>
-              复制草稿路径
-            </button>
-          </div>
-        </section>
-      )}
+      <section className="collector-card">
+        <h3>命名规则</h3>
+        <div className="workflow-summary-grid compact">
+          <article className="workflow-summary-card">
+            <strong>默认命名</strong>
+            <p>系统默认按日期时间命名，例如 `2026年5月9日16时22分`，方便你在剪映草稿目录里一眼识别。</p>
+          </article>
+          <article className="workflow-summary-card">
+            <strong>生成前可改</strong>
+            <p>在 `剪映 Skill` 的“补齐素材并生成草稿”步骤里，可以直接修改草稿名称，再输出到剪映。</p>
+          </article>
+          <article className="workflow-summary-card">
+            <strong>查看方式</strong>
+            <p>草稿生成后，到“查看草稿”里按项目点开，会看到可读解释，不只是原始 JSON。</p>
+          </article>
+        </div>
+      </section>
 
       <section className="collector-card">
-        <div className="panel-header">
-          <h3>最近草稿</h3>
-          <Badge>{drafts.length}</Badge>
-        </div>
-        <div className="jianying-draft-list">
-          {drafts.length ? drafts.map((draft) => (
-            <article className="jianying-draft-row" key={draft.id || draft.draft_path}>
-              <strong>{draft.name || draft.id}</strong>
-              <p>{draft.draft_path}</p>
-              <div className="tool-meta">
-                <Badge status={draft.status === "created" || draft.status === "validated" ? "ready" : "draft"}>{draft.status || "unknown"}</Badge>
-                <Badge>{draft.source || "local"}</Badge>
-              </div>
-              <div className="tool-card-actions">
-                <button className="text-button" type="button" onClick={() => handleOpenDraftPath(draft.draft_path)}>
-                  打开目录
-                </button>
-                <button className="text-button" type="button" onClick={() => handleCopyPath(draft.draft_path)}>
-                  复制路径
-                </button>
-              </div>
-            </article>
-          )) : <div className="empty-result">还没有剪映草稿记录。</div>}
+        <h3>建议使用</h3>
+        <div className="script-action-strip">
+          <button className="primary-button" type="button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+            返回顶部
+          </button>
+          <span className="field-hint">主操作请使用左侧导航中的 `剪映 Skill` 与 `查看草稿`。</span>
         </div>
       </section>
     </section>
@@ -2355,47 +2197,6 @@ function JianyingDraftSettingsPanel() {
 function JianyingEditorSdkPanel({ activeView = "overview" }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
-  const [sdkDraftRoot, setSdkDraftRoot] = useState("");
-  const [sdkDraftLimit, setSdkDraftLimit] = useState(20);
-  const [sdkDraftList, setSdkDraftList] = useState(null);
-  const [sdkDraftSummary, setSdkDraftSummary] = useState(null);
-  const [assetQuery, setAssetQuery] = useState("zoom");
-  const [assetCategory, setAssetCategory] = useState("");
-  const [assetSearchResult, setAssetSearchResult] = useState(null);
-  const [exportDraftName, setExportDraftName] = useState("");
-  const [exportOutputPath, setExportOutputPath] = useState("");
-  const [exportResolution, setExportResolution] = useState("1080");
-  const [exportFramerate, setExportFramerate] = useState("30");
-  const [exportResult, setExportResult] = useState(null);
-  const [sdkForms, setSdkForms] = useState({
-    diagnosticProject: "",
-    diagnosticVideo: "",
-    diagnosticStrict: false,
-    webVfxSource: "",
-    webVfxOutput: "",
-    webVfxDuration: 30,
-    ttsText: "测试智能配音系统集成成功。",
-    ttsOutput: "",
-    ttsSpeaker: "zh_male_huoli",
-    ttsBackend: "edge",
-    cloudQuery: "",
-    cloudForce: false,
-    cloudProjectsRoot: "",
-    cloudDryRun: true,
-    zoomProjectName: "Smart_Zoom_Demo",
-    zoomVideoPath: "",
-    zoomEventsJsonPath: "",
-    zoomScale: 150,
-    zoomHoldSeconds: 5,
-    movieVideoPath: "",
-    movieStoryboardPath: "",
-    movieProjectName: "Movie_Commentary_Project",
-    movieBgmPath: "",
-    movieMaskPath: "",
-  });
-  const [sdkExtraResults, setSdkExtraResults] = useState({});
-  const [sdkActionLoading, setSdkActionLoading] = useState("");
-  const [sdkActionError, setSdkActionError] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -2419,217 +2220,31 @@ function JianyingEditorSdkPanel({ activeView = "overview" }) {
   const guideUrl = `${API_BASE}/api/tools/jianying-editor-sdk/page`;
   const entries = status?.entries || [];
   const checks = status?.checks || {};
-  const healthChecks = [
+  const capabilityItems = status?.capability_matrix || [];
+  const warnings = status?.warnings || [];
+  const readinessItems = [
     ["JyProject 导入", checks.jyproject_import],
     ["必要依赖", checks.sdk_requirements],
     ["可选依赖", checks.optional_requirements],
     ["平台限制", checks.platform],
-    ...(checks.api_validator ? [["环境诊断 CLI", checks.api_validator]] : []),
-    ...(checks.smoke_draft_create ? [["最小草稿体检", checks.smoke_draft_create]] : []),
   ];
-  const capabilityItems = status?.capability_matrix || [];
-  const warnings = status?.warnings || [];
-  const draftItems = sdkResultData(sdkDraftList).drafts || [];
-  const assetItems = sdkResultData(assetSearchResult).results || [];
-  const sdkReadyLabel = status?.status_scope === "deep" ? "最小链路已验证" : "基础依赖可用";
-  const sdkPartialLabel = status?.status_scope === "deep" ? "诊断未通过" : "部分依赖可用";
-
-  const showOverview = activeView === "overview";
-  const showEntries = activeView === "entries";
-  const showGuide = activeView === "guide";
-
-  function updateSdkForm(key, value) {
-    setSdkForms((current) => ({ ...current, [key]: value }));
-  }
-
-  async function runSdkAction(actionId, runner) {
-    setSdkActionLoading(actionId);
-    setSdkActionError("");
-    try {
-      const result = await runner();
-      setSdkExtraResults((current) => ({ ...current, [actionId]: result }));
-      if (!result.ok) setSdkActionError(sdkResultReason(result) || "SDK 操作失败");
-      return result;
-    } catch (err) {
-      setSdkActionError(err.message || String(err));
-      return null;
-    } finally {
-      setSdkActionLoading("");
-    }
-  }
-
-  async function handleRunDeepDiagnostics() {
-    const result = await runSdkAction("diagnostics", () =>
-      runJianyingEditorSdkDiagnostics({
-        project: sdkForms.diagnosticProject,
-        video: sdkForms.diagnosticVideo,
-        strict: sdkForms.diagnosticStrict,
-      }),
-    );
-    if (result) setStatus(result);
-  }
-
-  async function handleListSdkDrafts(event) {
-    event.preventDefault();
-    setSdkActionLoading("drafts");
-    setSdkActionError("");
-    setSdkDraftSummary(null);
-    try {
-      const result = await listJianyingEditorSdkDrafts({ root: sdkDraftRoot, limit: sdkDraftLimit });
-      setSdkDraftList(result);
-      if (!result.ok) setSdkActionError(sdkResultReason(result) || "草稿列表读取失败");
-    } catch (err) {
-      setSdkActionError(err.message || String(err));
-    } finally {
-      setSdkActionLoading("");
-    }
-  }
-
-  async function handleSummarizeSdkDraft(draft) {
-    setSdkActionLoading(`summary:${draft.path || draft.name}`);
-    setSdkActionError("");
-    try {
-      const result = await summarizeJianyingEditorSdkDraft({
-        root: sdkDraftRoot,
-        name: draft.name || "",
-        path: draft.path || "",
-      });
-      setSdkDraftSummary(result);
-      if (!result.ok) setSdkActionError(sdkResultReason(result) || "草稿摘要读取失败");
-    } catch (err) {
-      setSdkActionError(err.message || String(err));
-    } finally {
-      setSdkActionLoading("");
-    }
-  }
-
-  async function handleSearchSdkAssets(event) {
-    event.preventDefault();
-    setSdkActionLoading("assets");
-    setSdkActionError("");
-    try {
-      const result = await searchJianyingEditorSdkAssets({ query: assetQuery, category: assetCategory, limit: 12 });
-      setAssetSearchResult(result);
-      if (!result.ok) setSdkActionError(sdkResultReason(result) || "素材搜索失败");
-    } catch (err) {
-      setSdkActionError(err.message || String(err));
-    } finally {
-      setSdkActionLoading("");
-    }
-  }
-
-  async function handleExportSdkDraft(event) {
-    event.preventDefault();
-    setSdkActionLoading("export");
-    setSdkActionError("");
-    setExportResult(null);
-    try {
-      const result = await exportJianyingEditorSdkDraft({
-        name: exportDraftName,
-        outputPath: exportOutputPath,
-        resolution: exportResolution,
-        framerate: exportFramerate,
-      });
-      setExportResult(result);
-      if (!result.ok) setSdkActionError(sdkResultReason(result) || "自动导出失败");
-    } catch (err) {
-      setSdkActionError(err.message || String(err));
-    } finally {
-      setSdkActionLoading("");
-    }
-  }
-
-  function handleRecordWebVfx(event) {
-    event.preventDefault();
-    runSdkAction("webVfx", () =>
-      recordJianyingEditorSdkWebVfx({
-        source: sdkForms.webVfxSource,
-        outputPath: sdkForms.webVfxOutput,
-        maxDurationSeconds: sdkForms.webVfxDuration,
-      }),
-    );
-  }
-
-  function handleGenerateTts(event) {
-    event.preventDefault();
-    runSdkAction("tts", () =>
-      generateJianyingEditorSdkTts({
-        text: sdkForms.ttsText,
-        outputPath: sdkForms.ttsOutput,
-        speaker: sdkForms.ttsSpeaker,
-        backend: sdkForms.ttsBackend,
-      }),
-    );
-  }
-
-  function handleResolveCloudAsset(event) {
-    event.preventDefault();
-    runSdkAction("cloudAsset", () =>
-      resolveJianyingEditorSdkCloudAsset({
-        query: sdkForms.cloudQuery,
-        force: sdkForms.cloudForce,
-      }),
-    );
-  }
-
-  function handleSyncCloudMusic(event) {
-    event.preventDefault();
-    runSdkAction("cloudMusic", () =>
-      syncJianyingEditorSdkCloudMusicLibrary({
-        projectsRoot: sdkForms.cloudProjectsRoot,
-        dryRun: sdkForms.cloudDryRun,
-      }),
-    );
-  }
-
-  function handleCreateSmartZoom(event) {
-    event.preventDefault();
-    runSdkAction("smartZoom", () =>
-      createJianyingEditorSdkSmartZoomDraft({
-        projectName: sdkForms.zoomProjectName,
-        videoPath: sdkForms.zoomVideoPath,
-        eventsJsonPath: sdkForms.zoomEventsJsonPath,
-        zoomScale: sdkForms.zoomScale,
-        holdSeconds: sdkForms.zoomHoldSeconds,
-      }),
-    );
-  }
-
-  function handleCreateMovieCommentary(event) {
-    event.preventDefault();
-    runSdkAction("movieCommentary", () =>
-      createJianyingEditorSdkMovieCommentaryDraft({
-        videoPath: sdkForms.movieVideoPath,
-        storyboardPath: sdkForms.movieStoryboardPath,
-        projectName: sdkForms.movieProjectName,
-        bgmPath: sdkForms.movieBgmPath,
-        maskPath: sdkForms.movieMaskPath,
-      }),
-    );
-  }
+  const workflowCapabilityItems = (capabilityItems || []).filter((item) => item?.implemented || item?.available);
+  const sdkStateLabel = status?.ready ? "可接入" : status ? "需补环境" : "检查中";
 
   return (
-    <section className="jianying-sdk-panel">
-      {showOverview && <div className="panel sdk-hero-panel">
+    <section className="jianying-sdk-panel sdk-reference-panel">
+      <section className="panel sdk-hero-panel">
         <div className="panel-header">
           <div>
-            <h2>剪映 Editor Skill SDK</h2>
-            <p>本页显示本地 SDK 入口和能力矩阵；普通状态无副作用，深度诊断需手动触发。</p>
+            <h2>开发者参考</h2>
+            <p>这里不再承担主操作流程，只说明当前本地 SDK 是否能支撑“结构规范 到 素材补齐 到 JyProject 草稿”这条链路。</p>
           </div>
-          <Badge status={status?.ready ? "ready" : status ? "error" : "draft"}>{status?.ready ? sdkReadyLabel : status ? sdkPartialLabel : "检查中"}</Badge>
+          <Badge status={status?.ready ? "ready" : status ? "draft" : "draft"}>{sdkStateLabel}</Badge>
         </div>
         {error ? (
           <div className="error-box">{error}</div>
         ) : (
           <div className="sdk-summary-grid">
-            <div>
-              <span>版本</span>
-              <strong>{status?.version || "读取中"}</strong>
-            </div>
-            <div>
-              <span>锁定模式</span>
-              <strong>{status?.lock?.mode || "未读取"}</strong>
-            </div>
             <div>
               <span>本地路径</span>
               <strong>{status?.root || "sdks/jianying-editor-skill"}</strong>
@@ -2640,377 +2255,110 @@ function JianyingEditorSdkPanel({ activeView = "overview" }) {
                 GitHub
               </a>
             </div>
+            <div>
+              <span>版本</span>
+              <strong>{status?.version || "读取中"}</strong>
+            </div>
+            <div>
+              <span>锁定模式</span>
+              <strong>{status?.lock?.mode || "未读取"}</strong>
+            </div>
           </div>
         )}
-      </div>}
+      </section>
 
-      {(showOverview || showEntries) && <div className={showOverview ? "sdk-layout" : "sdk-layout single"}>
-        {showOverview && <section className="panel">
+      <section className="sdk-reference-grid">
+        <section className="panel">
           <div className="panel-header">
-            <h2>主动体检</h2>
-            <Badge status={status?.ready ? "ready" : "draft"}>{status ? "已执行" : "等待"}</Badge>
+            <div>
+              <h2>链路判断</h2>
+              <p>重点看当前项目是否具备你要的三步闭环。</p>
+            </div>
           </div>
           <div className="sdk-entry-list">
-            {healthChecks.map(([label, check]) => (
+            <article className="sdk-entry">
+              <div>
+                <strong>1. AI 生成结构规范</strong>
+                <p>前端主流程已改成结构段/时间线导向，不再要求用户在页面里逐镜头编辑。</p>
+              </div>
+              <Badge status="ready">已对齐</Badge>
+            </article>
+            <article className="sdk-entry">
+              <div>
+                <strong>2. 输入第三方素材路径</strong>
+                <p>支持直接粘贴视频、图片、音频路径，也允许不全量手工准备。</p>
+              </div>
+              <Badge status="ready">已对齐</Badge>
+            </article>
+            <article className="sdk-entry">
+              <div>
+                <strong>3. 自动补齐并生成 `JyProject` 草稿</strong>
+                <p>可调用素材补齐与草稿生成链路；字幕、BGM 等保持可选，不强行塞进主操作面板。</p>
+              </div>
+              <Badge status={status?.ready ? "ready" : "draft"}>{status?.ready ? "可执行" : "依赖待确认"}</Badge>
+            </article>
+          </div>
+          {warnings.length > 0 && <div className="running-note">{warnings.join(" ")}</div>}
+        </section>
+
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>环境状态</h2>
+              <p>只保留这条主链路相关的环境信号。</p>
+            </div>
+          </div>
+          <div className="sdk-entry-list">
+            {readinessItems.map(([label, check]) => (
               <article className="sdk-entry" key={label}>
                 <div>
                   <strong>{label}</strong>
-                  <p>{check?.message || (check ? "检查完成" : "等待状态接口返回")}</p>
+                  <p>{check?.message || "等待状态接口返回"}</p>
                 </div>
-                <Badge status={status ? (check?.ok ? "ready" : "error") : "draft"}>{status ? (check?.ok ? "通过" : "未通过") : "等待"}</Badge>
+                <Badge status={check?.ok ? "ready" : "draft"}>{check?.ok ? "通过" : "待确认"}</Badge>
               </article>
             ))}
           </div>
-          {warnings.length > 0 && (
-            <div className="running-note">
-              {warnings.join(" ")}
-            </div>
-          )}
-          <div className="sdk-diagnostics-box">
-            <div className="sdk-inline-fields">
-              <label>
-                诊断草稿名
-                <input value={sdkForms.diagnosticProject} onChange={(event) => updateSdkForm("diagnosticProject", event.target.value)} placeholder="留空使用 Diagnostic_Test" />
-              </label>
-              <label>
-                测试视频
-                <input value={sdkForms.diagnosticVideo} onChange={(event) => updateSdkForm("diagnosticVideo", event.target.value)} placeholder="留空使用 SDK assets/video.mp4" />
-              </label>
-            </div>
-            <label className="sdk-checkbox-row">
-              <input type="checkbox" checked={sdkForms.diagnosticStrict} onChange={(event) => updateSdkForm("diagnosticStrict", event.target.checked)} />
-              严格检查 ffprobe 和测试视频
-            </label>
-            <button className="secondary-action-button" type="button" onClick={handleRunDeepDiagnostics} disabled={sdkActionLoading === "diagnostics"}>
-              {sdkActionLoading === "diagnostics" ? "诊断中" : "运行深度诊断"}
-            </button>
-          </div>
-        </section>}
+        </section>
+      </section>
 
-        {showOverview && <section className="panel">
+      <section className="sdk-reference-grid">
+        <section className="panel">
           <div className="panel-header">
-            <h2>能力矩阵</h2>
-            <Badge>capabilities</Badge>
+            <div>
+              <h2>当前接入能力</h2>
+              <p>这里只展示已接入或已声明的能力，不再把它们全部做成操作工作台。</p>
+            </div>
           </div>
           <div className="sdk-entry-list">
-            {(capabilityItems.length ? capabilityItems : []).map((item) => (
+            {workflowCapabilityItems.length ? workflowCapabilityItems.map((item) => (
               <article className="sdk-entry" key={item.key}>
                 <div>
                   <strong>{item.label}</strong>
-                  <p>{item.message || (item.available ? "当前环境可尝试使用" : "当前环境未解锁或未验证")}</p>
+                  <p>{item.message || (item.available ? "当前环境可尝试使用" : "当前环境未完全验证")}</p>
                   <div className="sdk-capability-meta">
                     <code>{item.endpoint}</code>
                     <span>{item.invocation}</span>
                   </div>
                 </div>
-                <Badge status={item.available ? "ready" : item.implemented ? "draft" : "error"}>{item.available ? "可用" : item.implemented ? "已接入" : "未接入"}</Badge>
+                <Badge status={item.available ? "ready" : "draft"}>{item.available ? "可用" : "已接入"}</Badge>
               </article>
-            ))}
-            {status && capabilityItems.length === 0 && <div className="empty-result">能力矩阵尚未返回。</div>}
+            )) : <div className="empty-result">能力矩阵尚未返回。</div>}
           </div>
-        </section>}
-
-        {showOverview && <section className="panel sdk-tool-panel">
-          <div className="panel-header">
-            <h2>已接入能力</h2>
-            <Badge status={sdkActionLoading ? "running" : "ready"}>{sdkActionLoading ? "运行中" : "CLI"}</Badge>
-          </div>
-          {sdkActionError && <div className="error-box">{sdkActionError}</div>}
-          <div className="sdk-tool-grid">
-            <form className="sdk-tool-box" onSubmit={handleListSdkDrafts}>
-              <header>
-                <strong>草稿检查</strong>
-                <Badge status={status?.capabilities?.can_validate_draft ? "ready" : "draft"}>draft_inspector</Badge>
-              </header>
-              <label>
-                草稿根目录
-                <input value={sdkDraftRoot} onChange={(event) => setSdkDraftRoot(event.target.value)} placeholder="留空使用剪映默认草稿目录" />
-              </label>
-              <label>
-                数量
-                <input type="number" min="0" max="200" value={sdkDraftLimit} onChange={(event) => setSdkDraftLimit(event.target.value)} />
-              </label>
-              <button className="secondary-action-button" type="submit" disabled={sdkActionLoading === "drafts"}>
-                {sdkActionLoading === "drafts" ? "读取中" : "列出草稿"}
-              </button>
-              {draftItems.length > 0 && (
-                <div className="sdk-mini-list">
-                  {draftItems.slice(0, 5).map((draft) => (
-                    <article key={draft.path || draft.name}>
-                      <div>
-                        <strong>{draft.name || "未命名草稿"}</strong>
-                        <p>{draft.path}</p>
-                      </div>
-                      <button type="button" className="text-button" onClick={() => handleSummarizeSdkDraft(draft)}>
-                        摘要
-                      </button>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </form>
-
-            <form className="sdk-tool-box" onSubmit={handleSearchSdkAssets}>
-              <header>
-                <strong>素材搜索</strong>
-                <Badge status={status?.capabilities?.can_asset_search ? "ready" : "draft"}>asset_search</Badge>
-              </header>
-              <label>
-                关键词
-                <input value={assetQuery} onChange={(event) => setAssetQuery(event.target.value)} />
-              </label>
-              <label>
-                分类
-                <input value={assetCategory} onChange={(event) => setAssetCategory(event.target.value)} placeholder="transitions / filters / text_animations" />
-              </label>
-              <button className="secondary-action-button" type="submit" disabled={sdkActionLoading === "assets" || !assetQuery.trim()}>
-                {sdkActionLoading === "assets" ? "搜索中" : "搜索素材"}
-              </button>
-              {assetItems.length > 0 && (
-                <div className="sdk-mini-list">
-                  {assetItems.slice(0, 5).map((item, index) => (
-                    <article key={`${item.source_file || "asset"}-${item.identifier || item.title || index}`}>
-                      <div>
-                        <strong>{item.identifier || item.title || item.name || "素材"}</strong>
-                        <p>{item.category || item.categories || item.source_file || ""}</p>
-                      </div>
-                      <Badge>{item.score || 0}</Badge>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </form>
-
-            <form className="sdk-tool-box" onSubmit={handleExportSdkDraft}>
-              <header>
-                <strong>自动导出</strong>
-                <Badge status={status?.capabilities?.can_auto_export ? "ready" : "draft"}>auto_exporter</Badge>
-              </header>
-              <label>
-                草稿名称
-                <input value={exportDraftName} onChange={(event) => setExportDraftName(event.target.value)} placeholder="剪映草稿列表里的名称" />
-              </label>
-              <label>
-                输出 MP4
-                <input value={exportOutputPath} onChange={(event) => setExportOutputPath(event.target.value)} placeholder="G:\\exports\\demo.mp4" />
-              </label>
-              <div className="sdk-inline-fields">
-                <label>
-                  分辨率
-                  <select value={exportResolution} onChange={(event) => setExportResolution(event.target.value)}>
-                    <option value="">默认</option>
-                    <option value="720">720</option>
-                    <option value="1080">1080</option>
-                    <option value="2K">2K</option>
-                    <option value="4K">4K</option>
-                  </select>
-                </label>
-                <label>
-                  帧率
-                  <select value={exportFramerate} onChange={(event) => setExportFramerate(event.target.value)}>
-                    <option value="">默认</option>
-                    <option value="24">24</option>
-                    <option value="25">25</option>
-                    <option value="30">30</option>
-                    <option value="50">50</option>
-                    <option value="60">60</option>
-                  </select>
-                </label>
-              </div>
-              <button className="primary-button" type="submit" disabled={sdkActionLoading === "export" || !exportDraftName.trim() || !exportOutputPath.trim()}>
-                {sdkActionLoading === "export" ? "导出中" : "导出 MP4"}
-              </button>
-            </form>
-
-            <form className="sdk-tool-box" onSubmit={handleRecordWebVfx}>
-              <header>
-                <strong>Web VFX</strong>
-                <Badge status={status?.capabilities?.can_web_vfx ? "ready" : "draft"}>web_recorder</Badge>
-              </header>
-              <label>
-                URL / HTML
-                <input value={sdkForms.webVfxSource} onChange={(event) => updateSdkForm("webVfxSource", event.target.value)} placeholder="https://... 或 G:\\demo\\index.html" />
-              </label>
-              <label>
-                输出视频
-                <input value={sdkForms.webVfxOutput} onChange={(event) => updateSdkForm("webVfxOutput", event.target.value)} placeholder="G:\\exports\\web-vfx.webm" />
-              </label>
-              <label>
-                最长秒数
-                <input type="number" min="1" max="300" value={sdkForms.webVfxDuration} onChange={(event) => updateSdkForm("webVfxDuration", event.target.value)} />
-              </label>
-              <button className="secondary-action-button" type="submit" disabled={sdkActionLoading === "webVfx" || !sdkForms.webVfxSource.trim() || !sdkForms.webVfxOutput.trim()}>
-                {sdkActionLoading === "webVfx" ? "录制中" : "录制网页"}
-              </button>
-            </form>
-
-            <form className="sdk-tool-box" onSubmit={handleGenerateTts}>
-              <header>
-                <strong>TTS</strong>
-                <Badge status={status?.capabilities?.can_tts ? "ready" : "draft"}>universal_tts</Badge>
-              </header>
-              <label>
-                文本
-                <textarea value={sdkForms.ttsText} onChange={(event) => updateSdkForm("ttsText", event.target.value)} rows={3} />
-              </label>
-              <label>
-                输出音频
-                <input value={sdkForms.ttsOutput} onChange={(event) => updateSdkForm("ttsOutput", event.target.value)} placeholder="G:\\exports\\voice.ogg" />
-              </label>
-              <div className="sdk-inline-fields">
-                <label>
-                  后端
-                  <select value={sdkForms.ttsBackend} onChange={(event) => updateSdkForm("ttsBackend", event.target.value)}>
-                    <option value="">自动</option>
-                    <option value="edge">Edge</option>
-                    <option value="sami">SAMI</option>
-                  </select>
-                </label>
-                <label>
-                  声线
-                  <input value={sdkForms.ttsSpeaker} onChange={(event) => updateSdkForm("ttsSpeaker", event.target.value)} />
-                </label>
-              </div>
-              <button className="secondary-action-button" type="submit" disabled={sdkActionLoading === "tts" || !sdkForms.ttsText.trim() || !sdkForms.ttsOutput.trim()}>
-                {sdkActionLoading === "tts" ? "生成中" : "生成配音"}
-              </button>
-            </form>
-
-            <form className="sdk-tool-box" onSubmit={handleResolveCloudAsset}>
-              <header>
-                <strong>云素材</strong>
-                <Badge status={status?.capabilities?.can_cloud_media ? "ready" : "draft"}>cloud_manager</Badge>
-              </header>
-              <label>
-                素材 ID / 名称
-                <input value={sdkForms.cloudQuery} onChange={(event) => updateSdkForm("cloudQuery", event.target.value)} placeholder="云素材 ID 或名称关键词" />
-              </label>
-              <label className="sdk-checkbox-row">
-                <input type="checkbox" checked={sdkForms.cloudForce} onChange={(event) => updateSdkForm("cloudForce", event.target.checked)} />
-                强制重新下载
-              </label>
-              <button className="secondary-action-button" type="submit" disabled={sdkActionLoading === "cloudAsset" || !sdkForms.cloudQuery.trim()}>
-                {sdkActionLoading === "cloudAsset" ? "解析中" : "解析素材"}
-              </button>
-            </form>
-
-            <form className="sdk-tool-box" onSubmit={handleSyncCloudMusic}>
-              <header>
-                <strong>云音乐库</strong>
-                <Badge status={status?.capabilities?.can_cloud_music ? "ready" : "draft"}>music_library</Badge>
-              </header>
-              <label>
-                草稿根目录
-                <input value={sdkForms.cloudProjectsRoot} onChange={(event) => updateSdkForm("cloudProjectsRoot", event.target.value)} placeholder="留空使用剪映默认目录" />
-              </label>
-              <label className="sdk-checkbox-row">
-                <input type="checkbox" checked={sdkForms.cloudDryRun} onChange={(event) => updateSdkForm("cloudDryRun", event.target.checked)} />
-                Dry run
-              </label>
-              <button className="secondary-action-button" type="submit" disabled={sdkActionLoading === "cloudMusic"}>
-                {sdkActionLoading === "cloudMusic" ? "同步中" : "同步曲库"}
-              </button>
-            </form>
-
-            <form className="sdk-tool-box" onSubmit={handleCreateSmartZoom}>
-              <header>
-                <strong>录屏智能缩放</strong>
-                <Badge status={status?.capabilities?.can_smart_zoom ? "ready" : "draft"}>smart_zoom</Badge>
-              </header>
-              <label>
-                草稿名称
-                <input value={sdkForms.zoomProjectName} onChange={(event) => updateSdkForm("zoomProjectName", event.target.value)} />
-              </label>
-              <label>
-                视频路径
-                <input value={sdkForms.zoomVideoPath} onChange={(event) => updateSdkForm("zoomVideoPath", event.target.value)} />
-              </label>
-              <label>
-                events.json
-                <input value={sdkForms.zoomEventsJsonPath} onChange={(event) => updateSdkForm("zoomEventsJsonPath", event.target.value)} />
-              </label>
-              <div className="sdk-inline-fields">
-                <label>
-                  缩放 %
-                  <input type="number" min="100" max="400" value={sdkForms.zoomScale} onChange={(event) => updateSdkForm("zoomScale", event.target.value)} />
-                </label>
-                <label>
-                  停留秒数
-                  <input type="number" min="1" max="30" value={sdkForms.zoomHoldSeconds} onChange={(event) => updateSdkForm("zoomHoldSeconds", event.target.value)} />
-                </label>
-              </div>
-              <button className="secondary-action-button" type="submit" disabled={sdkActionLoading === "smartZoom" || !sdkForms.zoomProjectName.trim() || !sdkForms.zoomVideoPath.trim() || !sdkForms.zoomEventsJsonPath.trim()}>
-                {sdkActionLoading === "smartZoom" ? "生成中" : "生成缩放草稿"}
-              </button>
-            </form>
-
-            <form className="sdk-tool-box" onSubmit={handleCreateMovieCommentary}>
-              <header>
-                <strong>电影解说</strong>
-                <Badge status={status?.capabilities?.can_movie_commentary ? "ready" : "draft"}>commentary</Badge>
-              </header>
-              <label>
-                视频路径
-                <input value={sdkForms.movieVideoPath} onChange={(event) => updateSdkForm("movieVideoPath", event.target.value)} />
-              </label>
-              <label>
-                故事版 JSON
-                <input value={sdkForms.movieStoryboardPath} onChange={(event) => updateSdkForm("movieStoryboardPath", event.target.value)} />
-              </label>
-              <label>
-                草稿名称
-                <input value={sdkForms.movieProjectName} onChange={(event) => updateSdkForm("movieProjectName", event.target.value)} />
-              </label>
-              <div className="sdk-inline-fields">
-                <label>
-                  BGM
-                  <input value={sdkForms.movieBgmPath} onChange={(event) => updateSdkForm("movieBgmPath", event.target.value)} />
-                </label>
-                <label>
-                  遮罩
-                  <input value={sdkForms.movieMaskPath} onChange={(event) => updateSdkForm("movieMaskPath", event.target.value)} />
-                </label>
-              </div>
-              <button className="secondary-action-button" type="submit" disabled={sdkActionLoading === "movieCommentary" || !sdkForms.movieVideoPath.trim() || !sdkForms.movieStoryboardPath.trim()}>
-                {sdkActionLoading === "movieCommentary" ? "生成中" : "生成解说草稿"}
-              </button>
-            </form>
-          </div>
-          {sdkDraftSummary && (
-            <details className="raw-json">
-              <summary>查看草稿摘要结果</summary>
-              <pre className="result-box">{JSON.stringify(sdkDraftSummary, null, 2)}</pre>
-            </details>
-          )}
-          {assetSearchResult && (
-            <details className="raw-json">
-              <summary>查看素材搜索结果</summary>
-              <pre className="result-box">{JSON.stringify(assetSearchResult, null, 2)}</pre>
-            </details>
-          )}
-          {exportResult && (
-            <details className="raw-json" open>
-              <summary>查看导出结果</summary>
-              <pre className="result-box">{JSON.stringify(exportResult, null, 2)}</pre>
-            </details>
-          )}
-          {Object.entries(sdkExtraResults).map(([key, value]) => (
-            <details className="raw-json" key={key}>
-              <summary>查看 {key} 结果</summary>
-              <pre className="result-box">{JSON.stringify(value, null, 2)}</pre>
-            </details>
-          ))}
-        </section>}
+        </section>
 
         <section className="panel">
           <div className="panel-header">
-            <h2>SDK 入口</h2>
+            <div>
+              <h2>SDK 入口</h2>
+              <p>保留源码入口和网页说明，方便后续继续接 SDK 能力。</p>
+            </div>
             <a className="text-button" href={guideUrl} target="_blank" rel="noreferrer">
-              新窗口打开指南
+              打开网页说明
             </a>
           </div>
           <div className="sdk-entry-list">
-            {entries.map((entry) => (
+            {entries.length ? entries.map((entry) => (
               <article className="sdk-entry" key={entry.relative_path}>
                 <div>
                   <strong>{entry.name}</strong>
@@ -3019,31 +2367,10 @@ function JianyingEditorSdkPanel({ activeView = "overview" }) {
                 </div>
                 <Badge status={entry.exists ? "ready" : "error"}>{entry.exists ? "已找到" : "缺失"}</Badge>
               </article>
-            ))}
-            {!entries.length && <div className="empty-result">正在读取 SDK 入口...</div>}
+            )) : <div className="empty-result">正在读取 SDK 入口...</div>}
           </div>
         </section>
-
-        {showOverview && <section className="panel sdk-guide-panel">
-          <div className="panel-header">
-            <h2>网页开发者指南</h2>
-            <Badge>index.html</Badge>
-          </div>
-          <iframe className="sdk-guide-frame" title="JianYing Editor Skill Guide" src={guideUrl} />
-        </section>}
-      </div>}
-
-      {showGuide && (
-        <section className="panel sdk-guide-panel">
-          <div className="panel-header">
-            <h2>网页开发者指南</h2>
-            <a className="text-button" href={guideUrl} target="_blank" rel="noreferrer">
-              新窗口打开
-            </a>
-          </div>
-          <iframe className="sdk-guide-frame standalone" title="JianYing Editor Skill Guide" src={guideUrl} />
-        </section>
-      )}
+      </section>
     </section>
   );
 }
@@ -3057,9 +2384,16 @@ function JianyingNaturalScriptPanel() {
   const [resolution, setResolution] = useState("");
   const [generationMode, setGenerationMode] = useState("local");
   const [provider, setProvider] = useState("");
+  const [subtitleFromNarration, setSubtitleFromNarration] = useState(false);
+  const [enableBgm, setEnableBgm] = useState(true);
+  const [allowAutoFill, setAllowAutoFill] = useState(true);
+  const [autoGenerateAudio, setAutoGenerateAudio] = useState(true);
+  const [autoGenerateImages, setAutoGenerateImages] = useState(true);
+  const [customBgmKeywords, setCustomBgmKeywords] = useState("");
+  const [externalMaterials, setExternalMaterials] = useState("");
+  const [draftName, setDraftName] = useState(() => createDateDraftName());
   const [task, setTask] = useState(null);
   const [result, setResult] = useState(null);
-  const [selectedSceneId, setSelectedSceneId] = useState(null);
   const [scriptProjects, setScriptProjects] = useState([]);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -3084,8 +2418,6 @@ function JianyingNaturalScriptPanel() {
         if (next.status === "done") {
           const nextResult = next.result || next.result_json || null;
           setResult(nextResult);
-          const nextScript = nextResult?.script || nextResult?.result?.script;
-          setSelectedSceneId(nextScript?.scenes?.[0]?.id || null);
           loadScriptProjects().catch(() => {});
         }
         if (next.status === "failed" || next.status === "error") {
@@ -3111,7 +2443,7 @@ function JianyingNaturalScriptPanel() {
     try {
       const data = await fetchVideoScript(projectId);
       setResult(data);
-      setSelectedSceneId(data?.script?.scenes?.[0]?.id || null);
+      setDraftName(createDateDraftName());
       setDraftBuildResult(null);
       setPrepareReport(data?.prepare_report || null);
     } catch (err) {
@@ -3140,6 +2472,7 @@ function JianyingNaturalScriptPanel() {
     setSubmitting(true);
     setError("");
     setResult(null);
+    setDraftName(createDateDraftName());
     setDraftBuildResult(null);
     setPrepareReport(null);
     try {
@@ -3165,54 +2498,59 @@ function JianyingNaturalScriptPanel() {
   const parsed = result?.parsed_input;
   const currentMode = result?.generation_mode || result?.metadata?.generation_mode || "local";
   const currentProjectId = result?.project_id || script?.project_id || "";
-
-  function updateScriptScene(sceneId, fieldPath, value) {
-    setResult((current) => {
-      const currentScript = current?.script || current?.result?.script;
-      if (!currentScript) return current;
-      const nextScenes = (currentScript.scenes || []).map((scene) => {
-        if (scene.id !== sceneId) return scene;
-        const nextScene = JSON.parse(JSON.stringify(scene));
-        if (typeof nextScene.asset_requirements !== "object" || nextScene.asset_requirements === null) {
-          nextScene.asset_requirements = {
-            visual_type: "video_or_image",
-            main_subject: "",
-            background: "",
-            mood: "",
-            must_have: [],
-            avoid: [],
-          };
-        }
-        const path = fieldPath.split(".");
-        let target = nextScene;
-        for (let index = 0; index < path.length - 1; index += 1) {
-          const key = path[index];
-          if (typeof target[key] !== "object" || target[key] === null) {
-            target[key] = {};
-          }
-          target = target[key];
-        }
-        target[path[path.length - 1]] = value;
-        if (nextScene.assets) {
-          const hasVisual = Boolean((nextScene.assets.video_path || "").trim() || (nextScene.assets.image_path || "").trim());
-          const hasAudio = Boolean((nextScene.assets.audio_path || "").trim());
-          nextScene.status = hasVisual || hasAudio ? "ready" : "waiting_assets";
-        }
-        return nextScene;
-      });
-      const nextScript = { ...currentScript, scenes: nextScenes };
-      if (current?.script) {
-        return { ...current, script: nextScript };
-      }
-      if (current?.result?.script) {
-        return { ...current, result: { ...current.result, script: nextScript } };
-      }
-      return current;
+  const workflowFlags = deriveOptionalWorkflowFlags(script);
+  const readySceneCount = script?.scenes?.filter((scene) => ["ready", "partial_ready"].includes(scene.status)).length || 0;
+  const totalSceneCount = script?.scenes?.length || 0;
+  const hasExternalMaterials = Boolean(externalMaterials.trim());
+  const hasExistingAssets = Boolean(
+    (script?.scenes || []).some((scene) =>
+      Boolean(
+        cleanScriptValue(scene?.assets?.video_path) ||
+        cleanScriptValue(scene?.assets?.image_path) ||
+        cleanScriptValue(scene?.assets?.audio_path),
+      ),
+    ),
+  );
+  const aiAutoFillEnabled = allowAutoFill && (autoGenerateAudio || autoGenerateImages);
+  const structureCountLabel = totalSceneCount || Number(sceneCount || 0) || 0;
+  const structureHints = [
+    workflowFlags.hasNarration ? "含旁白线" : "",
+    workflowFlags.hasOnscreenText ? "含屏幕文字" : "",
+    workflowFlags.hasVisualStyle ? "含视觉风格约束" : "",
+    workflowFlags.hasBgm && enableBgm ? "含 BGM 建议" : "",
+  ].filter(Boolean);
+  const timelineItems = (() => {
+    let cursor = 0;
+    return (script?.scenes || []).map((scene, index) => {
+      const duration = sceneDuration(scene);
+      const start = cursor;
+      const end = cursor + duration;
+      cursor = end;
+      return {
+        id: scene.id || `segment-${index + 1}`,
+        index,
+        title: scene.title || `结构段 ${index + 1}`,
+        start,
+        end,
+        duration,
+        summary: cleanScriptValue(
+          scene?.summary ||
+          scene?.audio_narration ||
+          scene?.narration ||
+          scene?.onscreen_text ||
+          scene?.visual_prompt,
+        ).slice(0, 96) || "等待后续补齐内容",
+        status: scene?.status || "draft",
+      };
     });
-  }
+  })();
 
-  function updateScriptSceneEdit(sceneId, key, value) {
-    updateScriptScene(sceneId, `edit.${key}`, value);
+  function collectSourcePaths() {
+    return [
+      ...(Array.isArray(result?.parsed_input?.source_paths) ? result.parsed_input.source_paths : []),
+      ...(Array.isArray(result?.metadata?.source_paths) ? result.metadata.source_paths : []),
+      ...externalMaterials.split(/\r?\n|[,，;]/).map((item) => item.trim()).filter(Boolean),
+    ].filter(Boolean);
   }
 
   async function handleSaveCurrentScript() {
@@ -3220,7 +2558,15 @@ function JianyingNaturalScriptPanel() {
     setSavingScript(true);
     setError("");
     try {
-      const saved = await saveVideoScript(currentProjectId, script);
+      const nextScript = {
+        ...script,
+        bible: {
+          ...createScriptFallbackBible(script),
+          ...(script?.bible || {}),
+          ...(enableBgm ? { bgm_keywords: customBgmKeywords.trim() || deriveBgmKeywords(script) } : { bgm_keywords: "" }),
+        },
+      };
+      const saved = await saveVideoScript(currentProjectId, nextScript);
       setResult(saved);
       return saved;
     } catch (err) {
@@ -3237,14 +2583,31 @@ function JianyingNaturalScriptPanel() {
     setError("");
     setDraftBuildResult(null);
     try {
-      const saved = (await handleSaveCurrentScript()) || result;
-      const latestScript = saved?.script || script;
+      let working = (await handleSaveCurrentScript()) || result;
+      const sourcePaths = collectSourcePaths();
+      if (sourcePaths.length || aiAutoFillEnabled) {
+        const prepared = await prepareVideoScriptAssets(currentProjectId, {
+          script: working?.script || script,
+          sourcePaths,
+          resolveLocalMaterials: sourcePaths.length > 0,
+          generateAudio: allowAutoFill && autoGenerateAudio,
+          generateImages: allowAutoFill && autoGenerateImages,
+          generateVideos: false,
+          overwriteExisting: false,
+        });
+        working = prepared;
+        setResult(prepared);
+        setPrepareReport(prepared?.prepare_report || null);
+      } else if (!hasExistingAssets) {
+        throw new Error("请先输入第三方素材路径，或开启 AI 自动补齐。");
+      }
+      const latestScript = working?.script || script;
       const response = await createJianyingDraftFromScript({
-        name: `${latestScript?.config?.title || currentProjectId}-sdk-draft`,
+        name: draftName.trim() || createDateDraftName(),
         script: latestScript,
         engine: "sdk",
         includeOnscreenText: true,
-        subtitleFromNarration: false,
+        subtitleFromNarration,
         defaultMediaDurationSeconds: 3,
         textStyle: {
           size: 5,
@@ -3277,22 +2640,21 @@ function JianyingNaturalScriptPanel() {
     setError("");
     setDraftBuildResult(null);
     try {
-      const sourcePaths = [
-        ...(Array.isArray(result?.parsed_input?.source_paths) ? result.parsed_input.source_paths : []),
-        ...(Array.isArray(result?.metadata?.source_paths) ? result.metadata.source_paths : []),
-      ].filter(Boolean);
+      const sourcePaths = collectSourcePaths();
+      if (!sourcePaths.length && !aiAutoFillEnabled) {
+        throw new Error("请先输入第三方素材路径，或开启 AI 自动补齐。");
+      }
       const response = await prepareVideoScriptAssets(currentProjectId, {
         script,
         sourcePaths,
-        resolveLocalMaterials: true,
-        generateAudio: true,
-        generateImages: true,
+        resolveLocalMaterials: sourcePaths.length > 0,
+        generateAudio: allowAutoFill && autoGenerateAudio,
+        generateImages: allowAutoFill && autoGenerateImages,
         generateVideos: false,
         overwriteExisting: false,
       });
       setResult(response);
       setPrepareReport(response?.prepare_report || null);
-      setSelectedSceneId(response?.script?.scenes?.[0]?.id || selectedSceneId);
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -3301,17 +2663,22 @@ function JianyingNaturalScriptPanel() {
   }
 
   return (
-    <section className="jianying-script-layout">
+    <section className="jianying-workflow-shell">
       <form className="panel jianying-natural-form" onSubmit={handleSubmit}>
         <div className="panel-header">
           <div>
-            <h2>自然语言生成结构化剧本</h2>
-            <p>植入 JianYing Editor Skill 的输入解析规则，把一句剪辑需求变成可继续生成素材、配音和剪映草稿的 `script.json`。</p>
+            <h2>AI 出剧本，补齐素材后直接生成草稿</h2>
+            <p>AI 先生成一份能进入下一步的内部结构规范，不要求你在这里逐镜头编辑。</p>
           </div>
-          <Badge status="ready">Parser</Badge>
+          <Badge status="ready">Workflow</Badge>
+        </div>
+        <div className="workflow-intro-strip">
+          <span>1. AI 生成内部结构规范</span>
+          <span>2. 贴入第三方素材路径</span>
+          <span>3. 自动补齐并生成剪映草稿</span>
         </div>
         <label className="textarea-label">
-          剪辑需求
+          剧本需求
           <textarea value={input} onChange={(event) => setInput(event.target.value)} rows={7} required />
         </label>
         <div className="script-chassis-grid">
@@ -3327,7 +2694,7 @@ function JianyingNaturalScriptPanel() {
             </select>
           </label>
           <label>总时长<input type="number" min="5" max="600" value={durationSeconds} onChange={(event) => setDurationSeconds(event.target.value)} placeholder="自动" /></label>
-          <label>分镜数<input type="number" min="1" max="30" value={sceneCount} onChange={(event) => setSceneCount(event.target.value)} placeholder="自动" /></label>
+          <label>结构段数<input type="number" min="1" max="30" value={sceneCount} onChange={(event) => setSceneCount(event.target.value)} placeholder="自动" /></label>
           <label>
             画幅
             <select value={resolution} onChange={(event) => setResolution(event.target.value)}>
@@ -3337,23 +2704,28 @@ function JianyingNaturalScriptPanel() {
               <option value="1:1">1:1</option>
             </select>
           </label>
-          <label>
-            AI Provider
-            <select value={provider} onChange={(event) => setProvider(event.target.value)}>
-              <option value="">使用当前全局 AI</option>
-              <option value="mock">mock 调试</option>
-            </select>
-          </label>
-          <label>
-            生成方式
-            <select value={generationMode} onChange={(event) => setGenerationMode(event.target.value)}>
-              <option value="local">本地结构化生成</option>
-              <option value="skill_contract">Skill 规则生成</option>
-            </select>
-          </label>
         </div>
+        <details className="workflow-advanced">
+          <summary>高级生成设置</summary>
+          <div className="workflow-advanced-grid">
+            <label>
+              AI Provider
+              <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+                <option value="">使用当前全局 AI</option>
+                <option value="mock">mock 调试</option>
+              </select>
+            </label>
+            <label>
+              生成方式
+              <select value={generationMode} onChange={(event) => setGenerationMode(event.target.value)}>
+                <option value="local">本地结构化生成</option>
+                <option value="skill_contract">Skill 规则生成</option>
+              </select>
+            </label>
+          </div>
+        </details>
         <button className="primary-button" type="submit" disabled={submitting || !input.trim()}>
-          {submitting ? "提交中" : "生成结构化剧本"}
+          {submitting ? "提交中" : "先生成剧本"}
         </button>
         {task && (
           <div className="running-note">
@@ -3363,56 +2735,143 @@ function JianyingNaturalScriptPanel() {
         {error && <div className="error-box">{error}</div>}
       </form>
 
-      <section className="panel">
+      <section className="panel workflow-stage-panel">
         <div className="panel-header">
           <div>
-            <h2>解析结果</h2>
-            <p>{parsed ? `识别意图：${parsed.intent}` : "生成完成后会显示解析出的意图、参数和结构化镜头。"}</p>
+            <h2>素材路径与补齐策略</h2>
+            <p>{parsed ? `已识别为 ${parsed.intent}，下面只保留进入下一步真正需要的结构信息。` : "先生成结构规范，再输入素材路径和补齐策略。"}</p>
           </div>
-          <Badge>{generationModeLabel(currentMode)} · {script?.scenes?.length || 0} 镜</Badge>
+          <Badge status={readySceneCount === totalSceneCount && totalSceneCount > 0 ? "ready" : "draft"}>
+            {readySceneCount}/{totalSceneCount} 段已补齐
+          </Badge>
         </div>
-        {parsed && (
-          <details className="raw-json" open>
-            <summary>自然语言解析参数</summary>
-            <pre className="result-box">{JSON.stringify(parsed.request, null, 2)}</pre>
-          </details>
-        )}
         {script ? (
           <>
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <h2>素材整理与草稿生成</h2>
-                  <p>在这里补齐每个分镜的素材路径；保存后可直接一步走 `JyProject` 生成草稿。</p>
-                </div>
-                <Badge status="ready">素材整理</Badge>
+            <section className="workflow-summary-grid compact">
+              <article className="workflow-summary-card hero">
+                <strong>{script?.config?.title || "未命名结构规范"}</strong>
+                <p>{generationModeLabel(currentMode)} · {structureCountLabel} 段 · {script?.config?.total_duration_seconds || durationSeconds || "自动"} 秒 · {script?.config?.resolution || "9:16"}</p>
+              </article>
+              <article className="workflow-summary-card">
+                <strong>素材策略</strong>
+                <p>{hasExternalMaterials ? "已输入第三方素材路径" : "可以直接粘贴素材路径，也可以完全交给 AI 补齐"}</p>
+              </article>
+              <article className="workflow-summary-card">
+                <strong>可选能力</strong>
+                <p>{[
+                  subtitleFromNarration ? "字幕开启" : "字幕关闭",
+                  enableBgm ? "BGM 可选" : "不写入 BGM",
+                  aiAutoFillEnabled ? "AI 补齐开启" : "仅用现有素材",
+                ].join(" · ")}</p>
+              </article>
+            </section>
+            {parsed && (
+              <div className="workflow-brief-card">
+                <strong>内部规范已生成</strong>
+                <p>AI 已把你的需求整理成可继续补素材、补配音并生成 `JyProject` 草稿的内部结构。这里不再要求你逐段编辑。</p>
               </div>
-              <ScriptSceneWorkbench
-                script={script}
-                selectedSceneId={selectedSceneId}
-                onSelectScene={setSelectedSceneId}
-                onUpdateScene={updateScriptScene}
-                onUpdateSceneEdit={updateScriptSceneEdit}
-              />
+            )}
+            <section className="workflow-timeline-panel">
+              <div className="workflow-timeline-head">
+                <div>
+                  <h3>结构时间线预览</h3>
+                  <p>这里只确认结构段和节奏，不做分镜级编辑。后续素材可以手动指定，也可以交给 AI 自动补齐。</p>
+                </div>
+                <Badge>{timelineItems.length} 段</Badge>
+              </div>
+              <div className="workflow-chip-row">
+                {(structureHints.length ? structureHints : ["已生成可继续执行的最小结构规范"]).map((item) => (
+                  <span key={item}>{item}</span>
+                ))}
+              </div>
+              <div className="workflow-timeline-list">
+                {timelineItems.map((item) => (
+                  <article className="workflow-timeline-item" key={item.id}>
+                    <div className="workflow-timeline-mark">
+                      <strong>{formatTimelineMark(item.start)} - {formatTimelineMark(item.end)}</strong>
+                      <span>{item.duration}s</span>
+                    </div>
+                    <div className="workflow-timeline-content">
+                      <div className="workflow-timeline-title">
+                        <strong>{item.title}</strong>
+                        <Badge status={item.status === "ready" || item.status === "partial_ready" ? item.status : "draft"}>
+                          {statusText[item.status] || "草稿"}
+                        </Badge>
+                      </div>
+                      <p>{item.summary}</p>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+            <section className="workflow-main-stage">
+              <div className="workflow-main-head">
+                <div>
+                  <h3>生成草稿前最后一步</h3>
+                  <p>输入第三方素材路径；如果你不想手动准备全部素材，也可以打开 AI 自动补齐，让系统补画面、补配音后直接生成草稿。</p>
+                </div>
+                <Badge status={prepareReport ? "ready" : "draft"}>{prepareReport ? "已运行自动补齐" : "等待补齐"}</Badge>
+              </div>
+              <div className="workflow-inline-extra">
+                <label>
+                  草稿名称
+                  <input value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="例如：2026年5月9日16时22分" />
+                </label>
+                <label>
+                  第三方素材路径
+                  <textarea value={externalMaterials} onChange={(event) => setExternalMaterials(event.target.value)} rows={4} placeholder="可粘贴视频、图片、音频路径，支持换行或逗号分隔" />
+                </label>
+                <label>
+                  BGM 检索词
+                  <input value={customBgmKeywords} onChange={(event) => setCustomBgmKeywords(event.target.value)} placeholder="留空则沿用 AI 生成的设定集" disabled={!enableBgm} />
+                </label>
+              </div>
+              <div className="workflow-switch-row">
+                <label className="jianying-check">
+                  <input type="checkbox" checked={enableBgm} onChange={(event) => setEnableBgm(event.target.checked)} />
+                  <span>BGM 可选</span>
+                </label>
+                <label className="jianying-check">
+                  <input type="checkbox" checked={subtitleFromNarration} onChange={(event) => setSubtitleFromNarration(event.target.checked)} />
+                  <span>字幕可选</span>
+                </label>
+                <label className="jianying-check">
+                  <input type="checkbox" checked={allowAutoFill} onChange={(event) => setAllowAutoFill(event.target.checked)} />
+                  <span>缺失素材允许 AI 自动补齐</span>
+                </label>
+              </div>
+              <div className="workflow-switch-row">
+                <label className="jianying-check">
+                  <input type="checkbox" checked={autoGenerateImages} onChange={(event) => setAutoGenerateImages(event.target.checked)} disabled={!allowAutoFill} />
+                  <span>自动补画面</span>
+                </label>
+                <label className="jianying-check">
+                  <input type="checkbox" checked={autoGenerateAudio} onChange={(event) => setAutoGenerateAudio(event.target.checked)} disabled={!allowAutoFill} />
+                  <span>自动补配音</span>
+                </label>
+              </div>
               <div className="script-action-strip">
                 <button className="secondary-action-button" type="button" onClick={handleSaveCurrentScript} disabled={savingScript}>
-                  {savingScript ? "保存中" : "保存素材回填"}
+                  {savingScript ? "保存中" : "保存内部规范"}
                 </button>
-                <button
-                  className="secondary-action-button"
-                  type="button"
-                  onClick={handlePrepareAssets}
-                  disabled={savingScript || preparingAssets}
-                >
-                  {preparingAssets ? "准备中" : "自动准备素材"}
+                <button className="secondary-action-button" type="button" onClick={handlePrepareAssets} disabled={savingScript || preparingAssets}>
+                  {preparingAssets ? "补齐中" : "自动补齐素材"}
                 </button>
                 <button className="primary-button" type="button" onClick={handleBuildSdkDraftFromCurrentScript} disabled={savingScript || buildingSdkDraft}>
-                  {buildingSdkDraft ? "生成中" : "补齐素材后一步生成 JyProject 草稿"}
+                  {buildingSdkDraft ? "生成中" : "补齐素材并生成草稿"}
                 </button>
+              </div>
+              <div className="workflow-note-strip">
+                <span>外部素材</span>
+                <strong>{hasExternalMaterials ? "已提供路径" : "未提供"}</strong>
+                <span>AI 补齐</span>
+                <strong>{aiAutoFillEnabled ? "开启" : "关闭"}</strong>
+                <span>现有素材</span>
+                <strong>{hasExistingAssets ? "已有绑定" : "尚未绑定"}</strong>
               </div>
               {prepareReport && (
                 <div className="running-note">
-                  已准备 {prepareReport.ready_scene_count || 0}/{prepareReport.scene_count || 0} 个分镜
+                  已准备 {prepareReport.ready_scene_count || 0}/{prepareReport.scene_count || 0} 个结构段
                   {prepareReport.generated_assets_dir ? ` · 输出目录：${prepareReport.generated_assets_dir}` : ""}
                 </div>
               )}
@@ -3440,14 +2899,9 @@ function JianyingNaturalScriptPanel() {
                 </details>
               )}
             </section>
-            <ScriptShotTable script={script} />
-            <details className="raw-json">
-              <summary>查看 script.json</summary>
-              <pre className="result-box">{JSON.stringify(script, null, 2)}</pre>
-            </details>
           </>
         ) : (
-          <div className="empty-result">等待生成结构化剧本。</div>
+          <div className="empty-result">等待生成内部结构规范。</div>
         )}
       </section>
 
@@ -3455,7 +2909,7 @@ function JianyingNaturalScriptPanel() {
         <div className="panel-header">
           <div>
             <h2>已生成剧本</h2>
-            <p>结构化剧本在这里查看和删除；真正生成剪映工程后才会进入“查看草稿”。</p>
+            <p>这里只保留历史结构规范，方便重新打开继续补素材或直接生成草稿。</p>
           </div>
           <button className="text-button" type="button" onClick={() => loadScriptProjects().catch((err) => setError(err.message || String(err)))}>
             刷新
@@ -3469,7 +2923,7 @@ function JianyingNaturalScriptPanel() {
                 <p>{project.script_path}</p>
               </div>
               <div className="draft-project-meta">
-                <Badge status="ready">{project.scene_count || 0} 镜</Badge>
+                <Badge status={project.status === "script_ready" ? "ready" : "draft"}>{project.scene_count || 0} 段</Badge>
                 <Badge>{generationModeLabel(project.generation_mode)}</Badge>
                 <span>{project.genre || "未分类"}</span>
                 <span>{formatTimestamp(project.updated_at)}</span>
@@ -3484,171 +2938,6 @@ function JianyingNaturalScriptPanel() {
           )) : <div className="empty-result">还没有生成结构化剧本。</div>}
         </div>
       </section>
-    </section>
-  );
-}
-
-function DraftGeneratorToolPanel() {
-  const [theme, setTheme] = useState("随机东方玄幻爱情短视频");
-  const [aspectRatio, setAspectRatio] = useState("9:16");
-  const [sceneCount, setSceneCount] = useState(5);
-  const [provider, setProvider] = useState("");
-  const [draftName, setDraftName] = useState("");
-  const [jsonResult, setJsonResult] = useState(null);
-  const [buildResult, setBuildResult] = useState(null);
-  const [loadingJson, setLoadingJson] = useState(false);
-  const [buildingDraft, setBuildingDraft] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-
-  async function handleGenerateJson() {
-    setLoadingJson(true);
-    setError("");
-    setMessage("");
-    try {
-      const data = await generateRandomDraftJson({ theme, aspectRatio, sceneCount, provider });
-      setJsonResult(data.draft_json || null);
-      setMessage("AI 已生成一份随机 draft JSON");
-    } catch (err) {
-      setError(err.message || String(err));
-    } finally {
-      setLoadingJson(false);
-    }
-  }
-
-  async function handleBuildDraft() {
-    if (!jsonResult) return;
-    setBuildingDraft(true);
-    setError("");
-    setMessage("");
-    try {
-      const data = await createJianyingDraftFromScript({
-        name: draftName,
-        script: {
-          project_id: `random-${Date.now()}`,
-          config: {
-            title: draftName,
-            resolution: jsonResult.aspect_ratio || "9:16",
-            total_duration_seconds: (jsonResult.texts || []).reduce((sum, item) => sum + Number(item.duration_seconds || 0), 0),
-          },
-          scenes: (jsonResult.texts || []).map((item, index) => ({
-            id: index + 1,
-            onscreen_text: item.text || "",
-            audio_narration: item.text || "",
-            estimated_duration: Number(item.duration_seconds || 3),
-            assets: { video_path: "", image_path: "", audio_path: "", duration: 0 },
-          })),
-        },
-        includeOnscreenText: true,
-        subtitleFromNarration: false,
-        defaultMediaDurationSeconds: 3,
-        textStyle: (jsonResult.texts || [])[0]?.style || {},
-        textBackground: (jsonResult.texts || [])[0]?.background || {},
-      });
-      setBuildResult(data);
-      setMessage("已根据随机 JSON 生成剪映草稿");
-    } catch (err) {
-      setError(err.message || String(err));
-    } finally {
-      setBuildingDraft(false);
-    }
-  }
-
-  async function handleOpenDraftPath(path) {
-    try {
-      await openJianyingDraftPath(path);
-    } catch (err) {
-      setError(err.message || String(err));
-    }
-  }
-
-  async function handleCopyPath(path) {
-    try {
-      await navigator.clipboard.writeText(path);
-      setMessage("草稿路径已复制");
-    } catch (err) {
-      setError(err.message || String(err));
-    }
-  }
-
-  return (
-    <section className="panel settings-wide">
-      <div className="panel-header">
-        <div>
-          <h2>剪映草稿生成器</h2>
-          <p>先让 AI 随机生成一份合理的 draft JSON，再直接生成 pyJianYingDraft 草稿。</p>
-        </div>
-        <Badge status="ready">Tool</Badge>
-      </div>
-
-      <section className="collector-card">
-        <h3>随机 JSON</h3>
-        <div className="collector-fields">
-          <label>
-            主题
-            <input value={theme} onChange={(event) => setTheme(event.target.value)} />
-          </label>
-          <label>
-            比例
-            <select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}>
-              <option value="9:16">9:16</option>
-              <option value="16:9">16:9</option>
-              <option value="1:1">1:1</option>
-            </select>
-          </label>
-          <label>
-            场景数
-            <input type="number" min="1" max="12" value={sceneCount} onChange={(event) => setSceneCount(event.target.value)} />
-          </label>
-          <label>
-            AI Provider
-            <input value={provider} onChange={(event) => setProvider(event.target.value)} placeholder="留空使用全局配置" />
-          </label>
-          <label>
-            草稿名称
-            <input value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="留空则用当前时间命名" />
-          </label>
-        </div>
-        <div className="script-action-strip">
-          <button className="primary-button" type="button" onClick={handleGenerateJson} disabled={loadingJson}>
-            <Sparkles size={16} />
-            {loadingJson ? "生成中" : "AI 随机生成 JSON"}
-          </button>
-          <button className="primary-button" type="button" onClick={handleBuildDraft} disabled={buildingDraft || !jsonResult}>
-            {buildingDraft ? "生成中" : "用 JSON 生成草稿"}
-          </button>
-        </div>
-      </section>
-
-      {message && <div className="running-note">{message}</div>}
-      {error && <div className="error-box">{error}</div>}
-
-      {jsonResult && (
-        <section className="collector-card">
-          <h3>随机生成的 Draft JSON</h3>
-          <pre className="result-box">{JSON.stringify(jsonResult, null, 2)}</pre>
-        </section>
-      )}
-
-      {buildResult && (
-        <section className="collector-card">
-          <h3>草稿生成结果</h3>
-          <div className="jianying-result-grid">
-            <div><strong>状态</strong><p>{buildResult.status || "-"}</p></div>
-            <div><strong>草稿目录</strong><p>{buildResult.draft_path || "-"}</p></div>
-            <div><strong>草稿名称</strong><p>{buildResult.name || "-"}</p></div>
-            <div><strong>来源</strong><p>{buildResult.source_script?.project_id || "random-json"}</p></div>
-          </div>
-          <div className="script-action-strip">
-            <button className="primary-button" type="button" onClick={() => handleOpenDraftPath(buildResult.draft_path)} disabled={!buildResult.draft_path}>
-              打开草稿目录
-            </button>
-            <button className="text-button" type="button" onClick={() => handleCopyPath(buildResult.draft_path)} disabled={!buildResult.draft_path}>
-              复制草稿路径
-            </button>
-          </div>
-        </section>
-      )}
     </section>
   );
 }
@@ -3820,12 +3109,38 @@ function DraftDetailContent({ projectDetail }) {
   const content = projectDetail.draft_content || {};
   const materialIndex = buildMaterialIndex(content.materials);
   const segments = flattenDraftSegments(content.tracks, materialIndex);
+  const readable = projectDetail.readable || {};
+  const identity = readable.identity || {};
+  const canvas = readable.canvas || {};
+  const timeline = readable.timeline || {};
+  const materials = readable.materials || {};
+  const texts = readable.texts || {};
+  const effects = readable.effects || {};
+  const projectFiles = readable.project_files || [];
 
   return (
     <div className="draft-detail-body">
+      <section className="draft-detail-section">
+        <h4>草稿概览</h4>
+        <div className="workflow-summary-grid compact">
+          <article className="workflow-summary-card hero">
+            <strong>{identity.name || projectDetail.summary?.draft_name || "未命名草稿"}</strong>
+            <p>{readable.overview || "这里会总结这个草稿的时长、轨道和主要素材结构。"}</p>
+          </article>
+          <article className="workflow-summary-card">
+            <strong>创建时间</strong>
+            <p>{identity.created_at || "未记录"}</p>
+          </article>
+          <article className="workflow-summary-card">
+            <strong>最后修改</strong>
+            <p>{identity.modified_at || projectDetail.summary?.modified_at || "未记录"}</p>
+          </article>
+        </div>
+      </section>
+
       <div className="draft-canvas-detail">
         <div><strong>画布比例</strong><p>{projectDetail.summary?.canvas?.ratio || "-"}</p></div>
-        <div><strong>画布尺寸</strong><p>{formatCanvasSize(projectDetail.summary?.canvas)}</p></div>
+        <div><strong>画布尺寸</strong><p>{canvas.size || formatCanvasSize(projectDetail.summary?.canvas)}</p></div>
         <div><strong>草稿时长</strong><p>{formatDuration(projectDetail.summary?.duration_seconds)}</p></div>
         <div><strong>轨道数量</strong><p>{projectDetail.summary?.track_count ?? "-"}</p></div>
         <div><strong>轨道类型</strong><p>{Array.isArray(projectDetail.summary?.track_types) ? projectDetail.summary.track_types.join(", ") : "-"}</p></div>
@@ -3835,24 +3150,64 @@ function DraftDetailContent({ projectDetail }) {
       </div>
 
       <section className="draft-detail-section">
-        <h4>draft_content 顶层字段</h4>
-        <div className="draft-chip-grid">
-          {Object.keys(content).map((key) => <span key={key}>{key}</span>)}
+        <h4>时间线说明</h4>
+        <div className="workflow-summary-grid compact">
+          <article className="workflow-summary-card">
+            <strong>轨道结构</strong>
+            <p>{timeline.track_headline || "暂无轨道摘要"}</p>
+          </article>
+          <article className="workflow-summary-card">
+            <strong>可读文字</strong>
+            <p>{texts.headline || "暂无文字摘要"}</p>
+          </article>
+          <article className="workflow-summary-card">
+            <strong>素材来源</strong>
+            <p>{materials.headline || "暂无素材摘要"}</p>
+          </article>
         </div>
       </section>
 
       <section className="draft-detail-section">
         <h4>轨道</h4>
         <div className="draft-track-list">
-          {projectDetail.details?.track_details?.length ? projectDetail.details.track_details.map((track) => (
+          {timeline.track_explanations?.length ? timeline.track_explanations.map((track) => (
             <article className="draft-track-row" key={track.id || `${track.type}-${track.segments}`}>
-              <strong>{track.name || track.type || "未命名轨道"}</strong>
-              <span>{track.segments} segments</span>
-              <p>{track.id}</p>
+              <strong>{track.title}</strong>
+              <span>{track.segments} 段</span>
+              <p>{track.explanation}</p>
             </article>
           )) : <div className="empty-result">没有轨道数据。</div>}
         </div>
       </section>
+
+      {texts.items?.length > 0 && (
+        <section className="draft-detail-section">
+          <h4>文字内容</h4>
+          <div className="draft-material-items">
+            {texts.items.map((item, index) => (
+              <article className="draft-material-row" key={`${item.title}-${index}`}>
+                <strong>{item.title}</strong>
+                <p>{item.content}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {materials.sources?.length > 0 && (
+        <section className="draft-detail-section">
+          <h4>素材来源</h4>
+          <div className="draft-material-items">
+            {materials.sources.map((item, index) => (
+              <article className="draft-material-row" key={`${item.group}-${item.path}-${index}`}>
+                <strong>{item.title}</strong>
+                <p>{item.path}</p>
+                <code>{item.group}</code>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="draft-detail-section">
         <h4>时间线片段</h4>
@@ -3893,11 +3248,35 @@ function DraftDetailContent({ projectDetail }) {
       </section>
 
       <section className="draft-detail-section">
-        <h4>关键帧 / 配置</h4>
+        <h4>特效 / 配置</h4>
+        <div className="workflow-summary-card">
+          <strong>解释</strong>
+          <p>{effects.headline || "无明显特效或配置项。"}</p>
+          <div className="draft-chip-grid">
+            {objectEntries(projectDetail.details?.keyframe_counts).map(([key, value]) => <span key={key}>{key}: {value}</span>)}
+            {(projectDetail.details?.config_keys || []).map((key) => <span key={key}>config: {key}</span>)}
+            {!objectEntries(projectDetail.details?.keyframe_counts).length && !(projectDetail.details?.config_keys || []).length && <span>无关键帧配置</span>}
+          </div>
+        </div>
+      </section>
+
+      <section className="draft-detail-section">
+        <h4>项目文件</h4>
+        <div className="draft-material-items">
+          {projectFiles.length ? projectFiles.map((item) => (
+            <article className="draft-material-row" key={item.relative_path || item.name}>
+              <strong>{item.name}</strong>
+              <p>{item.relative_path}</p>
+              <code>{item.status}{item.needs_decrypt ? " · 可能需解密" : ""}</code>
+            </article>
+          )) : <div className="empty-result">没有列出项目文件。</div>}
+        </div>
+      </section>
+
+      <section className="draft-detail-section">
+        <h4>草稿结构字段</h4>
         <div className="draft-chip-grid">
-          {objectEntries(projectDetail.details?.keyframe_counts).map(([key, value]) => <span key={key}>{key}: {value}</span>)}
-          {(projectDetail.details?.config_keys || []).map((key) => <span key={key}>config: {key}</span>)}
-          {!objectEntries(projectDetail.details?.keyframe_counts).length && !(projectDetail.details?.config_keys || []).length && <span>无关键帧配置</span>}
+          {Object.keys(content).map((key) => <span key={key}>{key}</span>)}
         </div>
       </section>
 
@@ -5152,16 +4531,7 @@ function App() {
 
         {activeSection === "tools" && (
           <section>
-            {activeToolId === "draft-generator" ? (
-              <>
-                <div className="section-toolbar">
-                  <button className="text-button" type="button" onClick={() => setActiveToolId("")}>
-                    返回工具列表
-                  </button>
-                </div>
-                <DraftGeneratorToolPanel />
-              </>
-            ) : activeToolId === "jianying-editor-sdk" ? (
+            {activeToolId === "jianying-editor-sdk" ? (
               <>
                 <div className="section-toolbar">
                   <button className="text-button" type="button" onClick={() => setActiveToolId("")}>
@@ -5211,12 +4581,6 @@ function App() {
             ) : (
               <JianyingEditorSdkPanel activeView={activeJianyingEditor} />
             )}
-          </section>
-        )}
-
-        {activeSection === "draftGenerator" && (
-          <section>
-            <DraftGeneratorToolPanel />
           </section>
         )}
 
