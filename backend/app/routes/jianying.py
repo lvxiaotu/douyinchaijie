@@ -83,6 +83,7 @@ class DraftFromScriptRequest(BaseModel):
     name: str = Field(default="")
     script_path: str | None = Field(default=None)
     script: dict[str, Any] | None = Field(default=None)
+    engine: str = Field(default="pyjianying")
     include_onscreen_text: bool = Field(default=True)
     subtitle_from_narration: bool = Field(default=False)
     default_media_duration_seconds: float = Field(default=3, ge=0.1, le=600)
@@ -359,11 +360,19 @@ def create_draft_from_script(payload: DraftFromScriptRequest) -> dict[str, Any]:
                 "canvas": result.get("canvas") or {},
                 "request": result.get("draft_request") or {},
                 "source_script": result.get("source_script") or {},
+                "engine": result.get("engine") or request_payload.get("engine") or "pyjianying",
             },
         )
         if result.get("status") == "dependency_missing":
             saved["note"] = "pyJianYingDraft is not installed yet; created a placeholder draft directory."
-        return {**saved, "source_script": result.get("source_script") or {}}
+        return {
+            **saved,
+            "source_script": result.get("source_script") or {},
+            "engine": result.get("engine") or request_payload.get("engine") or "pyjianying",
+            "applied_edits": result.get("applied_edits") or [],
+            "protocol_encoding": result.get("protocol_encoding") or {},
+            "output": result.get("output") or {},
+        }
     except Exception as exc:
         raise integration_error(exc) from exc
 

@@ -610,6 +610,13 @@ def get_jianying_draft(draft_id: str) -> dict[str, Any] | None:
     return row_to_jianying_draft(row) if row else None
 
 
+def delete_jianying_draft(draft_id: str) -> bool:
+    init_db()
+    with connect() as connection:
+        cursor = connection.execute("DELETE FROM jianying_drafts WHERE id = ?", (draft_id,))
+    return cursor.rowcount > 0
+
+
 def list_jianying_drafts(*, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     init_db()
     values: list[Any] = []

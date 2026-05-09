@@ -261,6 +261,7 @@ export function createJianyingDraftFromScript(payload) {
     name: payload.name || "",
     script_path: payload.scriptPath || undefined,
     script: payload.script || undefined,
+    engine: payload.engine || "pyjianying",
     include_onscreen_text: Boolean(payload.includeOnscreenText),
     subtitle_from_narration: Boolean(payload.subtitleFromNarration),
     default_media_duration_seconds: Number(payload.defaultMediaDurationSeconds || 3),
@@ -306,6 +307,15 @@ export function listJianyingDraftProjects(draftRoot) {
   });
 }
 
+export async function fetchJianyingEditorSdkStatus() {
+  const response = await fetch(`${API_BASE}/api/tools/jianying-editor-sdk/status`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
 export function generateVideoScript(payload) {
   return postJson("/api/tools/video-script/generate", {
     title: payload.title,
@@ -320,6 +330,19 @@ export function generateVideoScript(payload) {
     duration_seconds: Number(payload.durationSeconds || 30),
     scene_count: Number(payload.sceneCount || 5),
     resolution: payload.resolution || "9:16",
+    provider: payload.provider || undefined,
+  });
+}
+
+export function generateJianyingNaturalScript(payload) {
+  return postJson("/api/tools/video-script/natural-language/generate", {
+    input: payload.input,
+    title: payload.title || "",
+    creative_preset: payload.creativePreset || "",
+    duration_seconds: payload.durationSeconds ? Number(payload.durationSeconds) : undefined,
+    scene_count: payload.sceneCount ? Number(payload.sceneCount) : undefined,
+    resolution: payload.resolution || "",
+    generation_mode: payload.generationMode || "local",
     provider: payload.provider || undefined,
   });
 }
@@ -416,6 +439,25 @@ export function expandVideoScript(projectId, payload) {
     idea: payload.idea || "",
     expand_count: Number(payload.expandCount || 1),
     provider: payload.provider || undefined,
+  });
+}
+
+export function prepareVideoScriptAssets(projectId, payload) {
+  return postJson(`/api/tools/video-script/${encodeURIComponent(projectId)}/prepare-assets`, {
+    script: payload.script || undefined,
+    source_paths: payload.sourcePaths || [],
+    resolve_local_materials: payload.resolveLocalMaterials !== false,
+    generate_audio: payload.generateAudio !== false,
+    generate_images: payload.generateImages !== false,
+    generate_videos: Boolean(payload.generateVideos),
+    overwrite_existing: Boolean(payload.overwriteExisting),
+    ffprobe_binary: payload.ffprobeBinary || "ffprobe",
+    tts_provider: payload.ttsProvider || "openai",
+    tts_model: payload.ttsModel || "gpt-4o-mini-tts",
+    tts_voice: payload.ttsVoice || "alloy",
+    tts_format: payload.ttsFormat || "mp3",
+    image_provider: payload.imageProvider || "gemini",
+    image_model: payload.imageModel || "imagen-4.0-generate-001",
   });
 }
 

@@ -12,6 +12,7 @@ from .routes.ai_prompt_reverse import router as ai_prompt_reverse_router
 from .routes.douyin import router as douyin_router
 from .routes.draft_playground import router as draft_playground_router
 from .routes.jianying import router as jianying_router
+from .routes.jianying_editor_sdk import router as jianying_editor_sdk_router
 from .routes.studio import router as studio_router
 from .routes.tasks import router as tasks_router
 from .routes.video_script import router as video_script_router
@@ -47,6 +48,7 @@ app.include_router(tasks_router)
 app.include_router(video_script_router)
 app.include_router(draft_playground_router)
 app.include_router(jianying_router)
+app.include_router(jianying_editor_sdk_router)
 app.include_router(studio_router)
 
 

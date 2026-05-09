@@ -2302,6 +2302,138 @@ h1 {
   line-height: 1.55;
 }
 
+.jianying-sdk-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.sdk-hero-panel .panel-header p {
+  max-width: 720px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sdk-summary-grid {
+  display: grid;
+  grid-template-columns: 0.5fr minmax(0, 1.5fr) 0.5fr;
+  gap: 12px;
+}
+
+.sdk-summary-grid > div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.sdk-summary-grid span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sdk-summary-grid strong,
+.sdk-summary-grid a {
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.sdk-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.35fr) minmax(0, 0.65fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.sdk-layout.single {
+  grid-template-columns: 1fr;
+}
+
+.sdk-entry-list {
+  display: grid;
+  gap: 10px;
+}
+
+.sdk-entry {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.sdk-entry p {
+  margin: 5px 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.sdk-entry code {
+  color: var(--teal);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.sdk-guide-panel {
+  min-width: 0;
+}
+
+.sdk-guide-frame {
+  width: 100%;
+  height: min(72vh, 760px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.sdk-guide-frame.standalone {
+  height: calc(100vh - 210px);
+  min-height: 560px;
+}
+
+.jianying-script-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.42fr) minmax(0, 0.58fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.jianying-natural-form {
+  display: grid;
+  gap: 14px;
+}
+
+.jianying-natural-form .panel-header {
+  margin-bottom: 0;
+}
+
+.jianying-natural-form .panel-header p,
+.jianying-script-layout .panel-header p {
+  max-width: 680px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.jianying-natural-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.jianying-script-history-panel {
+  grid-column: 1 / -1;
+}
+
 .tool-meta,
 .job-meta,
 .library-meta {
@@ -3293,6 +3425,12 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .sdk-layout,
+  .sdk-summary-grid,
+  .jianying-script-layout {
+    grid-template-columns: 1fr;
+  }
+
   .dashboard-grid,
   .sample-grid,
   .settings-grid,
@@ -3444,6 +3582,14 @@ textarea {
   .flow-row,
   .library-layout {
     grid-template-columns: 1fr;
+  }
+
+  .sdk-entry {
+    flex-direction: column;
+  }
+
+  .sdk-guide-frame {
+    height: 68vh;
   }
 
   .library-card {

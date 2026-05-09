@@ -14,10 +14,17 @@ import requests
 from dotenv import load_dotenv
 
 from backend.app.ai_provider_state import active_ai_provider, active_api_format, active_model, openai_compatible_credentials
+from backend.app.task_store import save_jianying_draft
+from integrations.jianying_editor_skill.script_input_parser import (
+    JIANYING_SCRIPT_CONTRACT,
+    JianyingScriptInputParser,
+)
+from integrations.jianying_editor_skill.sdk_script_generator import JianyingEditorSdkScriptGenerator
 from integrations.video_pipeline.script_schema import (
     BibleGenerateRequest,
     BlueprintGenerateRequest,
     ConceptBible,
+    NaturalLanguageScriptRequest,
     ScriptExpandRequest,
     ScriptGenerateRequest,
     VideoScene,
@@ -167,6 +174,69 @@ class VideoScriptGenerator:
         project_id = uuid4().hex
         return self.generate_with_project_id(payload, project_id)
 
+    def generate_from_natural_language(
+        self,
+        payload: NaturalLanguageScriptRequest,
+        project_id: str,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> dict[str, Any]:
+        if progress:
+            progress(8, "解析剪映自然语言输入")
+        parsed = JianyingScriptInputParser().parse(
+            payload.input,
+            title=payload.title,
+            provider=payload.provider,
+            creative_preset=payload.creative_preset,
+            duration_seconds=payload.duration_seconds,
+            scene_count=payload.scene_count,
+            resolution=payload.resolution,
+        )
+        if progress:
+            progress(14, f"识别为 {parsed.intent}，准备生成结构化剧本")
+        generation_mode = payload.generation_mode or "local"
+        if generation_mode == "sdk":
+            result = self.generate_with_sdk_project_id(parsed.script_request, project_id, progress=progress)
+        else:
+            result = self.generate_with_project_id(parsed.script_request, project_id, progress=progress)
+        metadata_path = Path(result["metadata_path"])
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+        metadata["natural_language_input"] = parsed.raw_text
+        metadata["jianying_editor_intent"] = parsed.intent
+        metadata["jianying_editor_notes"] = parsed.notes
+        metadata["source_paths"] = parsed.source_paths
+        metadata["generation_mode"] = generation_mode
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        result["parsed_input"] = {
+            "intent": parsed.intent,
+            "request": parsed.script_request.model_dump(),
+            "source_paths": parsed.source_paths,
+            "notes": parsed.notes,
+        }
+        result["generation_mode"] = generation_mode
+        return result
+
+    def generate_with_sdk_project_id(
+        self,
+        payload: ScriptGenerateRequest,
+        project_id: str,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> dict[str, Any]:
+        if progress:
+            progress(22, "调用 JianYing Editor Skill SDK")
+        generated = JianyingEditorSdkScriptGenerator().generate(payload, project_id)
+        if progress:
+            progress(86, "整理 SDK script.json")
+        return self.save(
+            generated.script,
+            provider=payload.provider or active_ai_provider("mock"),
+            prompt=self._prompt(payload),
+            raw_text=json.dumps(generated.raw_output, ensure_ascii=False, indent=2),
+            metadata_extra={
+                "generation_mode": "sdk",
+                "sdk_notes": generated.notes,
+            },
+        )
+
     def generate_with_project_id(
         self,
         payload: ScriptGenerateRequest,
@@ -208,6 +278,7 @@ class VideoScriptGenerator:
             provider=provider,
             prompt="\n\n--- OUTLINE ---\n\n".join([outline_prompt, self._prompt(payload)]),
             raw_text=outline_text,
+            metadata_extra={"generation_mode": "local"},
         )
 
     def save(
@@ -217,6 +288,7 @@ class VideoScriptGenerator:
         provider: str = "",
         prompt: str = "",
         raw_text: str = "",
+        metadata_extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         project_dir = self.project_dir(script.project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -230,6 +302,8 @@ class VideoScriptGenerator:
             "updated_at": now,
             "script": script.model_dump(),
         }
+        if metadata_extra:
+            record.update(metadata_extra)
         existing = self.load_record(script.project_id)
         if existing:
             record["created_at"] = existing.get("created_at", now)
@@ -241,12 +315,28 @@ class VideoScriptGenerator:
             json.dumps({key: value for key, value in record.items() if key != "script"}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        save_jianying_draft(
+            draft_id=f"script-{script.project_id}",
+            name=script.config.title or f"script-{script.project_id}",
+            draft_path=str(project_dir),
+            source="script_ready",
+            status="script_ready",
+            meta={
+                "script_path": str(project_dir / "script.json"),
+                "metadata_path": str(project_dir / "metadata.json"),
+                "provider": provider,
+                "scene_count": len(script.scenes),
+                "title": script.config.title,
+                "generation_mode": (metadata_extra or {}).get("generation_mode", "local"),
+            },
+        )
         return {
             "project_id": script.project_id,
             "script": script.model_dump(),
             "script_path": str(project_dir / "script.json"),
             "metadata_path": str(project_dir / "metadata.json"),
             "provider": provider,
+            "generation_mode": (metadata_extra or {}).get("generation_mode", "local"),
         }
 
     def expand(self, project_id: str, payload: ScriptExpandRequest) -> dict[str, Any]:
@@ -290,6 +380,7 @@ class VideoScriptGenerator:
                         "genre": script.config.genre,
                         "scene_count": len(script.scenes),
                         "resolution": script.config.resolution,
+                        "generation_mode": metadata.get("generation_mode") or "local",
                         "updated_at": metadata.get("updated_at") or int(script_path.stat().st_mtime),
                         "script_path": str(script_path),
                     }
@@ -320,7 +411,8 @@ class VideoScriptGenerator:
         return "\n\n".join(
             [
                 "你是短视频编导。请把用户灵感拆成可用于剪映草稿生产的结构化分镜剧本。",
-                "请大胆扩写，不要只复述用户的一句话。要补出人物、冲突、转折、爽点、对白和画面动作。",
+                "请大胆扩写，不要只复述用户的一句话。要补出冲突、转折、爽点、画面概括、旁白、屏幕花字和剪辑节奏。",
+                "如果需要人物、对白或动作，请压缩进 summary、audio_narration、onscreen_text、visual_prompt，不要新增 characters、dialogue、action 字段。",
                 "如果用户只写一句话，请自动判断题材并写成有开端、冲突、反转和收束的短剧章节。",
                 f"标题：{payload.title}",
                 f"灵感：{payload.idea}",
@@ -334,6 +426,7 @@ class VideoScriptGenerator:
                 f"分镜数量：{payload.scene_count}",
                 f"总时长：{payload.duration_seconds} 秒",
                 f"视频比例：{payload.resolution}",
+                JIANYING_SCRIPT_CONTRACT,
                 SCRIPT_JSON_CONTRACT,
             ]
         )
@@ -356,6 +449,7 @@ class VideoScriptGenerator:
                 f"行动号召：{payload.cta or preset['cta']}",
                 f"分镜数量：{payload.scene_count}",
                 f"总时长：{payload.duration_seconds} 秒",
+                JIANYING_SCRIPT_CONTRACT,
                 "要求：outline 数量必须等于分镜数量；每一幕只写扁平摘要和预估时长，不写时间戳。",
             ]
         )
@@ -379,6 +473,7 @@ class VideoScriptGenerator:
                 f"当前幕大纲：{json.dumps(current_outline, ensure_ascii=False)}",
                 f"已生成前文：{json.dumps(generated_scenes, ensure_ascii=False)}",
                 f"原始灵感：{payload.idea}",
+                JIANYING_SCRIPT_CONTRACT,
                 "scene JSON 字段：id, title, summary, estimated_duration, scene_goal, visual_prompt, audio_narration, onscreen_text, assets, edit, status。",
                 "重点字段：visual_prompt 给画图 AI；audio_narration 给 TTS；onscreen_text 给屏幕花字。不要把对象塞进字符串。",
                 "要求：只生成扁平原子镜头；禁止 characters、dialogue、action、shot_id、start_time、end_time；assets 路径必须为空，duration 为 0，status 为 waiting_assets。",
@@ -407,8 +502,8 @@ class VideoScriptGenerator:
         return VideoScene.model_validate(
             {
                 "id": scene_id,
-                "title": str(scene.get("title") or scene.get("act_title") or self._default_act_title(scene_id)),
-                "summary": str(scene.get("summary") or scene.get("shot_description") or scene.get("action") or ""),
+                "title": str(scene.get("title") or self._default_act_title(scene_id)),
+                "summary": str(scene.get("summary") or ""),
                 "estimated_duration": float(scene.get("estimated_duration") or 3),
                 "scene_goal": str(scene.get("scene_goal") or ""),
                 "audio_narration": str(scene.get("audio_narration") or scene.get("narration") or scene.get("summary") or ""),
@@ -433,6 +528,7 @@ class VideoScriptGenerator:
                 f"扩写数量：{payload.expand_count}",
                 f"额外灵感：{payload.idea or '承接当前剧情自然推进'}",
                 f"已有剧本：{json.dumps(script.model_dump(), ensure_ascii=False)}",
+                JIANYING_SCRIPT_CONTRACT,
                 SCRIPT_JSON_CONTRACT,
             ]
         )
@@ -534,75 +630,6 @@ class VideoScriptGenerator:
             raise ValueError("AI response is not a JSON object.")
         return data
 
-
-    def _normalize_script(self, data: dict[str, Any], payload: ScriptGenerateRequest, project_id: str) -> VideoScript:
-        preset = self._preset(payload)
-        config = data.get("config") if isinstance(data.get("config"), dict) else {}
-        scenes = data.get("scenes") if isinstance(data.get("scenes"), list) else []
-        normalized_scenes: list[VideoScene] = []
-        for index, scene in enumerate(scenes[: payload.scene_count], start=1):
-            if not isinstance(scene, dict):
-                scene = {}
-            normalized_scenes.append(
-                VideoScene.model_validate(
-                    {
-                        "id": index,
-                        "title": str(scene.get("title") or scene.get("act_title") or self._default_act_title(index)),
-                        "summary": str(scene.get("summary") or scene.get("shot_description") or scene.get("action") or ""),
-                        "estimated_duration": float(scene.get("estimated_duration") or 3),
-                        "scene_goal": str(scene.get("scene_goal") or ""),
-                        "audio_narration": str(scene.get("audio_narration") or scene.get("narration") or scene.get("summary") or ""),
-                        "onscreen_text": str(scene.get("onscreen_text") or ""),
-                        "visual_prompt": str(scene.get("visual_prompt") or ""),
-                        "assets": {
-                            "video_path": "",
-                            "image_path": "",
-                            "audio_path": "",
-                            "duration": 0,
-                        },
-                        "edit": {
-                            "transition": ((scene.get("edit") or {}).get("transition") if isinstance(scene.get("edit"), dict) else None) or "fade",
-                            "animation": ((scene.get("edit") or {}).get("animation") if isinstance(scene.get("edit"), dict) else None) or "zoom_in",
-                            "pacing": ((scene.get("edit") or {}).get("pacing") if isinstance(scene.get("edit"), dict) else None) or "",
-                            "camera": ((scene.get("edit") or {}).get("camera") if isinstance(scene.get("edit"), dict) else None) or "",
-                        },
-                        "status": "waiting_assets",
-                    }
-                )
-            )
-        while len(normalized_scenes) < payload.scene_count:
-            scene_id = len(normalized_scenes) + 1
-            normalized_scenes.append(
-                VideoScene(
-                    id=scene_id,
-                    act_title=self._default_act_title(scene_id),
-                    setting=f"第 {scene_id} 幕场景待完善。",
-                    characters=[],
-                    scene_goal=f"第 {scene_id} 幕叙事目标待完善。",
-                    action=f"第 {scene_id} 幕动作描写待完善。",
-                    dialogue=[],
-                    emotional_beat=f"第 {scene_id} 幕情绪节奏待完善。",
-                    narration=f"第 {scene_id} 幕旁白待完善。",
-                    audio_narration=f"第 {scene_id} 幕旁白待完善。",
-                    onscreen_text=f"第 {scene_id} 幕屏幕文字",
-                    shot_description=f"第 {scene_id} 幕画面描述待完善。",
-                    visual_prompt=f"第 {scene_id} 幕画面素材待整理。",
-                )
-            )
-        return VideoScript(
-            project_id=project_id,
-            config=VideoScriptConfig(
-                title=str(config.get("title") or payload.title or "未命名短视频"),
-                genre=str(config.get("genre") or payload.genre or preset["genre"]),
-                resolution=payload.resolution,
-                fps=int(config.get("fps") or 30),
-                style=str(config.get("style") or payload.style or preset["style"]),
-                audience=str(config.get("audience") or payload.audience or preset["audience"]),
-                total_duration_seconds=float(config.get("total_duration_seconds") or payload.duration_seconds or 0),
-            ),
-            scenes=normalized_scenes,
-        )
-
     def _normalize_expand_result(self, script: VideoScript, data: dict[str, Any], payload: ScriptExpandRequest) -> VideoScript:
         scenes = data.get("scenes") if isinstance(data.get("scenes"), list) else []
         start_id = len(script.scenes) + 1
@@ -614,13 +641,14 @@ class VideoScriptGenerator:
                 VideoScene.model_validate(
                     {
                         "id": scene_id,
-                        "title": str(scene.get("title") or scene.get("act_title") or self._default_act_title(scene_id)),
-                        "summary": str(scene.get("summary") or scene.get("shot_description") or scene.get("action") or ""),
+                        "title": str(scene.get("title") or self._default_act_title(scene_id)),
+                        "summary": str(scene.get("summary") or ""),
                         "estimated_duration": float(scene.get("estimated_duration") or 3),
                         "scene_goal": str(scene.get("scene_goal") or "承接上一幕推进剧情"),
                         "audio_narration": str(scene.get("audio_narration") or scene.get("narration") or scene.get("summary") or ""),
                         "onscreen_text": str(scene.get("onscreen_text") or ""),
                         "visual_prompt": str(scene.get("visual_prompt") or ""),
+                        "asset_requirements": self._normalize_asset_requirements(scene.get("asset_requirements")),
                         "assets": {"video_path": "", "image_path": "", "audio_path": "", "duration": 0},
                         "edit": {
                             "transition": ((scene.get("edit") or {}).get("transition") if isinstance(scene.get("edit"), dict) else None) or "fade",
@@ -659,52 +687,6 @@ class VideoScriptGenerator:
             return [item.strip() for item in re.split(r"[,，、\n]", value) if item.strip()]
         return []
 
-    def _mock_script(self, payload: ScriptGenerateRequest, project_id: str) -> VideoScript:
-        preset = self._preset(payload)
-        scenes = []
-        per_scene_duration = round(payload.duration_seconds / payload.scene_count, 1)
-        for index in range(1, payload.scene_count + 1):
-            scenes.append(
-                VideoScene(
-                    id=index,
-                    act_title=self._default_act_title(index),
-                    setting=["现代 · 深夜办公室", "异世 · 宫殿/街市", "关键场景 · 冲突中心", "高潮场景 · 反转瞬间", "结尾场景 · 山河展开"][(index - 1) % 5],
-                    characters=[payload.title, payload.audience or "目标人物"],
-                    scene_goal=["开场钩子", "情绪铺垫", "核心信息", "画面证明", "收束行动"][(index - 1) % 5],
-                    action=f"镜头以强画面感呈现“{payload.idea[:32]}”，用短句推进冲突和爽点。",
-                    dialogue=[f"主角：{payload.title}，这一局我来写。"],
-                    emotional_beat=payload.tone or preset["tone"],
-                    narration=f"{payload.title} 第 {index} 幕：围绕“{payload.idea[:24]}”展开一段{payload.tone or preset['tone']}的短视频旁白。",
-                    audio_narration=f"{payload.title} 第 {index} 幕：围绕“{payload.idea[:24]}”展开一段{payload.tone or preset['tone']}的短视频旁白。",
-                    onscreen_text=f"{payload.title} · 分镜 {index}",
-                    shot_description=f"画面突出主题“{payload.idea[:32]}”，主体清晰，构图适合 {payload.resolution} 竖屏/横屏剪辑。",
-                    visual_prompt=f"{payload.style or 'short video'} visual, scene {index}, clear subject, cinematic composition, {payload.resolution}",
-                    asset_requirements={
-                        "visual_type": "video_or_image",
-                        "main_subject": payload.title,
-                        "background": payload.style or preset["style"],
-                        "mood": payload.tone or preset["tone"],
-                        "must_have": [payload.title],
-                        "avoid": ["画面杂乱", "主体不清"],
-                    },
-                    assets={"video_path": "", "image_path": "", "audio_path": "", "duration": 0},
-                    edit={"transition": "fade", "animation": "zoom_in", "pacing": f"约 {per_scene_duration} 秒", "camera": "轻微推进"},
-                )
-            )
-        return VideoScript(
-            project_id=project_id,
-            config=VideoScriptConfig(
-                title=payload.title or "未命名短视频",
-                genre=payload.genre or preset["genre"],
-                resolution=payload.resolution,
-                fps=30,
-                style=payload.style or preset["style"],
-                audience=payload.audience or preset["audience"],
-                total_duration_seconds=payload.duration_seconds,
-            ),
-            scenes=scenes,
-        )
-
     def _preset(self, payload: ScriptGenerateRequest) -> dict[str, str]:
         return CREATIVE_PRESETS.get(payload.creative_preset, CREATIVE_PRESETS["default"])
 
@@ -713,33 +695,6 @@ class VideoScriptGenerator:
             scene_id = len(script.scenes) + 1
             script.scenes.append(self._mock_expand_scene(script, scene_id, payload.idea))
         return script
-
-    def _mock_expand_scene(self, script: VideoScript, scene_id: int, idea: str = "") -> VideoScene:
-        title = script.config.title
-        return VideoScene(
-            id=scene_id,
-            act_title=self._default_act_title(scene_id),
-            setting="剧情延展 · 新冲突现场",
-            characters=[title, "对手/见证者"],
-            scene_goal="承接上一幕，制造新的危机或爽点反转",
-            action=f"上一幕的余波尚未落定，新的阻力出现。{idea or title} 被迫做出更强回应，场面进一步升级。",
-            dialogue=[f"对手：你以为这样就能赢？", f"主角：这一章，才刚刚开始。"],
-            emotional_beat="压迫感升级，主角反击，爽点继续抬高",
-            narration=f"{title} 的局势继续升级，新的选择把故事推向更大的转折。",
-            audio_narration=f"{title} 的局势继续升级，新的选择把故事推向更大的转折。",
-            onscreen_text=f"{title} · 新一幕",
-            shot_description="镜头从众人震惊的表情切到主角坚定的眼神，环境压迫感增强，冲突中心更清晰。",
-            visual_prompt=f"{title}, dramatic conflict, cinematic scene, strong emotion, high tension",
-            asset_requirements={
-                "visual_type": "video_or_image",
-                "main_subject": title,
-                "background": "冲突升级的关键场景",
-                "mood": "紧张、反击、热血",
-                "must_have": ["主角", "冲突", "反击"],
-                "avoid": ["画面松散", "情绪不足"],
-            },
-            edit={"transition": "fade", "animation": "zoom_in", "pacing": "节奏加快", "camera": "推近主角眼神"},
-        )
 
     def _normalize_script(self, data: dict[str, Any], payload: ScriptGenerateRequest, project_id: str) -> VideoScript:
         preset = self._preset(payload)
@@ -759,6 +714,16 @@ class VideoScriptGenerator:
                     audio_narration=f"{title}: narration placeholder, waiting for AI rewrite.",
                     onscreen_text=title,
                     visual_prompt=f"{title}, clean short-video frame, clear subject, cinematic composition",
+                    asset_requirements=self._normalize_asset_requirements(
+                        {
+                            "visual_type": "video_or_image",
+                            "main_subject": title,
+                            "background": "clean short-video frame",
+                            "mood": "neutral",
+                            "must_have": [title],
+                            "avoid": [],
+                        }
+                    ),
                     assets={"video_path": "", "image_path": "", "audio_path": "", "duration": 0},
                     edit={"transition": "fade", "animation": "zoom_in", "pacing": "steady", "camera": "slow push in"},
                     status="waiting_assets",

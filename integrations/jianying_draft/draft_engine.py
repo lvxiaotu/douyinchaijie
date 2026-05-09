@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Any
+from datetime import datetime
 
 
 class JianyingDraftEngine:
@@ -22,7 +23,7 @@ class JianyingDraftEngine:
 
     def create_placeholder_draft(self, name: str) -> dict[str, Any]:
         safe_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in name).strip("_")
-        draft_name = safe_name or "jianying_draft"
+        draft_name = safe_name or self._timestamp_name()
         draft_dir = self.output_dir / draft_name
         draft_dir.mkdir(parents=True, exist_ok=True)
         return {
@@ -169,7 +170,10 @@ class JianyingDraftEngine:
 
     def _safe_name(self, name: str) -> str:
         safe_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in name).strip("_")
-        return safe_name or "jianying_draft"
+        return safe_name or self._timestamp_name()
+
+    def _timestamp_name(self) -> str:
+        return f"jianying_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     def _build_text_style(self, style_cls: Any, config: dict[str, Any]) -> Any:
         if not config:

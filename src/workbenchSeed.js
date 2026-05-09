@@ -1,7 +1,7 @@
 export const fallbackWorkbench = {
   metrics: [
     { label: "运行中任务", value: "2", hint: "采集与 AI 任务统一走后台任务中心" },
-    { label: "已接入工具", value: "3", hint: "保留抖音采集、AI 视频拆解、AI 提示词反推" },
+    { label: "已接入工具", value: "4", hint: "保留抖音采集、AI 视频拆解、AI 提示词反推、剪映 SDK" },
     { label: "归档内容", value: "128", hint: "AI 拆解与提示词结果可沉淀到素材库" },
     { label: "失败提醒", value: "1", hint: "Cookie 可能需要更新" },
   ],
@@ -32,6 +32,15 @@ export const fallbackWorkbench = {
       status: "ready",
       updated: "今天 18:05",
       tags: ["AI", "提示词"],
+    },
+    {
+      id: "jianying-editor-sdk",
+      icon: "JY",
+      name: "剪映 Editor Skill SDK",
+      desc: "暴露 luoluoluo22/jianying-editor-skill 的 SDK 状态、Python 入口和网页开发者指南。",
+      status: "ready",
+      updated: "本地 SDK",
+      tags: ["剪映", "SDK", "自动化"],
     },
   ],
   jobs: [
@@ -88,6 +97,13 @@ export const fallbackWorkbench = {
       id: "ai-prompt-reverse",
       name: "AI 提示词反推适配器",
       desc: "从采集视频创建提示词反推任务，输出 master prompt、negative prompt、分镜提示词和风格关键词。",
+      kind: "python",
+      status: "ready",
+    },
+    {
+      id: "jianying-editor-sdk",
+      name: "剪映 Editor Skill SDK",
+      desc: "本地 SDK 位于 sdks/jianying-editor-skill，提供 JyProject Python API、CLI 脚本和官方网页指南。",
       kind: "python",
       status: "ready",
     },

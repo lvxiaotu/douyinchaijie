@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Scissors,
   Wrench,
 } from "lucide-react";
 import {
@@ -21,6 +22,7 @@ import {
   createAiVideoBreakdownJob,
   createAiPromptReverseJob,
   createJianyingDraftFromScript,
+  deleteVideoScript,
   deleteTask,
   downloadDouyinFavorites,
   fetchAiVideoConfig,
@@ -32,20 +34,26 @@ import {
   fetchDouyinConfig,
   fetchDouyinFavoriteItems,
   fetchJianyingDrafts,
+  fetchJianyingEditorSdkStatus,
   fetchDouyinUserProfile,
   fetchDouyinUserVideos,
   fetchTasks,
   fetchDouyinWorkDetail,
   fetchWorkbench,
   fetchTask,
+  fetchVideoScript,
+  fetchVideoScripts,
+  generateJianyingNaturalScript,
   generateRandomDraftJson,
   inspectJianyingDraft,
   listJianyingDraftProjects,
   openJianyingDraftPath,
+  prepareVideoScriptAssets,
   saveDouyinConfig,
   saveAiVideoConfig,
   saveAiPromptReverseConfig,
   saveAiProviderConfig,
+  saveVideoScript,
   testAiProviderConfig,
 } from "./services/api";
 import { fallbackWorkbench } from "./workbenchSeed";
@@ -58,6 +66,7 @@ const sections = {
   videoScript: ["灵感剧本", "把创作灵感生成可编辑的 script.json。"],
   draftGenerator: ["草稿生成器", "用 AI 随机生成 draft JSON，并直接生成剪映草稿。"],
   draftInspector: ["查看草稿", "查看剪映草稿项目和画布详情。"],
+  jianyingEditor: ["剪映 Skill", "使用 JianYing Editor Skill SDK 的入口、CLI 和网页指南。"],
   tools: ["工具中心", "以后每个新功能都可以作为一个独立工具接入。"],
   jobs: ["任务中心", "统一查看后台任务、进度和失败状态。"],
   library: ["素材库", "沉淀下载、分析和处理后的内容。"],
@@ -70,6 +79,7 @@ const navItems = [
   ["videoScript", FileText, "灵感剧本"],
   ["draftGenerator", Sparkles, "草稿生成器"],
   ["draftInspector", Database, "查看草稿"],
+  ["jianyingEditor", Scissors, "剪映 Skill"],
   ["tools", Wrench, "工具中心"],
   ["jobs", Clock3, "任务中心"],
   ["library", Archive, "素材库"],
@@ -85,8 +95,16 @@ const settingItems = [
   ["jianying", "剪映草稿"],
 ];
 
+const jianyingEditorItems = [
+  ["script", "剧本生成"],
+  ["overview", "SDK 概览"],
+  ["entries", "功能入口"],
+  ["guide", "网页指南"],
+];
+
 const statusText = {
   ready: "可用",
+  script_ready: "剧本就绪",
   draft: "草稿",
   running: "运行中",
   done: "完成",
@@ -912,14 +930,14 @@ function ScriptSceneWorkbench({ script, selectedSceneId, onSelectScene, onUpdate
         <div className="track-editor-grid">
           <article className="track-card visual-track-card">
             <div className="track-card-head">
-              <strong>视觉轨</strong>
-              <span>给画图 AI 和画面合成使用</span>
+              <strong>文案</strong>
+              <span>给脚本表达、屏幕文字和镜头摘要使用</span>
             </div>
             <label>
-              生图提示词
+              镜头概括
               <textarea
-                value={cleanScriptValue(selectedScene.visual_prompt || selectedScene.shot_description)}
-                onChange={(event) => onUpdateScene(selectedScene.id, "visual_prompt", event.target.value)}
+                value={cleanScriptValue(selectedScene.summary)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "summary", event.target.value)}
               />
             </label>
             <label>
@@ -933,8 +951,8 @@ function ScriptSceneWorkbench({ script, selectedSceneId, onSelectScene, onUpdate
 
           <article className="track-card audio-track-card">
             <div className="track-card-head">
-              <strong>听觉轨</strong>
-              <span>给 TTS 和音效设计使用</span>
+              <strong>音频需求</strong>
+              <span>给 TTS、旁白和声音设计使用</span>
             </div>
             <label>
               配音文案
@@ -946,10 +964,114 @@ function ScriptSceneWorkbench({ script, selectedSceneId, onSelectScene, onUpdate
               />
             </label>
             <label>
-              背景音效要求
+              音频需求
               <textarea
                 value={cleanScriptValue(selectedScene.edit?.pacing || selectedScene.emotional_beat)}
                 onChange={(event) => onUpdateSceneEdit(selectedScene.id, "pacing", event.target.value)}
+                placeholder="例如：温柔女声、轻环境音、结尾加提示音"
+              />
+            </label>
+            <label>
+              音频素材路径
+              <input
+                value={cleanScriptValue(selectedScene.assets?.audio_path)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "assets.audio_path", event.target.value)}
+                placeholder="例如：D:\\素材\\scene1.wav"
+              />
+            </label>
+          </article>
+
+          <article className="track-card visual-track-card">
+            <div className="track-card-head">
+              <strong>画面素材需求</strong>
+              <span>给生图、找素材和画面合成使用</span>
+            </div>
+            <label>
+              生图提示词
+              <textarea
+                value={cleanScriptValue(selectedScene.visual_prompt || selectedScene.shot_description)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "visual_prompt", event.target.value)}
+              />
+            </label>
+            <label>
+              画面主体
+              <textarea
+                value={cleanScriptValue(selectedScene.asset_requirements?.main_subject)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "asset_requirements.main_subject", event.target.value)}
+                placeholder="例如：女孩手拿奶茶在落叶街道回头"
+              />
+            </label>
+            <label>
+              背景 / 场景
+              <textarea
+                value={cleanScriptValue(selectedScene.asset_requirements?.background)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "asset_requirements.background", event.target.value)}
+                placeholder="例如：傍晚街道、暖黄色灯光、秋叶飘落"
+              />
+            </label>
+            <label>
+              情绪 / 画面氛围
+              <textarea
+                value={cleanScriptValue(selectedScene.asset_requirements?.mood)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "asset_requirements.mood", event.target.value)}
+                placeholder="例如：温柔、治愈、轻松、心动"
+              />
+            </label>
+            <label>
+              视频素材路径
+              <input
+                value={cleanScriptValue(selectedScene.assets?.video_path)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "assets.video_path", event.target.value)}
+                placeholder="例如：D:\\素材\\scene1.mp4"
+              />
+            </label>
+            <label>
+              图片素材路径
+              <input
+                value={cleanScriptValue(selectedScene.assets?.image_path)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "assets.image_path", event.target.value)}
+                placeholder="例如：D:\\素材\\scene1.png"
+              />
+            </label>
+          </article>
+
+          <article className="track-card audio-track-card">
+            <div className="track-card-head">
+              <strong>转场 / 动效要求</strong>
+              <span>给 SDK / JyProject 映射到剪映工程使用</span>
+            </div>
+            <label>
+              转场
+              <input
+                value={cleanScriptValue(selectedScene.edit?.transition)}
+                onChange={(event) => onUpdateSceneEdit(selectedScene.id, "transition", event.target.value)}
+                placeholder="例如：fade / mix / 淡入淡出 / 混合"
+              />
+            </label>
+            <label>
+              动画
+              <input
+                value={cleanScriptValue(selectedScene.edit?.animation)}
+                onChange={(event) => onUpdateSceneEdit(selectedScene.id, "animation", event.target.value)}
+                placeholder="例如：fadein / glitch / zoom_in"
+              />
+            </label>
+            <label>
+              镜头运动
+              <input
+                value={cleanScriptValue(selectedScene.edit?.camera)}
+                onChange={(event) => onUpdateSceneEdit(selectedScene.id, "camera", event.target.value)}
+                placeholder="例如：push in / pan left / pan right"
+              />
+            </label>
+            <label>
+              实际素材时长（秒）
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={selectedScene.assets?.duration ?? 0}
+                onChange={(event) => onUpdateScene(selectedScene.id, "assets.duration", Number(event.target.value))}
               />
             </label>
           </article>
@@ -979,43 +1101,37 @@ function ScriptShotTable({ script }) {
             <tr>
               <th>镜号</th>
               <th>时长</th>
-              <th>画面描述</th>
-              <th>角色1</th>
-              <th>角色描述1</th>
-              <th>角色2</th>
-              <th>景别</th>
-              <th>角色动作</th>
-              <th>情绪</th>
-              <th>场景标签</th>
-              <th>光影氛围</th>
-              <th>音效</th>
-              <th>对白</th>
-              <th>分镜提示词</th>
-              <th>视频运动提示词</th>
+              <th>标题</th>
+              <th>镜头目标</th>
+              <th>画面概括</th>
+              <th>视觉提示词</th>
+              <th>旁白</th>
+              <th>屏幕文字</th>
+              <th>转场</th>
+              <th>动画</th>
+              <th>节奏</th>
+              <th>镜头运动</th>
+              <th>状态</th>
             </tr>
           </thead>
           <tbody>
             {scenes.map((scene, index) => {
-              const characters = scene.characters || [];
-              const req = scene.asset_requirements || {};
-              const duration = scene.assets?.duration || defaultDuration;
+              const duration = scene.estimated_duration || scene.assets?.duration || defaultDuration;
               return (
                 <tr key={scene.id || index}>
                   <td>{scene.id || index + 1}</td>
                   <td>{duration}</td>
-                  <td>{scene.shot_description || scene.action || scene.narration || "-"}</td>
-                  <td>{characters[0] || "-"}</td>
-                  <td>{req.main_subject || scene.scene_goal || "-"}</td>
-                  <td>{characters[1] || "-"}</td>
-                  <td>{scene.edit?.camera || "Medium Shot (中景)"}</td>
-                  <td>{scene.action || "-"}</td>
-                  <td>{scene.emotional_beat || req.mood || "-"}</td>
-                  <td>{scene.setting || req.background || "-"}</td>
-                  <td>{req.mood || scene.visual_prompt || "-"}</td>
-                  <td>{scene.edit?.pacing || "按剧情节奏处理"}</td>
-                  <td>{(scene.dialogue || []).join("\n") || scene.narration || "无"}</td>
-                  <td>{scene.visual_prompt || scene.onscreen_text || "-"}</td>
-                  <td>{scene.edit?.camera || scene.edit?.animation || "镜头缓慢推进，保持主体清晰。"}</td>
+                  <td>{scene.title || "-"}</td>
+                  <td>{scene.scene_goal || "-"}</td>
+                  <td>{scene.summary || "-"}</td>
+                  <td>{scene.visual_prompt || "-"}</td>
+                  <td>{scene.audio_narration || "-"}</td>
+                  <td>{scene.onscreen_text || "-"}</td>
+                  <td>{scene.edit?.transition || "-"}</td>
+                  <td>{scene.edit?.animation || "-"}</td>
+                  <td>{scene.edit?.pacing || "-"}</td>
+                  <td>{scene.edit?.camera || "-"}</td>
+                  <td>{scene.status || "-"}</td>
                 </tr>
               );
             })}
@@ -1967,6 +2083,7 @@ function AiPromptReverseSettingsPanel() {
 function JianyingDraftSettingsPanel() {
   const [scriptPath, setScriptPath] = useState("G:\\ob-book\\codex-project\\data\\runtime\\video_pipeline\\projects\\006104ba1f624309bd1d900608dace15\\script.json");
   const [name, setName] = useState("frontend-script-draft");
+  const [engine, setEngine] = useState("pyjianying");
   const [defaultMediaDurationSeconds, setDefaultMediaDurationSeconds] = useState(3);
   const [includeOnscreenText, setIncludeOnscreenText] = useState(true);
   const [subtitleFromNarration, setSubtitleFromNarration] = useState(false);
@@ -2009,6 +2126,7 @@ function JianyingDraftSettingsPanel() {
       const data = await createJianyingDraftFromScript({
         name,
         scriptPath,
+        engine,
         includeOnscreenText,
         subtitleFromNarration,
         defaultMediaDurationSeconds,
@@ -2047,9 +2165,9 @@ function JianyingDraftSettingsPanel() {
       <div className="panel-header">
         <div>
           <h2>剪映草稿生成</h2>
-          <p>把现有 `script.json` 直接组装成 pyJianYingDraft 草稿。</p>
+          <p>把现有 `script.json` 直接组装成剪映草稿，可切换 `pyJianYingDraft` 或 `JianYing SDK / JyProject`。</p>
         </div>
-        <Badge status="ready">pyJianYingDraft</Badge>
+        <Badge status="ready">{engine === "sdk" ? "JyProject" : "pyJianYingDraft"}</Badge>
       </div>
 
       <section className="collector-card">
@@ -2062,6 +2180,13 @@ function JianyingDraftSettingsPanel() {
           <label>
             草稿名称
             <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：my-jianying-draft" />
+          </label>
+          <label>
+            生成引擎
+            <select value={engine} onChange={(event) => setEngine(event.target.value)}>
+              <option value="pyjianying">pyJianYingDraft</option>
+              <option value="sdk">JianYing SDK / JyProject</option>
+            </select>
           </label>
           <label>
             默认镜头时长（秒）
@@ -2113,6 +2238,11 @@ function JianyingDraftSettingsPanel() {
             <span>文字加粗</span>
           </label>
         </div>
+        {engine === "sdk" && (
+          <div className="running-note">
+            SDK 引擎会尝试把 `script.json` 里的 `edit.transition / animation / camera` 映射进剪映工程。
+          </div>
+        )}
 
         <div className="script-action-strip">
           <button className="primary-button" type="button" onClick={handleBuild} disabled={loading || !scriptPath.trim()}>
@@ -2134,10 +2264,17 @@ function JianyingDraftSettingsPanel() {
             <div><strong>状态</strong><p>{result.status || "-"}</p></div>
             <div><strong>草稿目录</strong><p>{result.draft_path || "-"}</p></div>
             <div><strong>草稿名称</strong><p>{result.name || "-"}</p></div>
+            <div><strong>生成引擎</strong><p>{result.engine === "sdk" ? "JianYing SDK / JyProject" : "pyJianYingDraft"}</p></div>
             <div><strong>来源剧本</strong><p>{result.source_script?.title || result.source_script?.project_id || "-"}</p></div>
             <div><strong>文字字号</strong><p>{textStyle.size}</p></div>
             <div><strong>文字底板</strong><p>{textBackground.color} / alpha {textBackground.alpha}</p></div>
           </div>
+          {result.engine === "sdk" && Array.isArray(result.applied_edits) && result.applied_edits.length > 0 && (
+            <details className="raw-json" open>
+              <summary>查看已应用的 edit 映射</summary>
+              <pre className="result-box">{JSON.stringify(result.applied_edits, null, 2)}</pre>
+            </details>
+          )}
           <div className="script-action-strip">
             <button className="primary-button" type="button" onClick={() => handleOpenDraftPath(result.draft_path)} disabled={!result.draft_path}>
               打开草稿目录
@@ -2179,12 +2316,549 @@ function JianyingDraftSettingsPanel() {
   );
 }
 
+function JianyingEditorSdkPanel({ activeView = "overview" }) {
+  const [status, setStatus] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    fetchJianyingEditorSdkStatus()
+      .then((data) => {
+        if (mounted) {
+          setStatus(data);
+          setError("");
+        }
+      })
+      .catch((err) => {
+        if (mounted) {
+          setError(err.message || String(err));
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const guideUrl = `${API_BASE}/api/tools/jianying-editor-sdk/page`;
+  const entries = status?.entries || [];
+
+  const showOverview = activeView === "overview";
+  const showEntries = activeView === "entries";
+  const showGuide = activeView === "guide";
+
+  return (
+    <section className="jianying-sdk-panel">
+      {showOverview && <div className="panel sdk-hero-panel">
+        <div className="panel-header">
+          <div>
+            <h2>剪映 Editor Skill SDK</h2>
+            <p>把 `luoluoluo22/jianying-editor-skill` 作为本地 SDK 接入，当前先暴露运行入口和官方网页指南。</p>
+          </div>
+          <Badge status={status?.ready ? "ready" : "draft"}>{status?.ready ? "SDK 可用" : "检查中"}</Badge>
+        </div>
+        {error ? (
+          <div className="error-box">{error}</div>
+        ) : (
+          <div className="sdk-summary-grid">
+            <div>
+              <span>版本</span>
+              <strong>{status?.version || "读取中"}</strong>
+            </div>
+            <div>
+              <span>本地路径</span>
+              <strong>{status?.root || "sdks/jianying-editor-skill"}</strong>
+            </div>
+            <div>
+              <span>上游仓库</span>
+              <a href={status?.repo_url || "https://github.com/luoluoluo22/jianying-editor-skill"} target="_blank" rel="noreferrer">
+                GitHub
+              </a>
+            </div>
+          </div>
+        )}
+      </div>}
+
+      {(showOverview || showEntries) && <div className={showOverview ? "sdk-layout" : "sdk-layout single"}>
+        <section className="panel">
+          <div className="panel-header">
+            <h2>SDK 入口</h2>
+            <a className="text-button" href={guideUrl} target="_blank" rel="noreferrer">
+              新窗口打开指南
+            </a>
+          </div>
+          <div className="sdk-entry-list">
+            {entries.map((entry) => (
+              <article className="sdk-entry" key={entry.relative_path}>
+                <div>
+                  <strong>{entry.name}</strong>
+                  <p>{entry.description}</p>
+                  <code>{entry.relative_path}</code>
+                </div>
+                <Badge status={entry.exists ? "ready" : "error"}>{entry.exists ? "已找到" : "缺失"}</Badge>
+              </article>
+            ))}
+            {!entries.length && <div className="empty-result">正在读取 SDK 入口...</div>}
+          </div>
+        </section>
+
+        {showOverview && <section className="panel sdk-guide-panel">
+          <div className="panel-header">
+            <h2>网页开发者指南</h2>
+            <Badge>index.html</Badge>
+          </div>
+          <iframe className="sdk-guide-frame" title="JianYing Editor Skill Guide" src={guideUrl} />
+        </section>}
+      </div>}
+
+      {showGuide && (
+        <section className="panel sdk-guide-panel">
+          <div className="panel-header">
+            <h2>网页开发者指南</h2>
+            <a className="text-button" href={guideUrl} target="_blank" rel="noreferrer">
+              新窗口打开
+            </a>
+          </div>
+          <iframe className="sdk-guide-frame standalone" title="JianYing Editor Skill Guide" src={guideUrl} />
+        </section>
+      )}
+    </section>
+  );
+}
+
+function JianyingNaturalScriptPanel() {
+  const [input, setInput] = useState("帮我写一段关于秋天第一杯奶茶的短视频文案，配温柔女声旁白和字幕，再找个温馨 BGM，30 秒，5 个分镜。");
+  const [title, setTitle] = useState("");
+  const [creativePreset, setCreativePreset] = useState("");
+  const [durationSeconds, setDurationSeconds] = useState("");
+  const [sceneCount, setSceneCount] = useState("");
+  const [resolution, setResolution] = useState("");
+  const [generationMode, setGenerationMode] = useState("local");
+  const [provider, setProvider] = useState("");
+  const [task, setTask] = useState(null);
+  const [result, setResult] = useState(null);
+  const [selectedSceneId, setSelectedSceneId] = useState(null);
+  const [scriptProjects, setScriptProjects] = useState([]);
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [savingScript, setSavingScript] = useState(false);
+  const [preparingAssets, setPreparingAssets] = useState(false);
+  const [buildingSdkDraft, setBuildingSdkDraft] = useState(false);
+  const [draftBuildResult, setDraftBuildResult] = useState(null);
+  const [prepareReport, setPrepareReport] = useState(null);
+
+  useEffect(() => {
+    loadScriptProjects().catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!task?.id || ["done", "failed", "error"].includes(task.status)) return undefined;
+    let mounted = true;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await fetchTask(task.id);
+        if (!mounted) return;
+        setTask(next);
+        if (next.status === "done") {
+          const nextResult = next.result || next.result_json || null;
+          setResult(nextResult);
+          const nextScript = nextResult?.script || nextResult?.result?.script;
+          setSelectedSceneId(nextScript?.scenes?.[0]?.id || null);
+          loadScriptProjects().catch(() => {});
+        }
+        if (next.status === "failed" || next.status === "error") {
+          setError(next.error || next.message || "生成失败");
+        }
+      } catch (err) {
+        if (mounted) setError(err.message || String(err));
+      }
+    }, 1200);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [task]);
+
+  async function loadScriptProjects() {
+    const data = await fetchVideoScripts();
+    setScriptProjects(data.projects || []);
+  }
+
+  async function handleOpenScript(projectId) {
+    setError("");
+    try {
+      const data = await fetchVideoScript(projectId);
+      setResult(data);
+      setSelectedSceneId(data?.script?.scenes?.[0]?.id || null);
+      setDraftBuildResult(null);
+      setPrepareReport(data?.prepare_report || null);
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  async function handleDeleteScript(projectId) {
+    if (!window.confirm("确认删除这个结构化剧本吗？关联的剧本生成任务记录也会一起清理。")) {
+      return;
+    }
+    setError("");
+    try {
+      await deleteVideoScript(projectId);
+      if ((result?.project_id || result?.script?.project_id) === projectId) {
+        setResult(null);
+      }
+      await loadScriptProjects();
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    setResult(null);
+    setDraftBuildResult(null);
+    setPrepareReport(null);
+    try {
+      const created = await generateJianyingNaturalScript({
+        input,
+        title,
+        creativePreset,
+        durationSeconds,
+        sceneCount,
+        resolution,
+        generationMode,
+        provider,
+      });
+      setTask(created);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const script = result?.script || result?.result?.script;
+  const parsed = result?.parsed_input;
+  const currentMode = result?.generation_mode || result?.metadata?.generation_mode || "local";
+  const currentProjectId = result?.project_id || script?.project_id || "";
+
+  function updateScriptScene(sceneId, fieldPath, value) {
+    setResult((current) => {
+      const currentScript = current?.script || current?.result?.script;
+      if (!currentScript) return current;
+      const nextScenes = (currentScript.scenes || []).map((scene) => {
+        if (scene.id !== sceneId) return scene;
+        const nextScene = JSON.parse(JSON.stringify(scene));
+        if (typeof nextScene.asset_requirements !== "object" || nextScene.asset_requirements === null) {
+          nextScene.asset_requirements = {
+            visual_type: "video_or_image",
+            main_subject: "",
+            background: "",
+            mood: "",
+            must_have: [],
+            avoid: [],
+          };
+        }
+        const path = fieldPath.split(".");
+        let target = nextScene;
+        for (let index = 0; index < path.length - 1; index += 1) {
+          const key = path[index];
+          if (typeof target[key] !== "object" || target[key] === null) {
+            target[key] = {};
+          }
+          target = target[key];
+        }
+        target[path[path.length - 1]] = value;
+        if (nextScene.assets) {
+          const hasVisual = Boolean((nextScene.assets.video_path || "").trim() || (nextScene.assets.image_path || "").trim());
+          const hasAudio = Boolean((nextScene.assets.audio_path || "").trim());
+          nextScene.status = hasVisual || hasAudio ? "ready" : "waiting_assets";
+        }
+        return nextScene;
+      });
+      const nextScript = { ...currentScript, scenes: nextScenes };
+      if (current?.script) {
+        return { ...current, script: nextScript };
+      }
+      if (current?.result?.script) {
+        return { ...current, result: { ...current.result, script: nextScript } };
+      }
+      return current;
+    });
+  }
+
+  function updateScriptSceneEdit(sceneId, key, value) {
+    updateScriptScene(sceneId, `edit.${key}`, value);
+  }
+
+  async function handleSaveCurrentScript() {
+    if (!currentProjectId || !script) return null;
+    setSavingScript(true);
+    setError("");
+    try {
+      const saved = await saveVideoScript(currentProjectId, script);
+      setResult(saved);
+      return saved;
+    } catch (err) {
+      setError(err.message || String(err));
+      return null;
+    } finally {
+      setSavingScript(false);
+    }
+  }
+
+  async function handleBuildSdkDraftFromCurrentScript() {
+    if (!currentProjectId || !script) return;
+    setBuildingSdkDraft(true);
+    setError("");
+    setDraftBuildResult(null);
+    try {
+      const saved = (await handleSaveCurrentScript()) || result;
+      const latestScript = saved?.script || script;
+      const response = await createJianyingDraftFromScript({
+        name: `${latestScript?.config?.title || currentProjectId}-sdk-draft`,
+        script: latestScript,
+        engine: "sdk",
+        includeOnscreenText: true,
+        subtitleFromNarration: false,
+        defaultMediaDurationSeconds: 3,
+        textStyle: {
+          size: 5,
+          bold: true,
+          color: [1, 1, 1],
+          alpha: 1,
+          align: 1,
+          auto_wrapping: true,
+          max_line_width: 0.82,
+        },
+        textBackground: {
+          color: "#000000",
+          alpha: 0.35,
+          round_radius: 0.08,
+          height: 0.14,
+          width: 0.14,
+        },
+      });
+      setDraftBuildResult(response);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBuildingSdkDraft(false);
+    }
+  }
+
+  async function handlePrepareAssets() {
+    if (!currentProjectId || !script) return;
+    setPreparingAssets(true);
+    setError("");
+    setDraftBuildResult(null);
+    try {
+      const sourcePaths = [
+        ...(Array.isArray(result?.parsed_input?.source_paths) ? result.parsed_input.source_paths : []),
+        ...(Array.isArray(result?.metadata?.source_paths) ? result.metadata.source_paths : []),
+      ].filter(Boolean);
+      const response = await prepareVideoScriptAssets(currentProjectId, {
+        script,
+        sourcePaths,
+        resolveLocalMaterials: true,
+        generateAudio: true,
+        generateImages: true,
+        generateVideos: false,
+        overwriteExisting: false,
+      });
+      setResult(response);
+      setPrepareReport(response?.prepare_report || null);
+      setSelectedSceneId(response?.script?.scenes?.[0]?.id || selectedSceneId);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setPreparingAssets(false);
+    }
+  }
+
+  return (
+    <section className="jianying-script-layout">
+      <form className="panel jianying-natural-form" onSubmit={handleSubmit}>
+        <div className="panel-header">
+          <div>
+            <h2>自然语言生成结构化剧本</h2>
+            <p>植入 JianYing Editor Skill 的输入解析规则，把一句剪辑需求变成可继续生成素材、配音和剪映草稿的 `script.json`。</p>
+          </div>
+          <Badge status="ready">Parser</Badge>
+        </div>
+        <label className="textarea-label">
+          剪辑需求
+          <textarea value={input} onChange={(event) => setInput(event.target.value)} rows={7} required />
+        </label>
+        <div className="script-chassis-grid">
+          <label>标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="留空则自动推断" /></label>
+          <label>
+            类型预设
+            <select value={creativePreset} onChange={(event) => setCreativePreset(event.target.value)}>
+              <option value="">自动识别</option>
+              <option value="default">通用短剧模板</option>
+              <option value="mysticism_lead">玄学引流模板</option>
+              <option value="ancient爽文">古风爽文漫剧</option>
+              <option value="ai_pet">AI 小动物剧情</option>
+            </select>
+          </label>
+          <label>总时长<input type="number" min="5" max="600" value={durationSeconds} onChange={(event) => setDurationSeconds(event.target.value)} placeholder="自动" /></label>
+          <label>分镜数<input type="number" min="1" max="30" value={sceneCount} onChange={(event) => setSceneCount(event.target.value)} placeholder="自动" /></label>
+          <label>
+            画幅
+            <select value={resolution} onChange={(event) => setResolution(event.target.value)}>
+              <option value="">自动，默认 9:16</option>
+              <option value="9:16">9:16</option>
+              <option value="16:9">16:9</option>
+              <option value="1:1">1:1</option>
+            </select>
+          </label>
+          <label>
+            AI Provider
+            <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+              <option value="">使用当前全局 AI</option>
+              <option value="mock">mock 调试</option>
+            </select>
+          </label>
+          <label>
+            生成方式
+            <select value={generationMode} onChange={(event) => setGenerationMode(event.target.value)}>
+              <option value="local">本地结构化生成</option>
+              <option value="sdk">SDK 接入生成</option>
+            </select>
+          </label>
+        </div>
+        <button className="primary-button" type="submit" disabled={submitting || !input.trim()}>
+          {submitting ? "提交中" : "生成结构化剧本"}
+        </button>
+        {task && (
+          <div className="running-note">
+            {task.message || "任务已创建"}{task.progress !== undefined ? ` · ${task.progress}%` : ""}
+          </div>
+        )}
+        {error && <div className="error-box">{error}</div>}
+      </form>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>解析结果</h2>
+            <p>{parsed ? `识别意图：${parsed.intent}` : "生成完成后会显示解析出的意图、参数和结构化镜头。"}</p>
+          </div>
+          <Badge>{currentMode === "sdk" ? "SDK" : "本地"} · {script?.scenes?.length || 0} 镜</Badge>
+        </div>
+        {parsed && (
+          <details className="raw-json" open>
+            <summary>自然语言解析参数</summary>
+            <pre className="result-box">{JSON.stringify(parsed.request, null, 2)}</pre>
+          </details>
+        )}
+        {script ? (
+          <>
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <h2>素材整理与草稿生成</h2>
+                  <p>在这里补齐每个分镜的素材路径；保存后可直接一步走 `SDK / JyProject` 生成草稿。</p>
+                </div>
+                <Badge status="ready">素材整理</Badge>
+              </div>
+              <ScriptSceneWorkbench
+                script={script}
+                selectedSceneId={selectedSceneId}
+                onSelectScene={setSelectedSceneId}
+                onUpdateScene={updateScriptScene}
+                onUpdateSceneEdit={updateScriptSceneEdit}
+              />
+              <div className="script-action-strip">
+                <button className="secondary-action-button" type="button" onClick={handleSaveCurrentScript} disabled={savingScript}>
+                  {savingScript ? "保存中" : "保存素材回填"}
+                </button>
+                <button
+                  className="secondary-action-button"
+                  type="button"
+                  onClick={handlePrepareAssets}
+                  disabled={savingScript || preparingAssets}
+                >
+                  {preparingAssets ? "准备中" : "自动准备素材"}
+                </button>
+                <button className="primary-button" type="button" onClick={handleBuildSdkDraftFromCurrentScript} disabled={savingScript || buildingSdkDraft}>
+                  {buildingSdkDraft ? "生成中" : "补齐素材后一步生成 SDK 草稿"}
+                </button>
+              </div>
+              {prepareReport && (
+                <div className="running-note">
+                  已准备 {prepareReport.ready_scene_count || 0}/{prepareReport.scene_count || 0} 个分镜
+                  {prepareReport.generated_assets_dir ? ` · 输出目录：${prepareReport.generated_assets_dir}` : ""}
+                </div>
+              )}
+              {draftBuildResult && (
+                <div className="running-note">
+                  草稿已生成：{draftBuildResult.draft_path || "-"}
+                </div>
+              )}
+              {prepareReport?.scenes?.length > 0 && (
+                <details className="raw-json">
+                  <summary>查看素材准备报告</summary>
+                  <pre className="result-box">{JSON.stringify(prepareReport, null, 2)}</pre>
+                </details>
+              )}
+            </section>
+            <ScriptShotTable script={script} />
+            <details className="raw-json">
+              <summary>查看 script.json</summary>
+              <pre className="result-box">{JSON.stringify(script, null, 2)}</pre>
+            </details>
+          </>
+        ) : (
+          <div className="empty-result">等待生成结构化剧本。</div>
+        )}
+      </section>
+
+      <section className="panel jianying-script-history-panel">
+        <div className="panel-header">
+          <div>
+            <h2>已生成剧本</h2>
+            <p>结构化剧本在这里查看和删除；真正生成剪映工程后才会进入“查看草稿”。</p>
+          </div>
+          <button className="text-button" type="button" onClick={() => loadScriptProjects().catch((err) => setError(err.message || String(err)))}>
+            刷新
+          </button>
+        </div>
+        <div className="draft-project-list">
+          {scriptProjects.length ? scriptProjects.map((project) => (
+            <article className="draft-project-row" key={project.project_id}>
+              <div>
+                <strong>{project.title || project.project_id}</strong>
+                <p>{project.script_path}</p>
+              </div>
+              <div className="draft-project-meta">
+                <Badge status="ready">{project.scene_count || 0} 镜</Badge>
+                <Badge>{project.generation_mode === "sdk" ? "SDK" : "本地"}</Badge>
+                <span>{project.genre || "未分类"}</span>
+                <span>{formatTimestamp(project.updated_at)}</span>
+                <button className="text-button" type="button" onClick={() => handleOpenScript(project.project_id)}>
+                  点击查看
+                </button>
+                <button className="text-button danger-text-button" type="button" onClick={() => handleDeleteScript(project.project_id)}>
+                  删除
+                </button>
+              </div>
+            </article>
+          )) : <div className="empty-result">还没有生成结构化剧本。</div>}
+        </div>
+      </section>
+    </section>
+  );
+}
+
 function DraftGeneratorToolPanel() {
   const [theme, setTheme] = useState("随机东方玄幻爱情短视频");
   const [aspectRatio, setAspectRatio] = useState("9:16");
   const [sceneCount, setSceneCount] = useState(5);
   const [provider, setProvider] = useState("");
-  const [draftName, setDraftName] = useState("ai-random-draft");
+  const [draftName, setDraftName] = useState("");
   const [jsonResult, setJsonResult] = useState(null);
   const [buildResult, setBuildResult] = useState(null);
   const [loadingJson, setLoadingJson] = useState(false);
@@ -2297,7 +2971,7 @@ function DraftGeneratorToolPanel() {
           </label>
           <label>
             草稿名称
-            <input value={draftName} onChange={(event) => setDraftName(event.target.value)} />
+            <input value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="留空则用当前时间命名" />
           </label>
         </div>
         <div className="script-action-strip">
@@ -3374,6 +4048,7 @@ function PromptReverseResultModal({ task, onClose }) {
 function App() {
   const [activeSection, setActiveSection] = useState("dashboard");
   const [activeSetting, setActiveSetting] = useState("ai-provider");
+  const [activeJianyingEditor, setActiveJianyingEditor] = useState("script");
   const [activeToolId, setActiveToolId] = useState("");
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
@@ -3543,6 +4218,7 @@ function App() {
   const filteredTools = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return tools.filter((tool) => {
+      if (tool.id === "jianying-editor-sdk") return false;
       const filterMatched = filter === "all" || tool.status === filter;
       const text = [tool.name, tool.desc, tool.status, ...tool.tags].join(" ").toLowerCase();
       return filterMatched && (!normalized || text.includes(normalized));
@@ -3668,6 +4344,21 @@ function App() {
                       onClick={() => setActiveSetting(value)}
                     >
                       <span className="settings-subnav-arrow">{activeSetting === value ? "▾" : "▸"}</span>
+                      <span>{text}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {id === "jianyingEditor" && activeSection === "jianyingEditor" && (
+                <div className="settings-subnav">
+                  {jianyingEditorItems.map(([value, text]) => (
+                    <button
+                      className={`settings-subnav-item ${activeJianyingEditor === value ? "active" : ""}`}
+                      key={value}
+                      type="button"
+                      onClick={() => setActiveJianyingEditor(value)}
+                    >
+                      <span className="settings-subnav-arrow">{activeJianyingEditor === value ? "▾" : "▸"}</span>
                       <span>{text}</span>
                     </button>
                   ))}
@@ -3835,6 +4526,15 @@ function App() {
                 </div>
                 <DraftGeneratorToolPanel />
               </>
+            ) : activeToolId === "jianying-editor-sdk" ? (
+              <>
+                <div className="section-toolbar">
+                  <button className="text-button" type="button" onClick={() => setActiveToolId("")}>
+                    返回工具列表
+                  </button>
+                </div>
+                <JianyingEditorSdkPanel />
+              </>
             ) : (
               <>
                 <div className="section-toolbar">
@@ -3865,6 +4565,16 @@ function App() {
                   ))}
                 </div>
               </>
+            )}
+          </section>
+        )}
+
+        {activeSection === "jianyingEditor" && (
+          <section>
+            {activeJianyingEditor === "script" ? (
+              <JianyingNaturalScriptPanel />
+            ) : (
+              <JianyingEditorSdkPanel activeView={activeJianyingEditor} />
             )}
           </section>
         )}

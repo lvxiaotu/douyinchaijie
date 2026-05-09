@@ -54,6 +54,7 @@ class VideoScene(BaseModel):
     audio_narration: str = Field(default="")
     onscreen_text: str = Field(default="")
     visual_prompt: str = Field(default="")
+    asset_requirements: SceneAssetRequirements = Field(default_factory=SceneAssetRequirements)
     assets: SceneAssets = Field(default_factory=SceneAssets)
     edit: SceneEdit = Field(default_factory=SceneEdit)
     status: str = Field(default="waiting_assets")
@@ -79,6 +80,17 @@ class ScriptGenerateRequest(BaseModel):
     duration_seconds: int = Field(default=30, ge=5, le=600)
     scene_count: int = Field(default=5, ge=1, le=30)
     resolution: Literal["9:16", "16:9", "1:1"] = Field(default="9:16")
+    provider: str | None = Field(default=None)
+
+
+class NaturalLanguageScriptRequest(BaseModel):
+    input: str = Field(min_length=1)
+    title: str = Field(default="")
+    creative_preset: str = Field(default="")
+    duration_seconds: int | None = Field(default=None, ge=5, le=600)
+    scene_count: int | None = Field(default=None, ge=1, le=30)
+    resolution: Literal["", "9:16", "16:9", "1:1"] = Field(default="")
+    generation_mode: Literal["local", "sdk"] = Field(default="local")
     provider: str | None = Field(default=None)
 
 
@@ -110,3 +122,20 @@ class ScriptExpandRequest(BaseModel):
     idea: str = Field(default="")
     expand_count: int = Field(default=1, ge=1, le=5)
     provider: str | None = Field(default=None)
+
+
+class ScriptPrepareAssetsRequest(BaseModel):
+    script: VideoScript | None = Field(default=None)
+    source_paths: list[str] = Field(default_factory=list)
+    resolve_local_materials: bool = Field(default=True)
+    generate_audio: bool = Field(default=True)
+    generate_images: bool = Field(default=True)
+    generate_videos: bool = Field(default=False)
+    overwrite_existing: bool = Field(default=False)
+    ffprobe_binary: str = Field(default="ffprobe")
+    tts_provider: str = Field(default="openai")
+    tts_model: str = Field(default="gpt-4o-mini-tts")
+    tts_voice: str = Field(default="alloy")
+    tts_format: str = Field(default="mp3")
+    image_provider: str = Field(default="gemini")
+    image_model: str = Field(default="imagen-4.0-generate-001")

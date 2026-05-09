@@ -10,6 +10,8 @@ from integrations.base import IntegrationAdapter, IntegrationManifest
 from integrations.jianying_draft.asset_manager import JianyingAssetManager
 from integrations.jianying_draft.decrypt_adapter import JianyingDecryptAdapter
 from integrations.jianying_draft.draft_engine import JianyingDraftEngine
+from integrations.jianying_draft.output_writer import JianyingDraftOutputWriter
+from integrations.jianying_draft.sdk_engine import JianyingSdkDraftEngine
 from integrations.jianying_draft.script_builder import JianyingScriptDraftBuilder
 
 
@@ -49,7 +51,9 @@ class JianyingDraftAdapter(IntegrationAdapter):
 
         self.assets = JianyingAssetManager()
         self.drafts = JianyingDraftEngine(str(self.output_dir), draft_root=self.draft_root)
+        self.sdk_drafts = JianyingSdkDraftEngine(str(self.output_dir), draft_root=self.draft_root)
         self.script_builder = JianyingScriptDraftBuilder()
+        self.output_writer = JianyingDraftOutputWriter()
         self.decrypt = JianyingDecryptAdapter(
             mode=self.decrypt_mode,
             decrypt_tool=self.decrypt_tool,
@@ -106,6 +110,7 @@ class JianyingDraftAdapter(IntegrationAdapter):
             "has_decrypt_tool": bool(self.decrypt_tool),
             "has_restore_tool": bool(self.restore_tool),
             "dependencies": self.drafts.dependency_status(),
+            "sdk_dependencies": self.sdk_drafts.dependency_status(),
         }
 
     def config_snapshot(self) -> dict[str, Any]:
@@ -142,11 +147,25 @@ class JianyingDraftAdapter(IntegrationAdapter):
             text_style=payload.get("text_style") if isinstance(payload.get("text_style"), dict) else None,
             text_background=payload.get("text_background") if isinstance(payload.get("text_background"), dict) else None,
         )
-        result = self.drafts.create_draft(draft_payload)
+        engine = str(payload.get("engine") or "pyjianying")
+        if engine == "sdk":
+            result = self.sdk_drafts.create_draft(draft_payload)
+        else:
+            result = self.drafts.create_draft(draft_payload)
         result["source_script"] = {
             "project_id": script_data.get("project_id") or "",
             "title": ((script_data.get("config") or {}).get("title") if isinstance(script_data.get("config"), dict) else "") or "",
             "scene_count": len(script_data.get("scenes") or []),
         }
         result["draft_request"] = draft_payload
+        result["protocol_encoding"] = ((draft_payload.get("meta") or {}).get("protocol_encoding") if isinstance(draft_payload.get("meta"), dict) else {})
+        if result.get("draft_path"):
+            try:
+                result["output"] = self.output_writer.finalize(str(result["draft_path"]))
+            except Exception as exc:
+                result["output"] = {
+                    "draft_directory": str(result["draft_path"]),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+        result["engine"] = engine
         return result

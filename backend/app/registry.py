@@ -48,6 +48,16 @@ def get_workbench() -> WorkbenchSnapshot:
             tags=["??", "??", "AI", "JSON"],
             integration_id="jianying-draft",
         ),
+        ToolDefinition(
+            id="jianying-editor-sdk",
+            icon="JY",
+            name="剪映 Editor Skill SDK",
+            desc="接入 luoluoluo22/jianying-editor-skill，先暴露 JyProject、草稿检查、素材搜索、自动导出和网页开发者指南入口。",
+            status="ready",
+            updated="已克隆到 sdks/jianying-editor-skill",
+            tags=["剪映", "SDK", "自动化", "Python"],
+            integration_id="jianying-editor-sdk",
+        ),
     ]
 
     return WorkbenchSnapshot(
@@ -130,6 +140,14 @@ def get_workbench() -> WorkbenchSnapshot:
                 kind="python",
                 status="ready",
                 repo_url="https://github.com/GuanYixuan/pyJianYingDraft",
+            ),
+            IntegrationDefinition(
+                id="jianying-editor-sdk",
+                name="剪映 Editor Skill SDK",
+                desc="本地 SDK 位于 sdks/jianying-editor-skill，提供 JyProject Python API、CLI 脚本和官方网页指南。",
+                kind="python",
+                status="ready",
+                repo_url="https://github.com/luoluoluo22/jianying-editor-skill",
             ),
         ],
     )
