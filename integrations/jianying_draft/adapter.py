@@ -10,6 +10,7 @@ from integrations.base import IntegrationAdapter, IntegrationManifest
 from integrations.jianying_draft.asset_manager import JianyingAssetManager
 from integrations.jianying_draft.decrypt_adapter import JianyingDecryptAdapter
 from integrations.jianying_draft.draft_engine import JianyingDraftEngine
+from integrations.jianying_draft.script_builder import JianyingScriptDraftBuilder
 
 
 DEFAULT_ASSET_LIBRARY_DIR = Path("data/runtime/jianying/assets")
@@ -48,6 +49,7 @@ class JianyingDraftAdapter(IntegrationAdapter):
 
         self.assets = JianyingAssetManager()
         self.drafts = JianyingDraftEngine(str(self.output_dir), draft_root=self.draft_root)
+        self.script_builder = JianyingScriptDraftBuilder()
         self.decrypt = JianyingDecryptAdapter(
             mode=self.decrypt_mode,
             decrypt_tool=self.decrypt_tool,
@@ -84,6 +86,8 @@ class JianyingDraftAdapter(IntegrationAdapter):
             return self.create_placeholder_draft(str(payload.get("name") or "jianying_draft"))
         if action == "create_draft":
             return self.create_draft(payload)
+        if action == "create_draft_from_script":
+            return self.create_draft_from_script(payload)
         raise ValueError(f"Unsupported Jianying draft action: {action}")
 
     def status(self) -> dict[str, Any]:
@@ -123,3 +127,26 @@ class JianyingDraftAdapter(IntegrationAdapter):
 
     def create_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.drafts.create_draft(payload)
+
+    def create_draft_from_script(self, payload: dict[str, Any]) -> dict[str, Any]:
+        script_data = self.script_builder.load_script(
+            script_path=str(payload.get("script_path") or "") or None,
+            script=payload.get("script") if isinstance(payload.get("script"), dict) else None,
+        )
+        draft_payload = self.script_builder.build_payload(
+            script_data=script_data,
+            name=str(payload.get("name") or "") or None,
+            include_onscreen_text=bool(payload.get("include_onscreen_text", True)),
+            subtitle_from_narration=bool(payload.get("subtitle_from_narration", False)),
+            default_media_duration_seconds=float(payload.get("default_media_duration_seconds") or 3.0),
+            text_style=payload.get("text_style") if isinstance(payload.get("text_style"), dict) else None,
+            text_background=payload.get("text_background") if isinstance(payload.get("text_background"), dict) else None,
+        )
+        result = self.drafts.create_draft(draft_payload)
+        result["source_script"] = {
+            "project_id": script_data.get("project_id") or "",
+            "title": ((script_data.get("config") or {}).get("title") if isinstance(script_data.get("config"), dict) else "") or "",
+            "scene_count": len(script_data.get("scenes") or []),
+        }
+        result["draft_request"] = draft_payload
+        return result

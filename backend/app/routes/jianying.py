@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend.app.routes.douyin import read_env_map, write_env_values
@@ -20,6 +20,7 @@ from backend.app.task_store import (
 from integrations.jianying_draft.adapter import JianyingDraftAdapter
 from integrations.jianying_draft.composition import normalize_composition
 from integrations.jianying_draft.draft_validator import JianyingDraftValidator
+from integrations.jianying_draft.draft_inspector import JianyingDraftInspector
 from integrations.jianying_draft.template_manager import JianyingTemplateManager
 
 router = APIRouter(prefix="/api/tools/jianying", tags=["jianying"])
@@ -78,6 +79,17 @@ class DraftFromAssetsRequest(BaseModel):
     default_media_duration_seconds: float = Field(default=3, ge=0.1, le=600)
 
 
+class DraftFromScriptRequest(BaseModel):
+    name: str = Field(default="")
+    script_path: str | None = Field(default=None)
+    script: dict[str, Any] | None = Field(default=None)
+    include_onscreen_text: bool = Field(default=True)
+    subtitle_from_narration: bool = Field(default=False)
+    default_media_duration_seconds: float = Field(default=3, ge=0.1, le=600)
+    text_style: dict[str, Any] = Field(default_factory=dict)
+    text_background: dict[str, Any] = Field(default_factory=dict)
+
+
 class DraftValidateRequest(BaseModel):
     draft_path: str
     name: str | None = Field(default=None)
@@ -106,12 +118,24 @@ class DraftCryptoConfirmRequest(BaseModel):
     expected_output_path: str | None = Field(default=None)
 
 
+class DraftPathRequest(BaseModel):
+    draft_path: str
+
+
+class DraftRootRequest(BaseModel):
+    draft_root: str
+
+
 def adapter() -> JianyingDraftAdapter:
     return JianyingDraftAdapter()
 
 
 def validator() -> JianyingDraftValidator:
     return JianyingDraftValidator()
+
+
+def inspector() -> JianyingDraftInspector:
+    return JianyingDraftInspector()
 
 
 def template_manager() -> JianyingTemplateManager:
@@ -318,6 +342,32 @@ def create_draft_from_assets(payload: DraftFromAssetsRequest) -> dict[str, Any]:
         raise integration_error(exc) from exc
 
 
+@router.post("/drafts/create-from-script")
+def create_draft_from_script(payload: DraftFromScriptRequest) -> dict[str, Any]:
+    try:
+        request_payload = payload.model_dump()
+        result = adapter().create_draft_from_script(request_payload)
+        saved = save_jianying_draft(
+            draft_id=result["name"],
+            name=result["name"],
+            draft_path=result["draft_path"],
+            source="script_build",
+            status=result["status"],
+            asset_report=result.get("asset_report") or {},
+            meta={
+                "dependency": result.get("dependency") or {},
+                "canvas": result.get("canvas") or {},
+                "request": result.get("draft_request") or {},
+                "source_script": result.get("source_script") or {},
+            },
+        )
+        if result.get("status") == "dependency_missing":
+            saved["note"] = "pyJianYingDraft is not installed yet; created a placeholder draft directory."
+        return {**saved, "source_script": result.get("source_script") or {}}
+    except Exception as exc:
+        raise integration_error(exc) from exc
+
+
 @router.post("/drafts/validate")
 def validate_draft(payload: DraftValidateRequest) -> dict[str, Any]:
     try:
@@ -455,5 +505,44 @@ def confirm_restore(payload: DraftCryptoConfirmRequest) -> dict[str, Any]:
         report = validator().validate(payload.expected_output_path or payload.draft_path)
         status = "restored_ready" if report.get("exists") else "waiting_for_restore"
         return {"status": status, "confirmed": status == "restored_ready", "report": report}
+    except Exception as exc:
+        raise integration_error(exc) from exc
+
+
+@router.post("/drafts/open-path")
+def open_draft_path(payload: DraftPathRequest) -> dict[str, Any]:
+    try:
+        import subprocess
+        from pathlib import Path
+
+        target = Path(payload.draft_path)
+        if not target.exists():
+            raise FileNotFoundError(f"draft path not found: {payload.draft_path}")
+        subprocess.run(["explorer.exe", str(target)], check=False)
+        return {"status": "opened", "draft_path": str(target)}
+    except Exception as exc:
+        raise integration_error(exc) from exc
+
+
+@router.post("/drafts/inspect")
+def inspect_draft(payload: DraftPathRequest) -> dict[str, Any]:
+    try:
+        return inspector().inspect(payload.draft_path)
+    except Exception as exc:
+        raise integration_error(exc) from exc
+
+
+@router.post("/drafts/projects")
+def draft_projects(payload: DraftRootRequest) -> dict[str, Any]:
+    try:
+        return inspector().list_projects(payload.draft_root)
+    except Exception as exc:
+        raise integration_error(exc) from exc
+
+
+@router.get("/drafts/inspect")
+def inspect_draft_get(draft_path: str = Query(..., description="Absolute path to Jianying draft directory")) -> dict[str, Any]:
+    try:
+        return inspector().inspect(draft_path)
     except Exception as exc:
         raise integration_error(exc) from exc

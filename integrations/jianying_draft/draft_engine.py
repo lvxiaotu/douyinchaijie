@@ -76,6 +76,8 @@ class JianyingDraftEngine:
         video_segment_cls = self._draft_attr(draft, "VideoSegment", "Video_segment")
         audio_segment_cls = self._draft_attr(draft, "AudioSegment", "Audio_segment")
         text_segment_cls = self._draft_attr(draft, "TextSegment", "Text_segment")
+        text_style_cls = self._draft_attr(draft, "TextStyle")
+        text_background_cls = self._draft_attr(draft, "TextBackground")
 
         folder = draft_folder_cls(str(draft_root))
         script = folder.create_draft(name, width, height)
@@ -114,7 +116,17 @@ class JianyingDraftEngine:
                 continue
             duration_us = int(float(item.get("duration_seconds") or 0) * 1_000_000) or default_media_duration_us
             start_us = int(float(item.get("start_seconds") or 0) * 1_000_000)
-            segment = text_segment_cls(text, self._trange(draft, start_us, duration_us))
+            style = self._build_text_style(text_style_cls, item.get("style") if isinstance(item.get("style"), dict) else {})
+            background = self._build_text_background(
+                text_background_cls,
+                item.get("background") if isinstance(item.get("background"), dict) else {},
+            )
+            segment = text_segment_cls(
+                text,
+                self._trange(draft, start_us, duration_us),
+                style=style,
+                background=background,
+            )
             script.add_segment(segment, track_name=str(item.get("track") or "text"))
 
         script.save()
@@ -158,3 +170,25 @@ class JianyingDraftEngine:
     def _safe_name(self, name: str) -> str:
         safe_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in name).strip("_")
         return safe_name or "jianying_draft"
+
+    def _build_text_style(self, style_cls: Any, config: dict[str, Any]) -> Any:
+        if not config:
+            return None
+        kwargs: dict[str, Any] = {}
+        for key in ("size", "bold", "italic", "underline", "alpha", "align", "vertical", "letter_spacing", "line_spacing", "auto_wrapping", "max_line_width"):
+            if key in config and config[key] not in (None, ""):
+                kwargs[key] = config[key]
+        color = config.get("color")
+        if isinstance(color, (list, tuple)) and len(color) == 3:
+            kwargs["color"] = tuple(float(v) for v in color)
+        return style_cls(**kwargs) if kwargs else None
+
+    def _build_text_background(self, background_cls: Any, config: dict[str, Any]) -> Any:
+        color = config.get("color")
+        if not color:
+            return None
+        kwargs = {"color": str(color)}
+        for key in ("style", "alpha", "round_radius", "height", "width", "horizontal_offset", "vertical_offset"):
+            if key in config and config[key] not in (None, ""):
+                kwargs[key] = config[key]
+        return background_cls(**kwargs)

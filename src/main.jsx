@@ -6,8 +6,10 @@ import {
   Boxes,
   Clock3,
   Database,
+  FileText,
   FolderCog,
   Home,
+  Sparkles,
   Plus,
   RefreshCw,
   Search,
@@ -18,6 +20,7 @@ import {
   archiveTask,
   createAiVideoBreakdownJob,
   createAiPromptReverseJob,
+  createJianyingDraftFromScript,
   deleteTask,
   downloadDouyinFavorites,
   fetchAiVideoConfig,
@@ -28,11 +31,17 @@ import {
   fetchAiProviderConfig,
   fetchDouyinConfig,
   fetchDouyinFavoriteItems,
+  fetchJianyingDrafts,
   fetchDouyinUserProfile,
   fetchDouyinUserVideos,
   fetchTasks,
   fetchDouyinWorkDetail,
   fetchWorkbench,
+  fetchTask,
+  generateRandomDraftJson,
+  inspectJianyingDraft,
+  listJianyingDraftProjects,
+  openJianyingDraftPath,
   saveDouyinConfig,
   saveAiVideoConfig,
   saveAiPromptReverseConfig,
@@ -42,10 +51,13 @@ import {
 import { fallbackWorkbench } from "./workbenchSeed";
 import "./styles.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8010";
+const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 const sections = {
   dashboard: ["首页", "查看最近任务、常用工具和素材状态。"],
+  videoScript: ["灵感剧本", "把创作灵感生成可编辑的 script.json。"],
+  draftGenerator: ["草稿生成器", "用 AI 随机生成 draft JSON，并直接生成剪映草稿。"],
+  draftInspector: ["查看草稿", "查看剪映草稿项目和画布详情。"],
   tools: ["工具中心", "以后每个新功能都可以作为一个独立工具接入。"],
   jobs: ["任务中心", "统一查看后台任务、进度和失败状态。"],
   library: ["素材库", "沉淀下载、分析和处理后的内容。"],
@@ -55,6 +67,9 @@ const sections = {
 
 const navItems = [
   ["dashboard", Home, "首页"],
+  ["videoScript", FileText, "灵感剧本"],
+  ["draftGenerator", Sparkles, "草稿生成器"],
+  ["draftInspector", Database, "查看草稿"],
   ["tools", Wrench, "工具中心"],
   ["jobs", Clock3, "任务中心"],
   ["library", Archive, "素材库"],
@@ -67,6 +82,7 @@ const settingItems = [
   ["douyin", "抖音采集"],
   ["ai-video", "AI 视频拆解"],
   ["ai-prompt", "反推提示词"],
+  ["jianying", "剪映草稿"],
 ];
 
 const statusText = {
@@ -82,7 +98,7 @@ function Badge({ status, children }) {
   return <span className={`badge ${status || ""}`}>{children}</span>;
 }
 
-function ToolCard({ tool }) {
+function ToolCard({ tool, onOpen }) {
   return (
     <article className="tool-card">
       <header>
@@ -101,6 +117,13 @@ function ToolCard({ tool }) {
           <Badge key={tag}>{tag}</Badge>
         ))}
       </div>
+      {onOpen && (
+        <div className="tool-card-actions">
+          <button className="text-button" type="button" onClick={() => onOpen(tool)}>
+            打开工具
+          </button>
+        </div>
+      )}
     </article>
   );
 }
@@ -442,6 +465,37 @@ function JsonPreview({ value, onBreakdown, onPromptReverse }) {
   );
 }
 
+function cleanScriptValue(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return cleanScriptValue(JSON.parse(trimmed.replaceAll("'", '"')));
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
+  if (Array.isArray(value)) {
+    return value.map(cleanScriptValue).filter(Boolean).join("\n");
+  }
+  if (typeof value === "object") {
+    return Object.values(value).map(cleanScriptValue).filter(Boolean).join("\n");
+  }
+  return String(value);
+}
+
+function sceneDuration(scene, fallback = 3) {
+  const value = Number(scene?.estimated_duration || scene?.assets?.duration || 0);
+  return value > 0 ? value : fallback;
+}
+
+function sceneSummary(scene) {
+  return cleanScriptValue(scene?.summary || scene?.visual_prompt || scene?.audio_narration || scene?.narration).slice(0, 42) || "未填写镜头概括";
+}
+
 function DouyinCollectorPanel({ onBreakdown, onPromptReverse }) {
   const [userUrl, setUserUrl] = useState("");
   const [workUrl, setWorkUrl] = useState("");
@@ -576,6 +630,436 @@ function DouyinCollectorPanel({ onBreakdown, onPromptReverse }) {
       {error && <div className="error-box">{error}</div>}
       <JsonPreview value={result} onBreakdown={onBreakdown} onPromptReverse={onPromptReverse} />
     </section>
+  );
+}
+
+const studioComponentMap = {
+  SeedInput: StudioSeedInputBlock,
+  AngleSelector: StudioAngleSelectorBlock,
+  ConceptBible: StudioConceptBibleBlock,
+  SceneBlueprint: StudioSceneBlueprintBlock,
+  ThinkingBlock: StudioThinkingBlock,
+  ErrorBlock: StudioErrorBlock,
+};
+
+function StudioBlockRenderer({ block, onAction, onRetry }) {
+  const Component = studioComponentMap[block.componentType] || StudioErrorBlock;
+  return <Component data={block.payload} locked={block.isLocked} onAction={onAction} onRetry={onRetry} />;
+}
+
+function StudioSeedInputBlock({ data, locked, onAction }) {
+  const [draft, setDraft] = useState({
+    type: data?.type || "短视频",
+    creativePreset: data?.creativePreset || "default",
+    title: data?.title || "",
+    idea: data?.idea || "",
+    provider: data?.provider || "",
+  });
+
+  if (locked) {
+    return (
+      <article className="studio-block locked">
+        <Badge status="done">已锁定</Badge>
+        <div className="studio-block-kicker">Seed</div>
+        <h3>{draft.title || draft.idea.slice(0, 18) || "未命名灵感"}</h3>
+        <p>{draft.idea}</p>
+        <div className="studio-chip-row">
+          <span>{draft.type}</span>
+          <span>{draft.creativePreset}</span>
+        </div>
+      </article>
+    );
+  }
+
+  return (
+    <form className="studio-block active" onSubmit={(event) => {
+      event.preventDefault();
+      onAction({ type: "submit", payload: draft });
+    }}>
+      <div className="panel-header">
+        <div>
+          <h3>提供灵感</h3>
+          <p>先输入一个种子，AI 只负责发散方向，不直接写分镜。</p>
+        </div>
+        <Badge>The Seed</Badge>
+      </div>
+      <div className="studio-seed-grid">
+        <label>
+          题材 / 流派
+          <select value={draft.creativePreset} onChange={(event) => setDraft({ ...draft, creativePreset: event.target.value })}>
+            <option value="default">通用短剧模板</option>
+            <option value="mysticism_lead">玄学引流模板</option>
+            <option value="ancient爽文">古风爽文漫剧</option>
+            <option value="ai_pet">AI 小动物剧情</option>
+          </select>
+        </label>
+        <label>
+          标题
+          <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：我在盛唐写天下" />
+        </label>
+        <label>
+          AI Provider
+          <select value={draft.provider} onChange={(event) => setDraft({ ...draft, provider: event.target.value })}>
+            <option value="">使用当前全局 AI</option>
+            <option value="mock">mock 调试</option>
+          </select>
+        </label>
+      </div>
+      <label>
+        灵感关键词
+        <textarea value={draft.idea} onChange={(event) => setDraft({ ...draft, idea: event.target.value })} placeholder="例如：塔罗牌为什么总能说中你的心事" required />
+      </label>
+      <div className="script-action-strip">
+        <button className="primary-button" type="submit">让 AI 发散方向</button>
+      </div>
+    </form>
+  );
+}
+
+function StudioAngleSelectorBlock({ data, locked, onAction }) {
+  const [selectedId, setSelectedId] = useState(data?.selectedAngle?.id || data?.angles?.[0]?.id || "");
+  const [feedback, setFeedback] = useState(data?.feedback || "");
+  const selectedAngle = (data?.angles || []).find((angle) => angle.id === selectedId) || data?.selectedAngle;
+
+  if (locked) {
+    return (
+      <article className="studio-block locked">
+        <Badge status="done">已锁定</Badge>
+        <div className="studio-block-kicker">Angle</div>
+        <h3>{selectedAngle?.title || "已选择方向"}</h3>
+        <p>{selectedAngle?.description}</p>
+        {feedback && <blockquote>{feedback}</blockquote>}
+      </article>
+    );
+  }
+
+  return (
+    <section className="studio-block active">
+      <div className="panel-header">
+        <div>
+          <h3>选择剧情脉络</h3>
+          <p>先决定切入点，再让 AI 收束为设定集。</p>
+        </div>
+        <Badge>3 angles</Badge>
+      </div>
+      <div className="studio-angle-grid">
+        {(data?.angles || []).map((angle) => (
+          <button className={`studio-angle-card ${selectedId === angle.id ? "active" : ""}`} key={angle.id} type="button" onClick={() => setSelectedId(angle.id)}>
+            <strong>{angle.title}</strong>
+            <span>{angle.description}</span>
+          </button>
+        ))}
+      </div>
+      <label>
+        微调意见
+        <textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="例如：选方向一，但语调要再高冷一点" />
+      </label>
+      <div className="script-action-strip">
+        <button className="primary-button" type="button" onClick={() => onAction({ type: "select", payload: { selectedAngle, feedback } })} disabled={!selectedAngle}>
+          锁定方向并生成设定集
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function StudioConceptBibleBlock({ data, locked, onAction }) {
+  const [bible, setBibleDraft] = useState(data?.bible || {});
+  const [settings, setSettings] = useState({ durationSeconds: 30, sceneCount: 5, resolution: "9:16" });
+  const update = (key, value) => setBibleDraft((current) => ({ ...current, [key]: value }));
+
+  if (locked) {
+    return (
+      <article className="studio-block locked">
+        <Badge status="done">已锁定</Badge>
+        <div className="studio-block-kicker">Concept Bible</div>
+        <h3>设定集已锁定</h3>
+        <dl className="studio-readonly-grid">
+          <dt>主角</dt><dd>{bible.character_base_prompt}</dd>
+          <dt>画风</dt><dd>{bible.art_style_prompt}</dd>
+          <dt>声音</dt><dd>{bible.voice_vibe}</dd>
+        </dl>
+      </article>
+    );
+  }
+
+  return (
+    <section className="studio-block active">
+      <div className="panel-header">
+        <div>
+          <h3>审查设定集</h3>
+          <p>这里是关键拦截点。锁定后，后续镜头会继承这些全局 Prompt。</p>
+        </div>
+        <Badge>The Bible</Badge>
+      </div>
+      <div className="script-bible-grid">
+        <label>主角视觉特征<textarea value={bible.character_base_prompt || ""} onChange={(event) => update("character_base_prompt", event.target.value)} /></label>
+        <label>画面整体风格<textarea value={bible.art_style_prompt || ""} onChange={(event) => update("art_style_prompt", event.target.value)} /></label>
+        <label>配音音色要求<textarea value={bible.voice_vibe || ""} onChange={(event) => update("voice_vibe", event.target.value)} /></label>
+        <label>BGM 检索词<textarea value={bible.bgm_keywords || ""} onChange={(event) => update("bgm_keywords", event.target.value)} /></label>
+      </div>
+      <div className="script-chassis-grid studio-inline-settings">
+        <label>预计总时长<input type="number" min="5" max="600" value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) })} /></label>
+        <label>分镜上限<input type="number" min="1" max="30" value={settings.sceneCount} onChange={(event) => setSettings({ ...settings, sceneCount: Number(event.target.value) })} /></label>
+        <label>视频比例<select value={settings.resolution} onChange={(event) => setSettings({ ...settings, resolution: event.target.value })}><option value="9:16">9:16</option><option value="16:9">16:9</option><option value="1:1">1:1</option></select></label>
+      </div>
+      <div className="script-action-strip">
+        <button className="primary-button" type="button" onClick={() => onAction({ type: "confirm", payload: { bible, settings } })}>
+          锁定设定并生成蓝图
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function StudioSceneBlueprintBlock({ data }) {
+  const scenes = data?.scenes || data?.script?.scenes || [];
+  return (
+    <section className="studio-block active">
+      <div className="panel-header">
+        <div>
+          <h3>素材蓝图</h3>
+          <p>这些卡片就是后续生成图片、音频并回填草稿的采购单。</p>
+        </div>
+        <Badge status="ready">{scenes.length} 镜</Badge>
+      </div>
+      <div className="script-output-grid">
+        {scenes.map((scene) => (
+          <article className="script-output-card" key={scene.id || scene.scene_index}>
+            <header>
+              <div>
+                <strong>{scene.title || `Scene ${scene.id || scene.scene_index}`}</strong>
+                <span>{sceneSummary(scene)}</span>
+              </div>
+              <Badge>预计 {sceneDuration(scene)}s</Badge>
+            </header>
+            <label>配音文案<textarea readOnly value={cleanScriptValue(scene.audio_narration)} /></label>
+            <label>生图/分镜提示词<textarea readOnly value={cleanScriptValue(scene.visual_prompt)} /></label>
+            <div className="script-asset-status-row">
+              <span>图片/视频 pending</span>
+              <span>音频 pending</span>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function StudioThinkingBlock({ data }) {
+  return (
+    <section className="studio-block thinking">
+      <span className="thinking-dot" />
+      <strong>{data?.text || "AI 正在思考..."}</strong>
+    </section>
+  );
+}
+
+function StudioErrorBlock({ data, onRetry }) {
+  return (
+    <section className="studio-block error">
+      <strong>这一步失败了</strong>
+      <p>{data?.message || "未知错误"}</p>
+      <button className="secondary-action-button" type="button" onClick={onRetry}>回到这一步重试</button>
+    </section>
+  );
+}
+
+function ScriptSceneWorkbench({ script, selectedSceneId, onSelectScene, onUpdateScene, onUpdateSceneEdit }) {
+  const scenes = script?.scenes || [];
+  const totalDuration = Number(script?.config?.total_duration_seconds || 0);
+  const fallbackDuration = scenes.length && totalDuration ? Math.round((totalDuration / scenes.length) * 10) / 10 : 3;
+  const selectedScene = scenes.find((scene) => scene.id === selectedSceneId) || scenes[0];
+
+  if (!selectedScene) {
+    return <div className="empty-result">当前剧本还没有镜头。</div>;
+  }
+
+  const audioValue = cleanScriptValue(selectedScene.audio_narration || selectedScene.narration);
+
+  return (
+    <section className="script-workbench">
+      <aside className="scene-master-list">
+        <div className="scene-master-head">
+          <strong>分镜列表</strong>
+          <span>{scenes.length} 个原子镜头</span>
+        </div>
+        <div className="scene-master-items">
+          {scenes.map((scene, index) => (
+            <button
+              className={`scene-master-item ${scene.id === selectedScene.id ? "active" : ""}`}
+              key={scene.id || index}
+              type="button"
+              onClick={() => onSelectScene(scene.id)}
+            >
+              <span>Scene {index + 1}</span>
+              <small>{sceneDuration(scene, fallbackDuration)}s</small>
+              <p>{sceneSummary(scene)}</p>
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      <section className="scene-detail-desk">
+        <header className="scene-detail-head">
+          <div>
+            <span>Scene {scenes.indexOf(selectedScene) + 1}</span>
+            <h3>{selectedScene.title || "原子镜头"}</h3>
+          </div>
+          <Badge>预计 {sceneDuration(selectedScene, fallbackDuration)}s</Badge>
+        </header>
+
+        <div className="track-editor-grid">
+          <article className="track-card visual-track-card">
+            <div className="track-card-head">
+              <strong>视觉轨</strong>
+              <span>给画图 AI 和画面合成使用</span>
+            </div>
+            <label>
+              生图提示词
+              <textarea
+                value={cleanScriptValue(selectedScene.visual_prompt || selectedScene.shot_description)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "visual_prompt", event.target.value)}
+              />
+            </label>
+            <label>
+              屏幕花字
+              <textarea
+                value={cleanScriptValue(selectedScene.onscreen_text)}
+                onChange={(event) => onUpdateScene(selectedScene.id, "onscreen_text", event.target.value)}
+              />
+            </label>
+          </article>
+
+          <article className="track-card audio-track-card">
+            <div className="track-card-head">
+              <strong>听觉轨</strong>
+              <span>给 TTS 和音效设计使用</span>
+            </div>
+            <label>
+              配音文案
+              <textarea
+                value={audioValue}
+                onChange={(event) => {
+                  onUpdateScene(selectedScene.id, "audio_narration", event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              背景音效要求
+              <textarea
+                value={cleanScriptValue(selectedScene.edit?.pacing || selectedScene.emotional_beat)}
+                onChange={(event) => onUpdateSceneEdit(selectedScene.id, "pacing", event.target.value)}
+              />
+            </label>
+          </article>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function ScriptShotTable({ script }) {
+  const scenes = script?.scenes || [];
+  const totalDuration = Number(script?.config?.total_duration_seconds || 0);
+  const defaultDuration = scenes.length && totalDuration ? Math.round((totalDuration / scenes.length) * 10) / 10 : 3;
+
+  return (
+    <section className="script-shot-table-panel">
+      <div className="script-shot-toolbar">
+        <div>
+          <strong>脚本视图</strong>
+          <span>{script?.config?.title || "未命名剧本"} · {scenes.length} 镜</span>
+        </div>
+        <Badge status="ready">{script?.config?.genre || "未分类"}</Badge>
+      </div>
+      <div className="script-shot-table-wrap">
+        <table className="script-shot-table">
+          <thead>
+            <tr>
+              <th>镜号</th>
+              <th>时长</th>
+              <th>画面描述</th>
+              <th>角色1</th>
+              <th>角色描述1</th>
+              <th>角色2</th>
+              <th>景别</th>
+              <th>角色动作</th>
+              <th>情绪</th>
+              <th>场景标签</th>
+              <th>光影氛围</th>
+              <th>音效</th>
+              <th>对白</th>
+              <th>分镜提示词</th>
+              <th>视频运动提示词</th>
+            </tr>
+          </thead>
+          <tbody>
+            {scenes.map((scene, index) => {
+              const characters = scene.characters || [];
+              const req = scene.asset_requirements || {};
+              const duration = scene.assets?.duration || defaultDuration;
+              return (
+                <tr key={scene.id || index}>
+                  <td>{scene.id || index + 1}</td>
+                  <td>{duration}</td>
+                  <td>{scene.shot_description || scene.action || scene.narration || "-"}</td>
+                  <td>{characters[0] || "-"}</td>
+                  <td>{req.main_subject || scene.scene_goal || "-"}</td>
+                  <td>{characters[1] || "-"}</td>
+                  <td>{scene.edit?.camera || "Medium Shot (中景)"}</td>
+                  <td>{scene.action || "-"}</td>
+                  <td>{scene.emotional_beat || req.mood || "-"}</td>
+                  <td>{scene.setting || req.background || "-"}</td>
+                  <td>{req.mood || scene.visual_prompt || "-"}</td>
+                  <td>{scene.edit?.pacing || "按剧情节奏处理"}</td>
+                  <td>{(scene.dialogue || []).join("\n") || scene.narration || "无"}</td>
+                  <td>{scene.visual_prompt || scene.onscreen_text || "-"}</td>
+                  <td>{scene.edit?.camera || scene.edit?.animation || "镜头缓慢推进，保持主体清晰。"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ScriptRecordRow({ item, onOpen, onDelete }) {
+  const progress = Math.max(0, Math.min(100, item.progress || 0));
+  const done = item.status === "done";
+  const failed = item.status === "failed" || item.status === "error";
+  const statusLabel = done ? "完成" : failed ? "失败" : `进度 ${progress}%`;
+
+  return (
+    <details className="script-record-row">
+      <summary>
+        <strong>{item.title || "未命名剧本"}</strong>
+        <span>{item.genre || "未填写类型"} · {item.scene_count || 0} 幕 · {item.resolution || "-"}</span>
+        <Badge status={done ? "done" : failed ? "error" : "running"}>{statusLabel}</Badge>
+      </summary>
+      <div className="script-record-detail">
+        <p>{item.message || "暂无进度信息"}</p>
+        {!done && !failed && (
+          <div className="progress">
+            <span style={{ width: `${progress}%` }} />
+          </div>
+        )}
+        <div className="task-action-row">
+          {item.project_id && (
+            <button className="text-button" type="button" onClick={() => onOpen(item.project_id)}>
+              打开剧本
+            </button>
+          )}
+          {item.project_id && (
+            <button className="text-button danger-text-button" type="button" onClick={() => onDelete(item.project_id)}>
+              删除
+            </button>
+          )}
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -1480,6 +1964,724 @@ function AiPromptReverseSettingsPanel() {
   );
 }
 
+function JianyingDraftSettingsPanel() {
+  const [scriptPath, setScriptPath] = useState("G:\\ob-book\\codex-project\\data\\runtime\\video_pipeline\\projects\\006104ba1f624309bd1d900608dace15\\script.json");
+  const [name, setName] = useState("frontend-script-draft");
+  const [defaultMediaDurationSeconds, setDefaultMediaDurationSeconds] = useState(3);
+  const [includeOnscreenText, setIncludeOnscreenText] = useState(true);
+  const [subtitleFromNarration, setSubtitleFromNarration] = useState(false);
+  const [textStyle, setTextStyle] = useState({
+    size: 8,
+    bold: true,
+    color: [1, 1, 1],
+    alpha: 1,
+    align: 1,
+    auto_wrapping: true,
+    max_line_width: 0.82,
+  });
+  const [textBackground, setTextBackground] = useState({
+    color: "#000000",
+    alpha: 0.45,
+    round_radius: 0.08,
+    height: 0.14,
+    width: 0.14,
+  });
+  const [drafts, setDrafts] = useState([]);
+  const [result, setResult] = useState(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function loadDrafts() {
+    const data = await fetchJianyingDrafts();
+    setDrafts(data.drafts || []);
+  }
+
+  useEffect(() => {
+    loadDrafts().catch(() => {});
+  }, []);
+
+  async function handleBuild() {
+    setLoading(true);
+    setMessage("");
+    setError("");
+    try {
+      const data = await createJianyingDraftFromScript({
+        name,
+        scriptPath,
+        includeOnscreenText,
+        subtitleFromNarration,
+        defaultMediaDurationSeconds,
+        textStyle,
+        textBackground,
+      });
+      setResult(data);
+      setMessage("剪映草稿已生成");
+      loadDrafts().catch(() => {});
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleOpenDraftPath(path) {
+    try {
+      await openJianyingDraftPath(path);
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  async function handleCopyPath(path) {
+    try {
+      await navigator.clipboard.writeText(path);
+      setMessage("草稿路径已复制");
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  return (
+    <section className="panel settings-wide">
+      <div className="panel-header">
+        <div>
+          <h2>剪映草稿生成</h2>
+          <p>把现有 `script.json` 直接组装成 pyJianYingDraft 草稿。</p>
+        </div>
+        <Badge status="ready">pyJianYingDraft</Badge>
+      </div>
+
+      <section className="collector-card">
+        <h3>从剧本构建</h3>
+        <div className="collector-fields">
+          <label>
+            script.json 路径
+            <input value={scriptPath} onChange={(event) => setScriptPath(event.target.value)} placeholder="输入 script.json 的绝对路径" />
+          </label>
+          <label>
+            草稿名称
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：my-jianying-draft" />
+          </label>
+          <label>
+            默认镜头时长（秒）
+            <input
+              type="number"
+              min="0.1"
+              step="0.1"
+              value={defaultMediaDurationSeconds}
+              onChange={(event) => setDefaultMediaDurationSeconds(event.target.value)}
+            />
+          </label>
+          <label>
+            文字字号
+            <input
+              type="number"
+              step="0.1"
+              value={textStyle.size}
+              onChange={(event) => setTextStyle((current) => ({ ...current, size: Number(event.target.value) }))}
+            />
+          </label>
+          <label>
+            背景透明度
+            <input
+              type="number"
+              min="0"
+              max="1"
+              step="0.05"
+              value={textBackground.alpha}
+              onChange={(event) => setTextBackground((current) => ({ ...current, alpha: Number(event.target.value) }))}
+            />
+          </label>
+        </div>
+
+        <div className="jianying-option-row">
+          <label className="jianying-check">
+            <input type="checkbox" checked={includeOnscreenText} onChange={(event) => setIncludeOnscreenText(event.target.checked)} />
+            <span>生成 onscreen_text 文字轨</span>
+          </label>
+          <label className="jianying-check">
+            <input type="checkbox" checked={subtitleFromNarration} onChange={(event) => setSubtitleFromNarration(event.target.checked)} />
+            <span>用 narration 额外生成字幕轨</span>
+          </label>
+          <label className="jianying-check">
+            <input
+              type="checkbox"
+              checked={Boolean(textStyle.bold)}
+              onChange={(event) => setTextStyle((current) => ({ ...current, bold: event.target.checked }))}
+            />
+            <span>文字加粗</span>
+          </label>
+        </div>
+
+        <div className="script-action-strip">
+          <button className="primary-button" type="button" onClick={handleBuild} disabled={loading || !scriptPath.trim()}>
+            {loading ? "生成中" : "生成剪映草稿"}
+          </button>
+          <button className="text-button" type="button" onClick={() => loadDrafts().catch((err) => setError(err.message || String(err)))}>
+            刷新草稿列表
+          </button>
+        </div>
+      </section>
+
+      {message && <div className="running-note">{message}</div>}
+      {error && <div className="error-box">{error}</div>}
+
+      {result && (
+        <section className="collector-card">
+          <h3>本次结果</h3>
+          <div className="jianying-result-grid">
+            <div><strong>状态</strong><p>{result.status || "-"}</p></div>
+            <div><strong>草稿目录</strong><p>{result.draft_path || "-"}</p></div>
+            <div><strong>草稿名称</strong><p>{result.name || "-"}</p></div>
+            <div><strong>来源剧本</strong><p>{result.source_script?.title || result.source_script?.project_id || "-"}</p></div>
+            <div><strong>文字字号</strong><p>{textStyle.size}</p></div>
+            <div><strong>文字底板</strong><p>{textBackground.color} / alpha {textBackground.alpha}</p></div>
+          </div>
+          <div className="script-action-strip">
+            <button className="primary-button" type="button" onClick={() => handleOpenDraftPath(result.draft_path)} disabled={!result.draft_path}>
+              打开草稿目录
+            </button>
+            <button className="text-button" type="button" onClick={() => handleCopyPath(result.draft_path)} disabled={!result.draft_path}>
+              复制草稿路径
+            </button>
+          </div>
+        </section>
+      )}
+
+      <section className="collector-card">
+        <div className="panel-header">
+          <h3>最近草稿</h3>
+          <Badge>{drafts.length}</Badge>
+        </div>
+        <div className="jianying-draft-list">
+          {drafts.length ? drafts.map((draft) => (
+            <article className="jianying-draft-row" key={draft.id || draft.draft_path}>
+              <strong>{draft.name || draft.id}</strong>
+              <p>{draft.draft_path}</p>
+              <div className="tool-meta">
+                <Badge status={draft.status === "created" || draft.status === "validated" ? "ready" : "draft"}>{draft.status || "unknown"}</Badge>
+                <Badge>{draft.source || "local"}</Badge>
+              </div>
+              <div className="tool-card-actions">
+                <button className="text-button" type="button" onClick={() => handleOpenDraftPath(draft.draft_path)}>
+                  打开目录
+                </button>
+                <button className="text-button" type="button" onClick={() => handleCopyPath(draft.draft_path)}>
+                  复制路径
+                </button>
+              </div>
+            </article>
+          )) : <div className="empty-result">还没有剪映草稿记录。</div>}
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function DraftGeneratorToolPanel() {
+  const [theme, setTheme] = useState("随机东方玄幻爱情短视频");
+  const [aspectRatio, setAspectRatio] = useState("9:16");
+  const [sceneCount, setSceneCount] = useState(5);
+  const [provider, setProvider] = useState("");
+  const [draftName, setDraftName] = useState("ai-random-draft");
+  const [jsonResult, setJsonResult] = useState(null);
+  const [buildResult, setBuildResult] = useState(null);
+  const [loadingJson, setLoadingJson] = useState(false);
+  const [buildingDraft, setBuildingDraft] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  async function handleGenerateJson() {
+    setLoadingJson(true);
+    setError("");
+    setMessage("");
+    try {
+      const data = await generateRandomDraftJson({ theme, aspectRatio, sceneCount, provider });
+      setJsonResult(data.draft_json || null);
+      setMessage("AI 已生成一份随机 draft JSON");
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setLoadingJson(false);
+    }
+  }
+
+  async function handleBuildDraft() {
+    if (!jsonResult) return;
+    setBuildingDraft(true);
+    setError("");
+    setMessage("");
+    try {
+      const data = await createJianyingDraftFromScript({
+        name: draftName,
+        script: {
+          project_id: `random-${Date.now()}`,
+          config: {
+            title: draftName,
+            resolution: jsonResult.aspect_ratio || "9:16",
+            total_duration_seconds: (jsonResult.texts || []).reduce((sum, item) => sum + Number(item.duration_seconds || 0), 0),
+          },
+          scenes: (jsonResult.texts || []).map((item, index) => ({
+            id: index + 1,
+            onscreen_text: item.text || "",
+            audio_narration: item.text || "",
+            estimated_duration: Number(item.duration_seconds || 3),
+            assets: { video_path: "", image_path: "", audio_path: "", duration: 0 },
+          })),
+        },
+        includeOnscreenText: true,
+        subtitleFromNarration: false,
+        defaultMediaDurationSeconds: 3,
+        textStyle: (jsonResult.texts || [])[0]?.style || {},
+        textBackground: (jsonResult.texts || [])[0]?.background || {},
+      });
+      setBuildResult(data);
+      setMessage("已根据随机 JSON 生成剪映草稿");
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBuildingDraft(false);
+    }
+  }
+
+  async function handleOpenDraftPath(path) {
+    try {
+      await openJianyingDraftPath(path);
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  async function handleCopyPath(path) {
+    try {
+      await navigator.clipboard.writeText(path);
+      setMessage("草稿路径已复制");
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  return (
+    <section className="panel settings-wide">
+      <div className="panel-header">
+        <div>
+          <h2>剪映草稿生成器</h2>
+          <p>先让 AI 随机生成一份合理的 draft JSON，再直接生成 pyJianYingDraft 草稿。</p>
+        </div>
+        <Badge status="ready">Tool</Badge>
+      </div>
+
+      <section className="collector-card">
+        <h3>随机 JSON</h3>
+        <div className="collector-fields">
+          <label>
+            主题
+            <input value={theme} onChange={(event) => setTheme(event.target.value)} />
+          </label>
+          <label>
+            比例
+            <select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}>
+              <option value="9:16">9:16</option>
+              <option value="16:9">16:9</option>
+              <option value="1:1">1:1</option>
+            </select>
+          </label>
+          <label>
+            场景数
+            <input type="number" min="1" max="12" value={sceneCount} onChange={(event) => setSceneCount(event.target.value)} />
+          </label>
+          <label>
+            AI Provider
+            <input value={provider} onChange={(event) => setProvider(event.target.value)} placeholder="留空使用全局配置" />
+          </label>
+          <label>
+            草稿名称
+            <input value={draftName} onChange={(event) => setDraftName(event.target.value)} />
+          </label>
+        </div>
+        <div className="script-action-strip">
+          <button className="primary-button" type="button" onClick={handleGenerateJson} disabled={loadingJson}>
+            <Sparkles size={16} />
+            {loadingJson ? "生成中" : "AI 随机生成 JSON"}
+          </button>
+          <button className="primary-button" type="button" onClick={handleBuildDraft} disabled={buildingDraft || !jsonResult}>
+            {buildingDraft ? "生成中" : "用 JSON 生成草稿"}
+          </button>
+        </div>
+      </section>
+
+      {message && <div className="running-note">{message}</div>}
+      {error && <div className="error-box">{error}</div>}
+
+      {jsonResult && (
+        <section className="collector-card">
+          <h3>随机生成的 Draft JSON</h3>
+          <pre className="result-box">{JSON.stringify(jsonResult, null, 2)}</pre>
+        </section>
+      )}
+
+      {buildResult && (
+        <section className="collector-card">
+          <h3>草稿生成结果</h3>
+          <div className="jianying-result-grid">
+            <div><strong>状态</strong><p>{buildResult.status || "-"}</p></div>
+            <div><strong>草稿目录</strong><p>{buildResult.draft_path || "-"}</p></div>
+            <div><strong>草稿名称</strong><p>{buildResult.name || "-"}</p></div>
+            <div><strong>来源</strong><p>{buildResult.source_script?.project_id || "random-json"}</p></div>
+          </div>
+          <div className="script-action-strip">
+            <button className="primary-button" type="button" onClick={() => handleOpenDraftPath(buildResult.draft_path)} disabled={!buildResult.draft_path}>
+              打开草稿目录
+            </button>
+            <button className="text-button" type="button" onClick={() => handleCopyPath(buildResult.draft_path)} disabled={!buildResult.draft_path}>
+              复制草稿路径
+            </button>
+          </div>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function DraftInspectorPanel() {
+  const [draftRoot, setDraftRoot] = useState("D:\\jianying\\JianyingPro Drafts");
+  const [projects, setProjects] = useState([]);
+  const [selectedProject, setSelectedProject] = useState(null);
+  const [projectDetail, setProjectDetail] = useState(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    handleLoadProjects().catch(() => {});
+  }, []);
+
+  async function handleLoadProjects() {
+    setLoading(true);
+    setMessage("");
+    setError("");
+    try {
+      const data = await listJianyingDraftProjects(draftRoot);
+      setProjects(data.projects || []);
+      setSelectedProject(null);
+      setProjectDetail(null);
+      setMessage(`已加载 ${data.projects?.length || 0} 个剪映项目`);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSelectProject(project) {
+    setSelectedProject(project);
+    setProjectDetail(null);
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setMessage("");
+    setError("");
+    try {
+      const data = await inspectJianyingDraft(project.draft_path);
+      setProjectDetail(data);
+    } catch (err) {
+      setProjectDetail({
+        draft_path: project.draft_path,
+        summary: {},
+        details: {},
+        draft_content: {},
+        needs_decrypt: true,
+        error: err.message || String(err),
+      });
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  async function handleOpenDraftPath(path) {
+    try {
+      await openJianyingDraftPath(path);
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  async function handleCopyPath(path) {
+    try {
+      await navigator.clipboard.writeText(path);
+      setMessage("草稿路径已复制");
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
+  return (
+    <section className="panel settings-wide">
+      <div className="panel-header">
+        <div>
+          <h2>查看草稿</h2>
+          <p>按项目查看剪映草稿，点击项目后读取 draft_content.json。</p>
+        </div>
+        <Badge status="ready">Inspect</Badge>
+      </div>
+
+      <section className="collector-card">
+        <h3>剪映草稿根目录</h3>
+        <div className="collector-fields">
+          <label>
+            Draft Root
+            <input value={draftRoot} onChange={(event) => setDraftRoot(event.target.value)} placeholder="输入 JianyingPro Drafts 目录绝对路径" />
+          </label>
+        </div>
+        <div className="script-action-strip">
+          <button className="primary-button" type="button" onClick={handleLoadProjects} disabled={loading || !draftRoot.trim()}>
+            {loading ? "扫描中" : "扫描项目"}
+          </button>
+          <button className="text-button" type="button" onClick={() => handleOpenDraftPath(draftRoot)} disabled={!draftRoot.trim()}>
+            打开目录
+          </button>
+          <button className="text-button" type="button" onClick={() => handleCopyPath(draftRoot)} disabled={!draftRoot.trim()}>
+            复制路径
+          </button>
+        </div>
+      </section>
+
+      {message && <div className="running-note">{message}</div>}
+      {error && <div className="error-box">{error}</div>}
+
+      <section className="collector-card">
+        <div className="section-title-row">
+          <h3>剪映项目</h3>
+          <Badge>{projects.length}</Badge>
+        </div>
+        <div className="draft-project-list">
+          {projects.length ? projects.map((project) => (
+            <article
+              className={`draft-project-row ${selectedProject?.draft_path === project.draft_path ? "active" : ""} ${project.needs_decrypt ? "needs-decrypt" : ""}`}
+              key={project.draft_path}
+            >
+              <div>
+                <strong>{project.name}</strong>
+                <p>{project.draft_path}</p>
+              </div>
+              <div className="draft-project-meta">
+                <Badge status={project.needs_decrypt ? "error" : "ready"}>
+                  {project.needs_decrypt ? "待解密" : "可查看"}
+                </Badge>
+                <span>{formatTimestamp(project.last_modified)}</span>
+                <button className="text-button" type="button" onClick={() => handleSelectProject(project)}>
+                  点击查看
+                </button>
+              </div>
+            </article>
+          )) : <div className="empty-result">还没有扫描到剪映项目。</div>}
+        </div>
+      </section>
+
+      {detailOpen && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setDetailOpen(false)}>
+          <section className="draft-detail-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <header className="draft-detail-modal-head">
+              <div>
+                <h3>{selectedProject?.name || "草稿详情"}</h3>
+                <p>{selectedProject?.draft_path || ""}</p>
+              </div>
+              <div className="draft-detail-actions">
+                {detailLoading ? <Badge status="running">读取中</Badge> : projectDetail?.needs_decrypt ? <Badge status="error">待解密</Badge> : <Badge status="ready">draft_content.json</Badge>}
+                <button className="text-button" type="button" onClick={() => setDetailOpen(false)}>关闭</button>
+              </div>
+            </header>
+          {detailLoading ? (
+            <div className="running-note">正在读取 draft_content.json...</div>
+          ) : projectDetail?.needs_decrypt ? (
+            <div className="error-box">{projectDetail.error || "draft_content.json 不是标准格式，可能需要先解密。"}</div>
+          ) : projectDetail ? (
+            <DraftDetailContent projectDetail={projectDetail} />
+          ) : null}
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DraftDetailContent({ projectDetail }) {
+  const content = projectDetail.draft_content || {};
+  const materialIndex = buildMaterialIndex(content.materials);
+  const segments = flattenDraftSegments(content.tracks, materialIndex);
+
+  return (
+    <div className="draft-detail-body">
+      <div className="draft-canvas-detail">
+        <div><strong>画布比例</strong><p>{projectDetail.summary?.canvas?.ratio || "-"}</p></div>
+        <div><strong>画布尺寸</strong><p>{formatCanvasSize(projectDetail.summary?.canvas)}</p></div>
+        <div><strong>草稿时长</strong><p>{formatDuration(projectDetail.summary?.duration_seconds)}</p></div>
+        <div><strong>轨道数量</strong><p>{projectDetail.summary?.track_count ?? "-"}</p></div>
+        <div><strong>轨道类型</strong><p>{Array.isArray(projectDetail.summary?.track_types) ? projectDetail.summary.track_types.join(", ") : "-"}</p></div>
+        <div><strong>素材组数</strong><p>{projectDetail.summary?.material_groups ?? "-"}</p></div>
+        <div><strong>Draft ID</strong><p>{projectDetail.summary?.draft_id || projectDetail.details?.id || "-"}</p></div>
+        <div><strong>版本</strong><p>{projectDetail.details?.new_version || projectDetail.details?.version || "-"}</p></div>
+      </div>
+
+      <section className="draft-detail-section">
+        <h4>draft_content 顶层字段</h4>
+        <div className="draft-chip-grid">
+          {Object.keys(content).map((key) => <span key={key}>{key}</span>)}
+        </div>
+      </section>
+
+      <section className="draft-detail-section">
+        <h4>轨道</h4>
+        <div className="draft-track-list">
+          {projectDetail.details?.track_details?.length ? projectDetail.details.track_details.map((track) => (
+            <article className="draft-track-row" key={track.id || `${track.type}-${track.segments}`}>
+              <strong>{track.name || track.type || "未命名轨道"}</strong>
+              <span>{track.segments} segments</span>
+              <p>{track.id}</p>
+            </article>
+          )) : <div className="empty-result">没有轨道数据。</div>}
+        </div>
+      </section>
+
+      <section className="draft-detail-section">
+        <h4>时间线片段</h4>
+        <div className="draft-segment-table">
+          <div className="draft-segment-head">
+            <span>轨道</span><span>开始</span><span>时长</span><span>素材</span><span>文本/路径</span>
+          </div>
+          {segments.length ? segments.map((segment) => (
+            <div className="draft-segment-row" key={segment.id}>
+              <span>{segment.trackType}</span>
+              <span>{formatMicroseconds(segment.start)}</span>
+              <span>{formatMicroseconds(segment.duration)}</span>
+              <span>{segment.materialType || segment.materialId || "-"}</span>
+              <p>{segment.preview || "-"}</p>
+            </div>
+          )) : <div className="empty-result">没有片段数据。</div>}
+        </div>
+      </section>
+
+      <section className="draft-detail-section">
+        <h4>素材明细</h4>
+        <div className="draft-material-list">
+          {objectEntries(content.materials).length ? objectEntries(content.materials).map(([group, items]) => (
+            <details className="draft-material-group" key={group}>
+              <summary>{group} <Badge>{Array.isArray(items) ? items.length : 0}</Badge></summary>
+              <div className="draft-material-items">
+                {Array.isArray(items) && items.length ? items.map((item, index) => (
+                  <article className="draft-material-row" key={item.id || `${group}-${index}`}>
+                    <strong>{materialTitle(item, index)}</strong>
+                    <p>{materialSubtitle(item)}</p>
+                    <code>{item.id || "-"}</code>
+                  </article>
+                )) : <div className="empty-result">没有素材条目。</div>}
+              </div>
+            </details>
+          )) : <div className="empty-result">没有素材数据。</div>}
+        </div>
+      </section>
+
+      <section className="draft-detail-section">
+        <h4>关键帧 / 配置</h4>
+        <div className="draft-chip-grid">
+          {objectEntries(projectDetail.details?.keyframe_counts).map(([key, value]) => <span key={key}>{key}: {value}</span>)}
+          {(projectDetail.details?.config_keys || []).map((key) => <span key={key}>config: {key}</span>)}
+          {!objectEntries(projectDetail.details?.keyframe_counts).length && !(projectDetail.details?.config_keys || []).length && <span>无关键帧配置</span>}
+        </div>
+      </section>
+
+      <details className="draft-json-panel">
+        <summary>查看完整 draft_content.json</summary>
+        <pre className="result-box">{JSON.stringify(content, null, 2)}</pre>
+      </details>
+    </div>
+  );
+}
+
+function objectEntries(value) {
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value);
+}
+
+function buildMaterialIndex(materials) {
+  const index = {};
+  for (const [group, items] of objectEntries(materials)) {
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      if (item?.id) index[item.id] = { ...item, group };
+    }
+  }
+  return index;
+}
+
+function flattenDraftSegments(tracks, materialIndex) {
+  if (!Array.isArray(tracks)) return [];
+  return tracks.flatMap((track) => (track.segments || []).map((segment, index) => {
+    const material = materialIndex[segment.material_id] || {};
+    return {
+      id: segment.id || `${track.id}-${index}`,
+      trackType: track.type || "-",
+      start: segment.target_timerange?.start || 0,
+      duration: segment.target_timerange?.duration || segment.source_timerange?.duration || 0,
+      materialId: segment.material_id || "",
+      materialType: material.group || material.type || "",
+      preview: materialPreview(material),
+    };
+  }));
+}
+
+function materialTitle(item, index) {
+  return item.name || item.material_name || item.type || `素材 ${index + 1}`;
+}
+
+function materialSubtitle(item) {
+  return materialPreview(item) || item.path || item.resource_id || item.type || "-";
+}
+
+function materialPreview(item) {
+  if (!item || typeof item !== "object") return "";
+  const text = extractTextMaterial(item);
+  if (text) return text;
+  return item.path || item.name || item.material_name || item.resource_id || item.effect_id || "";
+}
+
+function extractTextMaterial(item) {
+  if (typeof item.content !== "string") return "";
+  try {
+    const parsed = JSON.parse(item.content);
+    return parsed.text || "";
+  } catch {
+    return item.content.slice(0, 120);
+  }
+}
+
+function formatMicroseconds(value) {
+  const microseconds = Number(value || 0);
+  if (!Number.isFinite(microseconds) || microseconds <= 0) return "0s";
+  return `${(microseconds / 1_000_000).toFixed(2)}s`;
+}
+
+function formatCanvasSize(canvas) {
+  if (!canvas || typeof canvas !== "object") return "-";
+  const width = canvas.width || canvas.canvas_width;
+  const height = canvas.height || canvas.canvas_height;
+  return width && height ? `${width} x ${height}` : "-";
+}
+
+function formatDuration(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "-";
+  return `${seconds}s`;
+}
+
+function formatTimestamp(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp)) return "-";
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
 function videoTitle(video) {
   return video?.desc || video?.title || video?.aweme_id || video?.id || "未命名视频";
 }
@@ -2172,6 +3374,7 @@ function PromptReverseResultModal({ task, onClose }) {
 function App() {
   const [activeSection, setActiveSection] = useState("dashboard");
   const [activeSetting, setActiveSetting] = useState("ai-provider");
+  const [activeToolId, setActiveToolId] = useState("");
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [workbench, setWorkbench] = useState(fallbackWorkbench);
@@ -2623,33 +3826,58 @@ function App() {
 
         {activeSection === "tools" && (
           <section>
-            <div className="section-toolbar">
-              <div className="segmented">
-                {[
-                  ["all", "全部"],
-                  ["ready", "可用"],
-                  ["draft", "草稿"],
-                ].map(([id, label]) => (
-                  <button
-                    className={filter === id ? "active" : ""}
-                    key={id}
-                    type="button"
-                    onClick={() => setFilter(id)}
-                  >
-                    {label}
+            {activeToolId === "draft-generator" ? (
+              <>
+                <div className="section-toolbar">
+                  <button className="text-button" type="button" onClick={() => setActiveToolId("")}>
+                    返回工具列表
                   </button>
-                ))}
-              </div>
-              <button className="primary-button" type="button">
-                <Plus size={16} />
-                新工具
-              </button>
-            </div>
-            <div className="tool-grid">
-              {filteredTools.map((tool) => (
-                <ToolCard key={tool.id} tool={tool} />
-              ))}
-            </div>
+                </div>
+                <DraftGeneratorToolPanel />
+              </>
+            ) : (
+              <>
+                <div className="section-toolbar">
+                  <div className="segmented">
+                    {[
+                      ["all", "全部"],
+                      ["ready", "可用"],
+                      ["draft", "草稿"],
+                    ].map(([id, label]) => (
+                      <button
+                        className={filter === id ? "active" : ""}
+                        key={id}
+                        type="button"
+                        onClick={() => setFilter(id)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <button className="primary-button" type="button">
+                    <Plus size={16} />
+                    新工具
+                  </button>
+                </div>
+                <div className="tool-grid">
+                  {filteredTools.map((tool) => (
+                    <ToolCard key={tool.id} tool={tool} onOpen={(item) => setActiveToolId(item.id)} />
+                  ))}
+                </div>
+              </>
+            )}
+          </section>
+        )}
+
+        {activeSection === "draftGenerator" && (
+          <section>
+            <DraftGeneratorToolPanel />
+          </section>
+        )}
+
+        {activeSection === "draftInspector" && (
+          <section>
+            <DraftInspectorPanel />
           </section>
         )}
 
@@ -2862,6 +4090,7 @@ function App() {
             {activeSetting === "douyin" && <DouyinSettingsPanel />}
             {activeSetting === "ai-video" && <AiVideoSettingsPanel />}
             {activeSetting === "ai-prompt" && <AiPromptReverseSettingsPanel />}
+            {activeSetting === "jianying" && <JianyingDraftSettingsPanel />}
           </section>
         )}
       </main>

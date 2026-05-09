@@ -38,6 +38,16 @@ def get_workbench() -> WorkbenchSnapshot:
             tags=["AI", "提示词", "视频"],
             integration_id="ai-prompt-reverse",
         ),
+        ToolDefinition(
+            id="draft-generator",
+            icon="JD",
+            name="???????",
+            desc="?? AI ????????? draft JSON?????? pyJianYingDraft ???",
+            status="ready",
+            updated="??? AI JSON ?? + ????",
+            tags=["??", "??", "AI", "JSON"],
+            integration_id="jianying-draft",
+        ),
     ]
 
     return WorkbenchSnapshot(
@@ -112,6 +122,14 @@ def get_workbench() -> WorkbenchSnapshot:
                 desc="从采集视频创建提示词反推任务，输出 master prompt、negative prompt、分镜提示词和风格关键词。",
                 kind="python",
                 status="ready",
+            ),
+            IntegrationDefinition(
+                id="jianying-draft",
+                name="???????",
+                desc="?? pyJianYingDraft ??????? draft JSON ????? script.json ???????",
+                kind="python",
+                status="ready",
+                repo_url="https://github.com/GuanYixuan/pyJianYingDraft",
             ),
         ],
     )

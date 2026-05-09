@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8010";
+const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 export async function fetchWorkbench() {
   const response = await fetch(`${API_BASE}/api/workbench`);
@@ -249,6 +249,180 @@ export async function fetchAiVideoArchives() {
 
 export async function fetchAiPromptReverseArchives() {
   const response = await fetch(`${API_BASE}/api/tools/ai-prompt-reverse/archives`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function createJianyingDraftFromScript(payload) {
+  return postJson("/api/tools/jianying/drafts/create-from-script", {
+    name: payload.name || "",
+    script_path: payload.scriptPath || undefined,
+    script: payload.script || undefined,
+    include_onscreen_text: Boolean(payload.includeOnscreenText),
+    subtitle_from_narration: Boolean(payload.subtitleFromNarration),
+    default_media_duration_seconds: Number(payload.defaultMediaDurationSeconds || 3),
+    text_style: payload.textStyle || {},
+    text_background: payload.textBackground || {},
+  });
+}
+
+export function generateRandomDraftJson(payload) {
+  return postJson("/api/tools/draft-playground/random-json", {
+    theme: payload.theme || "随机短视频剧情",
+    aspect_ratio: payload.aspectRatio || "9:16",
+    scene_count: Number(payload.sceneCount || 5),
+    provider: payload.provider || undefined,
+  });
+}
+
+export async function fetchJianyingDrafts(status) {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  const response = await fetch(`${API_BASE}/api/tools/jianying/drafts${query}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function openJianyingDraftPath(draftPath) {
+  return postJson("/api/tools/jianying/drafts/open-path", {
+    draft_path: draftPath,
+  });
+}
+
+export function inspectJianyingDraft(draftPath) {
+  return postJson("/api/tools/jianying/drafts/inspect", {
+    draft_path: draftPath,
+  });
+}
+
+export function listJianyingDraftProjects(draftRoot) {
+  return postJson("/api/tools/jianying/drafts/projects", {
+    draft_root: draftRoot,
+  });
+}
+
+export function generateVideoScript(payload) {
+  return postJson("/api/tools/video-script/generate", {
+    title: payload.title,
+    idea: payload.idea,
+    creative_preset: payload.creativePreset,
+    genre: payload.genre,
+    style: payload.style,
+    audience: payload.audience,
+    tone: payload.tone,
+    structure: payload.structure,
+    cta: payload.cta,
+    duration_seconds: Number(payload.durationSeconds || 30),
+    scene_count: Number(payload.sceneCount || 5),
+    resolution: payload.resolution || "9:16",
+    provider: payload.provider || undefined,
+  });
+}
+
+export function generateVideoScriptBible(payload) {
+  return postJson("/api/tools/video-script/bible", {
+    title: payload.title,
+    idea: payload.idea,
+    genre: payload.genre,
+    creative_preset: payload.creativePreset,
+    provider: payload.provider || undefined,
+  });
+}
+
+export function generateVideoScriptBlueprint(payload) {
+  return postJson("/api/tools/video-script/blueprint", {
+    title: payload.title,
+    idea: payload.idea,
+    genre: payload.genre,
+    creative_preset: payload.creativePreset,
+    bible: payload.bible,
+    duration_seconds: Number(payload.durationSeconds || 30),
+    scene_count: Number(payload.sceneCount || 5),
+    resolution: payload.resolution || "9:16",
+    provider: payload.provider || undefined,
+  });
+}
+
+export function brainstormStudio(payload) {
+  return postJson("/api/studio/brainstorm", {
+    type: payload.type || "短视频",
+    inspiration: payload.inspiration,
+    provider: payload.provider || undefined,
+  });
+}
+
+export function lockStudioConcept(payload) {
+  return postJson("/api/studio/lock_concept", {
+    context: payload.context || {},
+    angle_id: payload.angleId || "",
+    feedback: payload.feedback || "",
+    provider: payload.provider || undefined,
+  });
+}
+
+export function generateStudioBlueprint(payload) {
+  return postJson("/api/studio/generate_blueprint", {
+    context: payload.context || {},
+    bible: payload.bible,
+    title: payload.title,
+    idea: payload.idea,
+    genre: payload.genre || "",
+    creative_preset: payload.creativePreset || "default",
+    duration_seconds: Number(payload.durationSeconds || 30),
+    scene_count: Number(payload.sceneCount || 5),
+    resolution: payload.resolution || "9:16",
+    provider: payload.provider || undefined,
+  });
+}
+
+export async function fetchVideoScripts() {
+  const response = await fetch(`${API_BASE}/api/tools/video-script`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchTask(taskId) {
+  const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(taskId)}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchVideoScript(projectId) {
+  const response = await fetch(`${API_BASE}/api/tools/video-script/${encodeURIComponent(projectId)}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function saveVideoScript(projectId, script) {
+  return postJson(`/api/tools/video-script/${encodeURIComponent(projectId)}/save`, { script });
+}
+
+export function expandVideoScript(projectId, payload) {
+  return postJson(`/api/tools/video-script/${encodeURIComponent(projectId)}/expand`, {
+    idea: payload.idea || "",
+    expand_count: Number(payload.expandCount || 1),
+    provider: payload.provider || undefined,
+  });
+}
+
+export async function deleteVideoScript(projectId) {
+  const response = await fetch(`${API_BASE}/api/tools/video-script/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+  });
   const data = await response.json();
   if (!response.ok) {
     throw new Error(JSON.stringify(data?.detail || data, null, 2));
