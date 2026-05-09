@@ -123,7 +123,7 @@ class JianyingSdkDraftEngine:
                 **kwargs,
             )
 
-        applied_edits = self._apply_scene_edits(project, video_segments, scene_plan)
+        edit_report = self._apply_scene_edits(project, video_segments, scene_plan)
 
         stdout = sys.stdout
         encoding = getattr(stdout, "encoding", "") or ""
@@ -149,66 +149,100 @@ class JianyingSdkDraftEngine:
             "dependency": self.dependency_status(),
             "canvas": {"width": width, "height": height},
             "save_result": save_result,
-            "applied_edits": applied_edits,
+            "applied_edits": edit_report["applied_edits"],
+            "failed_edits": edit_report["failed_edits"],
         }
 
-    def _apply_scene_edits(self, project: Any, video_segments: dict[str, Any], scene_plan: list[Any]) -> list[dict[str, Any]]:
+    def _apply_scene_edits(self, project: Any, video_segments: dict[str, Any], scene_plan: list[Any]) -> dict[str, list[dict[str, Any]]]:
         if not scene_plan:
-            return []
+            return {"applied_edits": [], "failed_edits": []}
         self._prepare_imports()
         import pyJianYingDraft as draft  # type: ignore
         from pyJianYingDraft import KeyframeProperty as KP  # type: ignore
 
-        ordered_roles = [
-            str(item.get("role") or "").strip()
-            for item in scene_plan
-            if isinstance(item, dict) and str(item.get("role") or "").strip()
-        ]
         applied: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
 
         for index, item in enumerate(scene_plan):
             if not isinstance(item, dict):
                 continue
             role = str(item.get("role") or "").strip()
             segment = video_segments.get(role)
-            if segment is None:
-                continue
             edit = item.get("edit") if isinstance(item.get("edit"), dict) else {}
             transition_name = str(edit.get("transition") or "").strip()
             animation_name = str(edit.get("animation") or "").strip()
             camera_name = str(edit.get("camera") or "").strip()
-            applied_item = {"role": role, "transition": "", "animation": "", "camera": ""}
+            if segment is None:
+                for field_name, original_value in [
+                    ("transition", transition_name),
+                    ("animation", animation_name),
+                    ("camera", camera_name),
+                ]:
+                    if original_value:
+                        failed.append(self._failed_edit(role, field_name, original_value, "", "segment_not_found"))
+                continue
 
             if transition_name and index > 0:
+                mapped_transition = transition_name
                 try:
                     mapped_transition = self._map_transition_name(transition_name)
-                    project.add_transition_simple(mapped_transition, video_segment=segment, duration="0.6s")
-                    applied_item["transition"] = mapped_transition
-                except Exception:
-                    pass
+                    result = project.add_transition_simple(mapped_transition, video_segment=segment, duration="0.6s")
+                    if result is None:
+                        failed.append(self._failed_edit(role, "transition", transition_name, mapped_transition, "enum_not_found"))
+                    else:
+                        applied.append(self._applied_edit(role, "transition", transition_name, mapped_transition))
+                except Exception as exc:
+                    failed.append(self._failed_edit(role, "transition", transition_name, mapped_transition, f"{type(exc).__name__}: {exc}"))
+            elif transition_name:
+                failed.append(self._failed_edit(role, "transition", transition_name, "", "first_segment_has_no_previous_transition_target"))
 
-            mapped_animation = self._apply_animation(segment, animation_name, draft, KP)
-            if mapped_animation:
-                applied_item["animation"] = mapped_animation
+            if animation_name:
+                try:
+                    mapped_animation = self._apply_animation(segment, animation_name, draft, KP)
+                    if mapped_animation:
+                        applied.append(self._applied_edit(role, "animation", animation_name, mapped_animation))
+                    else:
+                        failed.append(self._failed_edit(role, "animation", animation_name, "", "enum_not_found_or_empty_timerange"))
+                except Exception as exc:
+                    failed.append(self._failed_edit(role, "animation", animation_name, "", f"{type(exc).__name__}: {exc}"))
 
-            mapped_camera = self._apply_camera(segment, camera_name, KP)
-            if mapped_camera:
-                applied_item["camera"] = mapped_camera
+            if camera_name:
+                try:
+                    mapped_camera = self._apply_camera(segment, camera_name, KP)
+                    if mapped_camera:
+                        applied.append(self._applied_edit(role, "camera", camera_name, mapped_camera))
+                    else:
+                        failed.append(self._failed_edit(role, "camera", camera_name, "", "unsupported_camera_or_empty_timerange"))
+                except Exception as exc:
+                    failed.append(self._failed_edit(role, "camera", camera_name, "", f"{type(exc).__name__}: {exc}"))
 
-            if any(applied_item.values()):
-                applied.append(applied_item)
-        return applied
+        return {"applied_edits": applied, "failed_edits": failed}
+
+    def _applied_edit(self, role: str, field: str, original: str, applied: str) -> dict[str, Any]:
+        return {
+            "role": role,
+            "field": field,
+            "input": original,
+            "applied": applied,
+        }
+
+    def _failed_edit(self, role: str, field: str, original: str, target: str, reason: str) -> dict[str, Any]:
+        return {
+            "role": role,
+            "field": field,
+            "input": original,
+            "target": target,
+            "reason": reason,
+        }
 
     def _apply_animation(self, segment: Any, animation_name: str, draft: Any, keyframe_property: Any) -> str:
         if not animation_name:
             return ""
         normalized = self._normalize_keyword(animation_name)
         if any(token in normalized for token in ("zoomin", "zoom", "pushin", "push")):
-            self._apply_zoom_keyframes(segment, keyframe_property, scale=1.08)
-            return "zoom_in"
+            return "zoom_in" if self._apply_zoom_keyframes(segment, keyframe_property, scale=1.08) else ""
         if any(token in normalized for token in ("zoomout", "pullout")):
-            self._apply_zoom_keyframes(segment, keyframe_property, scale=0.94)
-            return "zoom_out"
+            return "zoom_out" if self._apply_zoom_keyframes(segment, keyframe_property, scale=0.94) else ""
 
         outro_name = self._map_outro_name(animation_name)
         if outro_name:
@@ -235,39 +269,35 @@ class JianyingSdkDraftEngine:
             return ""
         normalized = self._normalize_keyword(camera_name)
         if any(token in normalized for token in ("pushin", "push", "zoomin", "tuijin", "lajin")):
-            self._apply_zoom_keyframes(segment, keyframe_property, scale=1.12)
-            return "push_in"
+            return "push_in" if self._apply_zoom_keyframes(segment, keyframe_property, scale=1.12) else ""
         if any(token in normalized for token in ("pullout", "pull", "zoomout", "layuan")):
-            self._apply_zoom_keyframes(segment, keyframe_property, scale=0.92)
-            return "pull_out"
+            return "pull_out" if self._apply_zoom_keyframes(segment, keyframe_property, scale=0.92) else ""
         if any(token in normalized for token in ("panleft", "moveleft", "left", "zuoyi")):
-            self._apply_pan_keyframes(segment, keyframe_property, axis="x", start=-0.08, end=0.08)
-            return "pan_left"
+            return "pan_left" if self._apply_pan_keyframes(segment, keyframe_property, axis="x", start=-0.08, end=0.08) else ""
         if any(token in normalized for token in ("panright", "moveright", "right", "youyi")):
-            self._apply_pan_keyframes(segment, keyframe_property, axis="x", start=0.08, end=-0.08)
-            return "pan_right"
+            return "pan_right" if self._apply_pan_keyframes(segment, keyframe_property, axis="x", start=0.08, end=-0.08) else ""
         if any(token in normalized for token in ("panup", "moveup", "up", "shangyi")):
-            self._apply_pan_keyframes(segment, keyframe_property, axis="y", start=0.08, end=-0.08)
-            return "pan_up"
+            return "pan_up" if self._apply_pan_keyframes(segment, keyframe_property, axis="y", start=0.08, end=-0.08) else ""
         if any(token in normalized for token in ("pandown", "movedown", "down", "xiayi")):
-            self._apply_pan_keyframes(segment, keyframe_property, axis="y", start=-0.08, end=0.08)
-            return "pan_down"
+            return "pan_down" if self._apply_pan_keyframes(segment, keyframe_property, axis="y", start=-0.08, end=0.08) else ""
         return ""
 
-    def _apply_zoom_keyframes(self, segment: Any, keyframe_property: Any, scale: float) -> None:
+    def _apply_zoom_keyframes(self, segment: Any, keyframe_property: Any, scale: float) -> bool:
         duration = int(getattr(segment.target_timerange, "duration", 0) or 0)
         if duration <= 0:
-            return
+            return False
         segment.add_keyframe(keyframe_property.uniform_scale, 0, 1.0)
         segment.add_keyframe(keyframe_property.uniform_scale, duration, float(scale))
+        return True
 
-    def _apply_pan_keyframes(self, segment: Any, keyframe_property: Any, *, axis: str, start: float, end: float) -> None:
+    def _apply_pan_keyframes(self, segment: Any, keyframe_property: Any, *, axis: str, start: float, end: float) -> bool:
         duration = int(getattr(segment.target_timerange, "duration", 0) or 0)
         if duration <= 0:
-            return
+            return False
         prop = keyframe_property.position_x if axis == "x" else keyframe_property.position_y
         segment.add_keyframe(prop, 0, float(start))
         segment.add_keyframe(prop, duration, float(end))
+        return True
 
     def _resolve_enum(self, enum_cls: Any, name: str) -> Any:
         if not name:

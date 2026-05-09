@@ -1,0 +1,13 @@
+{
+  "id": "jianying-editor-skill",
+  "mode": "vendor-snapshot",
+  "repo_url": "https://github.com/luoluoluo22/jianying-editor-skill",
+  "version": "1.5.0",
+  "commit": "e6c4b6e83b787cca8fb8664c6ea87658a23b541f",
+  "locked_at": "2026-05-09",
+  "policy": {
+    "sdk_tree": "Treat sdks/jianying-editor-skill as upstream-owned snapshot content.",
+    "project_bridge": "Keep project bridge logic in integrations/jianying_editor_skill.",
+    "upgrade": "Update this lock file whenever the upstream SDK snapshot is replaced."
+  }
+}

@@ -30,7 +30,9 @@
 ├─ scripts/                     # 辅助脚本
 ├─ .env.example                 # 配置示例
 ├─ package.json                 # 前端依赖
-└─ requirements.txt             # 主后端依赖
+├─ requirements-base.txt        # 主后端和通用 AI/视频处理依赖
+├─ requirements-sdk.txt         # 剪映 SDK / JyProject 相关依赖
+└─ requirements.txt             # 完整本地工作台依赖聚合
 ```
 
 ## 启动顺序
@@ -92,6 +94,27 @@ http://127.0.0.1:5173
 5173  前端 Vite
 8010  主后端 FastAPI
 8123  Douyin_TikTok_Download_API
+```
+
+## Python 依赖分层
+
+```text
+requirements-base.txt   主后端、任务中心、AI Provider、视频拆解等基础依赖
+requirements-sdk.txt    剪映草稿、JianYing Editor Skill、JyProject 高阶能力依赖
+requirements.txt        完整本地工作台，聚合 base + sdk
+```
+
+安装建议：
+
+```powershell
+# 完整本地工作台
+pip install -r requirements.txt
+
+# 只跑主后端和非剪映能力
+pip install -r requirements-base.txt
+
+# 已有基础环境时，只补剪映 SDK 能力
+pip install -r requirements-sdk.txt
 ```
 
 ## 当前抖音接口
@@ -174,10 +197,61 @@ integrations/项目名/
 - 第三方项目依赖和运行环境尽量独立。
 - 如果替换第三方项目，只替换适配器，不改主接口。
 
+## 剪映 SDK 接入治理
+
+当前 `sdks/jianying-editor-skill/` 按 `vendor snapshot` 模式管理，锁定信息在：
+
+```text
+sdks/jianying-editor-skill.lock.json
+```
+
+治理规则：
+
+- `sdks/jianying-editor-skill/` 只当作上游 SDK 快照，不放本项目业务逻辑。
+- 本项目自己的桥接代码放在 `integrations/jianying_editor_skill/`。
+- 剧本生成侧使用 `generation_mode=skill_contract`，表示“Skill 规则生成”。
+- 草稿生成侧使用 `engine=sdk`，表示“通过 JyProject 生成剪映草稿”。
+- 不再依赖 SDK 子仓库里的未跟踪文件，例如 `scripts/script_input_sdk_adapter.py`。
+
+职责边界：
+
+```text
+integrations/video_pipeline/         负责生成和保存标准 script.json
+integrations/jianying_draft/         负责把 script.json 转为剪映草稿
+integrations/jianying_editor_skill/  负责 SDK 能力发现、环境体检和桥接逻辑
+```
+
+已接入的上游 SDK 能力：
+
+```text
+api_validator.py              显式深度诊断，不在普通 status 中自动创建草稿
+draft_inspector.py            草稿列表、草稿摘要、草稿 JSON 查看
+asset_search.py               特效/转场/滤镜/曲库等资产搜索
+cloud_manager.py              云素材/云音乐解析和本地缓存
+build_cloud_music_library.py  从本地草稿同步云音乐和音效库
+universal_tts.py              剪映/SAMI 或 Edge TTS 配音生成
+web_recorder.py               Web VFX / 网页动画录屏
+smart_zoomer.py               录屏点击事件驱动的智能缩放草稿
+movie_commentary_builder.py   电影解说故事版草稿生成
+auto_exporter.py              显式用户操作触发的剪映草稿导出
+```
+
+状态接口约定：
+
+```text
+GET  /api/tools/jianying-editor-sdk/status
+  轻量能力发现，无草稿写入副作用。
+
+POST /api/tools/jianying-editor-sdk/diagnostics/deep
+  显式运行 api_validator.py --json，会创建诊断草稿用于验收最小链路。
+```
+
+自动导出只在 Windows、`uiautomation` 可用，并且检测到剪映版本 `<= 5.9` 时标记为可用。若本机无法自动识别版本，可通过 `JY_JIANYING_VERSION=5.9.0` 显式覆盖检测。
+
 详细架构说明见：
 
 ```text
-docs/ARCHITECTURE.md
+integrations/jianying_editor_skill/README.md
 ```
 
 ## 配置变更记录
@@ -193,6 +267,11 @@ docs/ARCHITECTURE.md
 - 主项目通过 HTTP 调用上游抖音服务，不再 import 上游爬虫源码。
 - 新增 AI 视频拆解工具骨架，默认使用 mock provider，任务结果保存到 `data/runtime/ai_video_analysis/jobs/`。
 - 新增 SQLite 任务库 `data/runtime/tasks.sqlite3`，任务中心从后端任务状态读取，不再只依赖前端内存。
+2026-05-09
+- 剪映 SDK 接入改为 `vendor snapshot` 治理，新增 `sdks/jianying-editor-skill.lock.json`。
+- Python 依赖拆分为 `requirements-base.txt` 和 `requirements-sdk.txt`，`requirements.txt` 聚合完整本地工作台依赖。
+- 剪映 SDK 普通 status 改为无副作用轻量检查，深度诊断改为显式 `POST /api/tools/jianying-editor-sdk/diagnostics/deep`。
+- 剪映自动导出增加版本门禁：仅 Windows + `uiautomation` + 剪映 `<= 5.9` 时标记可用。
 ```
 
 ## 需求变更记录
@@ -212,6 +291,13 @@ docs/ARCHITECTURE.md
 - 已完成的 AI 视频拆解会写入 SQLite 的 `analysis_archives` 表，可通过 `/api/tools/ai-video-analysis/archives` 查询。
 - 新增 AI 提示词反推工具：从采集视频反推出 `master_prompt`、`negative_prompt`、分镜提示词、风格关键词和使用建议。
 - 已完成的 AI 提示词反推会写入 SQLite 的 `prompt_reverse_archives` 表，可通过 `/api/tools/ai-prompt-reverse/archives` 查询。
+2026-05-09
+- 剧本侧 `generation_mode=sdk` 重命名为 `skill_contract`，旧值仅保留兼容。
+- 草稿侧 `engine=sdk` 专指 JyProject 草稿生成。
+- `script_input_sdk_adapter.py` 的业务逻辑迁出 SDK 子仓库，改由 `integrations/jianying_editor_skill/script_contract_adapter.py` 管理。
+- 接入上游 SDK 的 `draft_inspector`、`asset_search`、`auto_exporter`，统一通过 `sdk_cli_runner.py` 和 `sdk_capability_service.py` 暴露。
+- 补齐 SDK 能力矩阵，增加云素材/云音乐、TTS、Web VFX、录屏智能缩放、电影解说等高阶能力入口。
+- 新增 `tests/test_jianying_editor_sdk.py`，覆盖能力矩阵、无副作用 status、自动导出版本门禁和 SDK CLI JSON 解析。
 ```
 
 ## 开发备注

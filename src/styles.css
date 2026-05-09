@@ -2316,7 +2316,7 @@ h1 {
 
 .sdk-summary-grid {
   display: grid;
-  grid-template-columns: 0.5fr minmax(0, 1.5fr) 0.5fr;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
 }
 
@@ -2378,6 +2378,110 @@ h1 {
 
 .sdk-entry code {
   color: var(--teal);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.sdk-capability-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.sdk-capability-meta span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sdk-diagnostics-box {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.sdk-tool-panel {
+  grid-column: 1 / -1;
+}
+
+.sdk-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.sdk-tool-box {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.sdk-tool-box header,
+.sdk-mini-list article {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sdk-tool-box label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sdk-tool-box input,
+.sdk-tool-box select,
+.sdk-tool-box textarea {
+  min-width: 0;
+}
+
+.sdk-tool-box textarea {
+  resize: vertical;
+}
+
+.sdk-checkbox-row {
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 8px !important;
+}
+
+.sdk-checkbox-row input {
+  width: auto;
+  min-height: 0;
+}
+
+.sdk-inline-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.sdk-mini-list {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.sdk-mini-list article {
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.sdk-mini-list p {
+  margin: 4px 0 0;
+  color: var(--muted);
   font-size: 12px;
   overflow-wrap: anywhere;
 }

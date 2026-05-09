@@ -316,6 +316,108 @@ export async function fetchJianyingEditorSdkStatus() {
   return data;
 }
 
+export function runJianyingEditorSdkDiagnostics(payload = {}) {
+  return postJson("/api/tools/jianying-editor-sdk/diagnostics/deep", {
+    project: payload.project || "",
+    video: payload.video || "",
+    strict: Boolean(payload.strict),
+  });
+}
+
+export function listJianyingEditorSdkDrafts(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/drafts/list", {
+    root: payload.root || "",
+    limit: Number(payload.limit || 20),
+  });
+}
+
+export function summarizeJianyingEditorSdkDraft(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/drafts/summary", {
+    root: payload.root || "",
+    name: payload.name || "",
+    path: payload.path || "",
+  });
+}
+
+export function showJianyingEditorSdkDraft(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/drafts/show", {
+    root: payload.root || "",
+    name: payload.name || "",
+    path: payload.path || "",
+    kind: payload.kind || "content",
+  });
+}
+
+export function searchJianyingEditorSdkAssets(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/assets/search", {
+    query: payload.query || "",
+    category: payload.category || "",
+    limit: Number(payload.limit || 20),
+  });
+}
+
+export function exportJianyingEditorSdkDraft(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/exports", {
+    name: payload.name || "",
+    output_path: payload.outputPath || "",
+    resolution: payload.resolution || "",
+    framerate: payload.framerate || "",
+  });
+}
+
+export function recordJianyingEditorSdkWebVfx(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/web-vfx/record", {
+    source: payload.source || "",
+    output_path: payload.outputPath || "",
+    max_duration_seconds: Number(payload.maxDurationSeconds || 30),
+  });
+}
+
+export function generateJianyingEditorSdkTts(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/tts", {
+    text: payload.text || "",
+    output_path: payload.outputPath || "",
+    speaker: payload.speaker || "zh_male_huoli",
+    backend: payload.backend || "",
+    allow_fallback: payload.allowFallback !== false,
+    sami_retries: Number(payload.samiRetries ?? 2),
+  });
+}
+
+export function resolveJianyingEditorSdkCloudAsset(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/cloud/assets/resolve", {
+    query: payload.query || "",
+    force: Boolean(payload.force),
+  });
+}
+
+export function syncJianyingEditorSdkCloudMusicLibrary(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/cloud/music-library/sync", {
+    projects_root: payload.projectsRoot || "",
+    dry_run: Boolean(payload.dryRun),
+  });
+}
+
+export function createJianyingEditorSdkSmartZoomDraft(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/smart-zoom/drafts", {
+    project_name: payload.projectName || "",
+    video_path: payload.videoPath || "",
+    events_json_path: payload.eventsJsonPath || "",
+    zoom_scale: Number(payload.zoomScale || 150),
+    hold_seconds: Number(payload.holdSeconds || 5),
+  });
+}
+
+export function createJianyingEditorSdkMovieCommentaryDraft(payload) {
+  return postJson("/api/tools/jianying-editor-sdk/movie-commentary/drafts", {
+    video_path: payload.videoPath || "",
+    storyboard_path: payload.storyboardPath || "",
+    project_name: payload.projectName || "Movie_Commentary_Project",
+    bgm_path: payload.bgmPath || "",
+    mask_path: payload.maskPath || "",
+  });
+}
+
 export function generateVideoScript(payload) {
   return postJson("/api/tools/video-script/generate", {
     title: payload.title,

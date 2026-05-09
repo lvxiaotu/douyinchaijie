@@ -1,0 +1,9 @@
+# JianYing draft creation and editor-skill optional capabilities.
+pyJianYingDraft>=0.2.5,<0.3
+playwright>=1.48.0
+uiautomation>=2.0.20; platform_system == "Windows"
+pynput>=1.7.7
+edge-tts>=7.0.0
+websockets>=12.0
+opencv-python>=4.10.0
+numpy>=2.0.0

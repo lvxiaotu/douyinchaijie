@@ -361,6 +361,8 @@ def create_draft_from_script(payload: DraftFromScriptRequest) -> dict[str, Any]:
                 "request": result.get("draft_request") or {},
                 "source_script": result.get("source_script") or {},
                 "engine": result.get("engine") or request_payload.get("engine") or "pyjianying",
+                "applied_edits": result.get("applied_edits") or [],
+                "failed_edits": result.get("failed_edits") or [],
             },
         )
         if result.get("status") == "dependency_missing":
@@ -370,6 +372,7 @@ def create_draft_from_script(payload: DraftFromScriptRequest) -> dict[str, Any]:
             "source_script": result.get("source_script") or {},
             "engine": result.get("engine") or request_payload.get("engine") or "pyjianying",
             "applied_edits": result.get("applied_edits") or [],
+            "failed_edits": result.get("failed_edits") or [],
             "protocol_encoding": result.get("protocol_encoding") or {},
             "output": result.get("output") or {},
         }

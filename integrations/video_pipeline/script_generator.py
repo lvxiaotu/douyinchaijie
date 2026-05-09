@@ -19,7 +19,7 @@ from integrations.jianying_editor_skill.script_input_parser import (
     JIANYING_SCRIPT_CONTRACT,
     JianyingScriptInputParser,
 )
-from integrations.jianying_editor_skill.sdk_script_generator import JianyingEditorSdkScriptGenerator
+from integrations.jianying_editor_skill.skill_contract_script_generator import JianyingSkillContractScriptGenerator
 from integrations.video_pipeline.script_schema import (
     BibleGenerateRequest,
     BlueprintGenerateRequest,
@@ -193,9 +193,10 @@ class VideoScriptGenerator:
         )
         if progress:
             progress(14, f"识别为 {parsed.intent}，准备生成结构化剧本")
-        generation_mode = payload.generation_mode or "local"
-        if generation_mode == "sdk":
-            result = self.generate_with_sdk_project_id(parsed.script_request, project_id, progress=progress)
+        requested_generation_mode = payload.generation_mode or "local"
+        generation_mode = self._normalize_generation_mode(requested_generation_mode)
+        if generation_mode == "skill_contract":
+            result = self.generate_with_skill_contract_project_id(parsed.script_request, project_id, progress=progress)
         else:
             result = self.generate_with_project_id(parsed.script_request, project_id, progress=progress)
         metadata_path = Path(result["metadata_path"])
@@ -205,6 +206,9 @@ class VideoScriptGenerator:
         metadata["jianying_editor_notes"] = parsed.notes
         metadata["source_paths"] = parsed.source_paths
         metadata["generation_mode"] = generation_mode
+        if requested_generation_mode != generation_mode:
+            metadata["legacy_generation_mode"] = requested_generation_mode
+            metadata.setdefault("warnings", []).append("generation_mode 'sdk' has been renamed to 'skill_contract'.")
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         result["parsed_input"] = {
             "intent": parsed.intent,
@@ -213,7 +217,33 @@ class VideoScriptGenerator:
             "notes": parsed.notes,
         }
         result["generation_mode"] = generation_mode
+        if requested_generation_mode != generation_mode:
+            result["legacy_generation_mode"] = requested_generation_mode
+            result.setdefault("warnings", []).append("generation_mode 'sdk' has been renamed to 'skill_contract'.")
         return result
+
+    def generate_with_skill_contract_project_id(
+        self,
+        payload: ScriptGenerateRequest,
+        project_id: str,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> dict[str, Any]:
+        if progress:
+            progress(22, "调用 JianYing Skill 规则生成器")
+        generated = JianyingSkillContractScriptGenerator().generate(payload, project_id)
+        if progress:
+            progress(86, "整理 Skill 合约 script.json")
+        return self.save(
+            generated.script,
+            provider=payload.provider or active_ai_provider("mock"),
+            prompt=self._prompt(payload),
+            raw_text=json.dumps(generated.raw_output, ensure_ascii=False, indent=2),
+            metadata_extra={
+                "generation_mode": "skill_contract",
+                "skill_contract_notes": generated.notes,
+                "sdk_notes": generated.notes,
+            },
+        )
 
     def generate_with_sdk_project_id(
         self,
@@ -221,21 +251,14 @@ class VideoScriptGenerator:
         project_id: str,
         progress: Callable[[int, str], None] | None = None,
     ) -> dict[str, Any]:
-        if progress:
-            progress(22, "调用 JianYing Editor Skill SDK")
-        generated = JianyingEditorSdkScriptGenerator().generate(payload, project_id)
-        if progress:
-            progress(86, "整理 SDK script.json")
-        return self.save(
-            generated.script,
-            provider=payload.provider or active_ai_provider("mock"),
-            prompt=self._prompt(payload),
-            raw_text=json.dumps(generated.raw_output, ensure_ascii=False, indent=2),
-            metadata_extra={
-                "generation_mode": "sdk",
-                "sdk_notes": generated.notes,
-            },
-        )
+        return self.generate_with_skill_contract_project_id(payload, project_id, progress=progress)
+
+    def _normalize_generation_mode(self, value: str) -> str:
+        if value == "sdk":
+            return "skill_contract"
+        if value == "skill_contract":
+            return "skill_contract"
+        return "local"
 
     def generate_with_project_id(
         self,

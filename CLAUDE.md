@@ -16,7 +16,7 @@ Run from `G:\ob-book\codex-project`. The Python venv is `.venv` (not `.venv-new`
 # One-shot: build the frontend into dist/ and serve everything from the FastAPI backend.
 .\scripts\start-web.ps1                 # http://127.0.0.1:8010
 .\scripts\start-web.ps1 -Port 8020      # rebuild + serve on 8020
-.\scripts\start-web.ps1 -InstallDeps    # force pip install -r requirements.txt
+.\scripts\start-web.ps1 -InstallDeps    # force pip install -r requirements.txt (base + SDK deps)
 .\scripts\start-web.ps1 -StartDouyin    # also boot the upstream Douyin_TikTok_Download_API
 .\scripts\start-web.ps1 -NoBuild        # skip vite build, reuse existing dist/
 
@@ -29,7 +29,13 @@ npm run build
 npm run preview
 ```
 
-There is **no test suite** (`test/` is empty) and no lint config. Don't fabricate `npm test` / `pytest` invocations — say so when asked.
+There is a small standard-library Python test suite under `tests/`. Run it with:
+
+```powershell
+python -m unittest discover -s tests
+```
+
+There is still no JS test runner or lint config. Don't fabricate `npm test` / `pytest` invocations — say so when asked.
 
 ## Service topology and ports
 
@@ -41,7 +47,7 @@ Three processes, all on `127.0.0.1`:
 | 8010 | FastAPI backend (`backend.app.main`)   | In production also serves the built `dist/`        |
 | 8123 | `Douyin_TikTok_Download_API` (upstream) | Optional; needed only for Douyin features         |
 
-⚠️ **Known port mismatch**: `vite.config.js` proxies `/api` to `:8011` and `src/services/api.js` hardcodes `API_BASE = "http://127.0.0.1:8011"`, but the README, `.env.example`, CORS allowlist in `backend/app/main.py`, and `start-web.ps1` all use **8010**. If you touch dev-mode wiring, align these — don't blindly trust either side.
+Dev-mode wiring is aligned on port **8010**: `vite.config.js` proxies `/api` to `http://127.0.0.1:8010`, and `src/services/api.js` reads `VITE_API_BASE` with an empty-string fallback for same-origin/proxy use.
 
 ## Architecture
 
@@ -73,7 +79,8 @@ Currently active integrations:
 - `douyin_download_api` — HTTP client to the upstream Douyin scraper on `:8123`.
 - `ai_video_analysis` — long-video "evidence pack" pipeline: ffmpeg extracts audio → faster-whisper transcribes → segment + keyframe grids → AI breakdown per segment → global formula. Mode controlled by `AI_VIDEO_PIPELINE_MODE=auto|evidence|direct`.
 - `ai_prompt_reverse` — reverse-engineers reusable prompts from a captured video.
-- `jianying_draft` — wraps `pyJianYingDraft` for CapCut/Jianying draft creation. **Pinned to `pyJianYingDraft>=0.2.5,<0.3`** in `requirements.txt` — `AudioSegment(material, target_timerange, source_timerange=None)` and `draft.trange(start, duration)` (second arg is *duration*, not end time).
+- `jianying_draft` — wraps `pyJianYingDraft` for CapCut/Jianying draft creation. **Pinned to `pyJianYingDraft>=0.2.5,<0.3`** in `requirements-sdk.txt` — `AudioSegment(material, target_timerange, source_timerange=None)` and `draft.trange(start, duration)` (second arg is *duration*, not end time).
+- `jianying_editor_skill` — project-owned bridge layer for the local SDK snapshot. Business bridge logic lives here, not under `sdks/jianying-editor-skill/`. Its normal `/status` endpoint is side-effect free; use `/diagnostics/deep` only for explicit smoke checks that may create a diagnostic draft.
 - `html_video_render` — renders HTML scenes to MP4 via local ffmpeg (`ffmpeg-8.1.1-essentials_build/`).
 - `video_pipeline` — newer in-tree pipeline that produces a single `script.json` per project under `data/runtime/video_pipeline/projects/<project_id>/`. Drives the three-step "灵感剧本 → 素材整理 → 草稿生成" flow described in `VIDEO_PIPELINE_IMPLEMENTATION_PLAN.md`. Tools two and three are partly TBD — check the plan doc before adding routes/files for them.
 
@@ -106,5 +113,5 @@ When adding a new long-running tool, follow this pattern — don't block the req
 
 - `data/runtime/` is gitignored runtime output (downloads, evidence packs, SQLite DB, generated drafts). Don't commit anything under it; don't assume files there exist on a fresh checkout.
 - `integrations/*/vendor/*` is also gitignored — the upstream repo is cloned by the user and isn't part of this project's git history.
-- `docs/` is currently empty (the old `ARCHITECTURE.md` / `JIANYING_VIDEO_TOOL_PLAN.md` / `VIDEO_COMPOSITION_SCHEMA.md` were removed). Treat the root-level `README.md`, `START_WEB.md`, `VIDEO_PIPELINE_IMPLEMENTATION_PLAN.md`, and per-integration `README.md` files as the actual design docs.
+- `docs/` is currently empty (the old `ARCHITECTURE.md` / `JIANYING_VIDEO_TOOL_PLAN.md` / `VIDEO_COMPOSITION_SCHEMA.md` were removed). Treat the root-level `README.md`, `START_WEB.md`, `VIDEO_PIPELINE_IMPLEMENTATION_PLAN.md`, `sdks/README.md`, and per-integration `README.md` files as the actual design docs.
 - Both README and `.env.example` end with a "配置变更记录" / "需求变更记录" log. When you change a port, env var, or a third-party endpoint, append a dated entry there.

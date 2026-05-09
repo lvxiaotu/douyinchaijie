@@ -90,7 +90,7 @@ class NaturalLanguageScriptRequest(BaseModel):
     duration_seconds: int | None = Field(default=None, ge=5, le=600)
     scene_count: int | None = Field(default=None, ge=1, le=30)
     resolution: Literal["", "9:16", "16:9", "1:1"] = Field(default="")
-    generation_mode: Literal["local", "sdk"] = Field(default="local")
+    generation_mode: Literal["local", "skill_contract", "sdk"] = Field(default="local")
     provider: str | None = Field(default=None)
 
 
