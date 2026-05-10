@@ -142,6 +142,62 @@ export function createAiPromptReverseJob(video, provider) {
   return postJson("/api/tools/ai-prompt-reverse/jobs", payload);
 }
 
+export async function fetchRunningHubTtsConfig() {
+  const response = await fetch(`${API_BASE}/api/tools/runninghub-tts/config`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function saveRunningHubTtsConfig(config) {
+  return postJson("/api/tools/runninghub-tts/config", {
+    api_key: config.apiKey || "",
+    api_base: config.apiBase || "https://www.runninghub.cn",
+    workflow_key: config.workflowKey || "runninghub/tts_index2.json",
+    instance_type: config.instanceType || "",
+    poll_interval_seconds: Number(config.pollIntervalSeconds || 3),
+  });
+}
+
+export async function fetchRunningHubTtsStatus() {
+  const response = await fetch(`${API_BASE}/api/tools/runninghub-tts/status`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function uploadRunningHubTtsAudio(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return fetch(`${API_BASE}/api/tools/runninghub-tts/upload`, {
+    method: "POST",
+    body: formData,
+  }).then(async (response) => {
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(JSON.stringify(data?.detail || data, null, 2));
+    }
+    return data;
+  });
+}
+
+export function createRunningHubTtsJob(payload) {
+  return postJson("/api/tools/runninghub-tts/jobs", {
+    text: payload.text || "",
+    workflow_key: payload.workflowKey || "runninghub/tts_index2.json",
+    api_key: payload.apiKey || undefined,
+    api_base: payload.apiBase || undefined,
+    ref_audio_path: payload.refAudioPath || undefined,
+    ref_audio_url: payload.refAudioUrl || undefined,
+    voice: payload.voice || undefined,
+    speed: payload.speed != null ? Number(payload.speed) : undefined,
+  });
+}
+
 export async function fetchTasks(taskType) {
   const query = taskType ? `?task_type=${encodeURIComponent(taskType)}` : "";
   const response = await fetch(`${API_BASE}/api/tasks${query}`);

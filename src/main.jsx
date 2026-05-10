@@ -1,12 +1,10 @@
 ﻿import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  Activity,
   Archive,
   Boxes,
   Clock3,
   Database,
-  FileText,
   FolderCog,
   Home,
   Plus,
@@ -14,12 +12,14 @@ import {
   Search,
   Settings,
   Scissors,
+  Music2,
   Wrench,
 } from "lucide-react";
 import {
   archiveTask,
   createAiVideoBreakdownJob,
   createAiPromptReverseJob,
+  createRunningHubTtsJob,
   createJianyingDraftFromScript,
   deleteVideoScript,
   deleteTask,
@@ -29,6 +29,8 @@ import {
   fetchAiPromptReverseConfig,
   fetchAiPromptReverseStatus,
   fetchAiPromptReverseArchives,
+  fetchRunningHubTtsConfig,
+  fetchRunningHubTtsStatus,
   fetchAiProviderConfig,
   fetchDouyinConfig,
   fetchDouyinFavoriteItems,
@@ -49,8 +51,10 @@ import {
   saveDouyinConfig,
   saveAiVideoConfig,
   saveAiPromptReverseConfig,
+  saveRunningHubTtsConfig,
   saveAiProviderConfig,
   saveVideoScript,
+  uploadRunningHubTtsAudio,
   testAiProviderConfig,
 } from "./services/api";
 import { fallbackWorkbench } from "./workbenchSeed";
@@ -59,24 +63,22 @@ import "./styles.css";
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 const sections = {
-  dashboard: ["首页", "查看最近任务、常用工具和素材状态。"],
-  videoScript: ["灵感剧本", "把创作灵感生成可编辑的 script.json。"],
+  dashboard: ["抖音解析", "采集抖音主页、作品和收藏，并在同一页查看 AI 任务状态。"],
   draftInspector: ["查看草稿", "查看剪映草稿项目和画布详情。"],
   jianyingEditor: ["剪映 Skill", "围绕 AI 剧本、第三方素材补齐和剪映草稿生成的主工作流。"],
   tools: ["工具中心", "以后每个新功能都可以作为一个独立工具接入。"],
-  jobs: ["任务中心", "统一查看后台任务、进度和失败状态。"],
+  runningHubTts: ["RunningHub TTS", "单独的 RunningHub index-tts 工作流入口。"],
   library: ["素材库", "沉淀下载、分析和处理后的内容。"],
   integrations: ["开源项目接入", "为 GitHub 项目、脚本和外部服务预留适配层。"],
   settings: ["配置", "集中管理路径、接口地址和运行策略。"],
 };
 
 const navItems = [
-  ["dashboard", Home, "首页"],
-  ["videoScript", FileText, "灵感剧本"],
+  ["dashboard", Home, "抖音解析"],
   ["draftInspector", Database, "查看草稿"],
   ["jianyingEditor", Scissors, "剪映 Skill"],
   ["tools", Wrench, "工具中心"],
-  ["jobs", Clock3, "任务中心"],
+  ["runningHubTts", Music2, "RunningHub TTS"],
   ["library", Archive, "素材库"],
   ["integrations", Boxes, "接入"],
   ["settings", Settings, "配置"],
@@ -553,7 +555,7 @@ function sceneDuration(scene, fallback = 3) {
 }
 
 function sceneSummary(scene) {
-  return cleanScriptValue(scene?.summary || scene?.visual_prompt || scene?.audio_narration || scene?.narration).slice(0, 42) || "未填写内容概括";
+  return safeSlice(cleanScriptValue(scene?.summary || scene?.visual_prompt || scene?.audio_narration || scene?.narration), 42) || "未填写内容概括";
 }
 
 function formatTimelineMark(value) {
@@ -732,7 +734,7 @@ function StudioSeedInputBlock({ data, locked, onAction }) {
       <article className="studio-block locked">
         <Badge status="done">已锁定</Badge>
         <div className="studio-block-kicker">Seed</div>
-        <h3>{draft.title || draft.idea.slice(0, 18) || "未命名灵感"}</h3>
+        <h3>{draft.title || safeSlice(draft.idea, 18) || "未命名灵感"}</h3>
         <p>{draft.idea}</p>
         <div className="studio-chip-row">
           <span>{draft.type}</span>
@@ -3335,13 +3337,17 @@ function materialPreview(item) {
   return item.path || item.name || item.material_name || item.resource_id || item.effect_id || "";
 }
 
+function safeSlice(value, length) {
+  return typeof value === "string" ? value.slice(0, length) : String(value || "").slice(0, length);
+}
+
 function extractTextMaterial(item) {
   if (typeof item.content !== "string") return "";
   try {
     const parsed = JSON.parse(item.content);
     return parsed.text || "";
   } catch {
-    return item.content.slice(0, 120);
+    return safeSlice(item.content, 120);
   }
 }
 
@@ -3533,6 +3539,83 @@ function archiveIdSet(archives) {
   return new Set(archives.map((item) => item.task_id || item.id).filter(Boolean));
 }
 
+const taskBoardStatuses = [
+  ["running", "进行中"],
+  ["done", "已完成"],
+  ["error", "异常"],
+];
+
+function groupTasksByStatus(tasks) {
+  return {
+    running: tasks.filter((task) => !["done", "error"].includes(task.status)),
+    done: tasks.filter((task) => task.status === "done"),
+    error: tasks.filter((task) => task.status === "error"),
+  };
+}
+
+function preferredTaskStatus(groups, currentStatus) {
+  if ((groups[currentStatus] || []).length > 0) {
+    return currentStatus;
+  }
+  const fallback = taskBoardStatuses.find(([key]) => (groups[key] || []).length > 0);
+  return fallback?.[0] || "running";
+}
+
+function TaskStatusRow({ title, desc, groups, activeStatus, onChangeStatus, onOpenTask }) {
+  const total = taskBoardStatuses.reduce((sum, [key]) => sum + (groups[key]?.length || 0), 0);
+  const resolvedStatus = preferredTaskStatus(groups, activeStatus);
+  const activeTasks = groups[resolvedStatus] || [];
+  const emptyText = {
+    running: "当前没有进行中的任务。",
+    done: "当前没有已完成的任务。",
+    error: "当前没有异常任务。",
+  }[resolvedStatus];
+
+  return (
+    <section className="panel task-row-panel">
+      <div className="panel-header task-row-header">
+        <div>
+          <h2>{title}</h2>
+          <p>{desc}</p>
+        </div>
+        <Badge status={total ? "running" : "draft"}>{total ? `${total} 个任务` : "暂无任务"}</Badge>
+      </div>
+      <div className="task-status-tabs">
+        {taskBoardStatuses.map(([key, label]) => (
+          <button
+            className={`task-status-tab ${resolvedStatus === key ? "active" : ""}`}
+            key={key}
+            type="button"
+            onClick={() => onChangeStatus(key)}
+          >
+            <span>{label}</span>
+            <strong>{groups[key]?.length || 0}</strong>
+          </button>
+        ))}
+      </div>
+      <div className="task-row-list">
+        {activeTasks.length ? (
+          activeTasks.map((task) => (
+            <button className="task-list-row" key={task.id} type="button" onClick={() => onOpenTask(task)}>
+              <div className="task-list-row-main">
+                <strong>{task.title}</strong>
+                <p>{task.message || `${title} 任务`}</p>
+              </div>
+              <div className="task-list-row-meta">
+                <Badge status={task.status}>{statusText[task.status] || task.status}</Badge>
+                <span className="task-list-progress">{task.progress}%</span>
+                <span>{task.updated}</span>
+              </div>
+            </button>
+          ))
+        ) : (
+          <div className="empty-result">{emptyText}</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function AnalysisTaskPanel({
   tasks,
   onOpenResult,
@@ -3621,17 +3704,214 @@ function AnalysisTaskPanel({
   );
 }
 
-function TaskToolGroup({ title, desc, children }) {
+function RunningHubTtsPanel() {
+  const [apiKey, setApiKey] = useState("");
+  const [apiBase, setApiBase] = useState("https://www.runninghub.cn");
+  const [workflowKey, setWorkflowKey] = useState("runninghub/tts_index2.json");
+  const [instanceType, setInstanceType] = useState("");
+  const [pollIntervalSeconds, setPollIntervalSeconds] = useState(3);
+  const [text, setText] = useState("请帮我生成一段更自然、更稳的中文旁白，适合短视频开场。");
+  const [voice, setVoice] = useState("");
+  const [speed, setSpeed] = useState(1);
+  const [refAudioPath, setRefAudioPath] = useState("");
+  const [refAudioFileName, setRefAudioFileName] = useState("");
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [task, setTask] = useState(null);
+  const [taskList, setTaskList] = useState([]);
+
+  useEffect(() => {
+    Promise.all([fetchRunningHubTtsConfig(), fetchRunningHubTtsStatus()])
+      .then(([config, ttsStatus]) => {
+        setApiKey(config.api_key || "");
+        setApiBase(config.api_base || "https://www.runninghub.cn");
+        setWorkflowKey(config.workflow_key || "runninghub/tts_index2.json");
+        setInstanceType(config.instance_type || "");
+        setPollIntervalSeconds(config.poll_interval_seconds || 3);
+        setStatus(ttsStatus);
+      })
+      .catch((err) => setError(err.message || String(err)));
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      try {
+        const tasks = await fetchTasks("runninghub_tts");
+        setTaskList(tasks.map((item) => normalizeAnalysisTask(item, (result) => result || {})));
+      } catch {
+        // keep quiet while backend comes up
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  async function handleSave(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await saveRunningHubTtsConfig({
+        apiKey,
+        apiBase,
+        workflowKey,
+        instanceType,
+        pollIntervalSeconds,
+      });
+      setMessage("配置已保存。");
+      setStatus({ ready: Boolean(result?.config?.api_key), ...result?.config });
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleFileUpload(file) {
+    if (!file) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await uploadRunningHubTtsAudio(file);
+      setRefAudioPath(result.path || "");
+      setRefAudioFileName(file.name);
+      setMessage(`参考音频已上传：${file.name}`);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await createRunningHubTtsJob({
+        text,
+        workflowKey,
+        apiKey,
+        apiBase,
+        refAudioPath: refAudioPath || undefined,
+        voice,
+        speed,
+      });
+      setTask(result);
+      setMessage("任务已提交，正在后台处理。");
+      const tasks = await fetchTasks("runninghub_tts");
+      setTaskList(tasks.map((item) => normalizeAnalysisTask(item, (value) => value || {})));
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
-    <section className="task-tool-section">
-      <div className="task-tool-heading">
+    <section className="panel settings-wide">
+      <div className="panel-header">
         <div>
-          <span>工具任务</span>
-          <h2>{title}</h2>
+          <h2>RunningHub TTS</h2>
+          <p>独立的 index-tts 工作流入口，参考音频可选上传。</p>
         </div>
-        <p>{desc}</p>
+        <Badge status={status?.ready ? "ready" : "draft"}>{status?.ready ? "可用" : "未配置"}</Badge>
       </div>
-      <div className="task-status-grid">{children}</div>
+      <form className="settings-form" onSubmit={handleSave}>
+        <label>
+          API Key
+          <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
+        </label>
+        <label>
+          API Base
+          <input value={apiBase} onChange={(event) => setApiBase(event.target.value)} />
+        </label>
+        <label>
+          Workflow
+          <select value={workflowKey} onChange={(event) => setWorkflowKey(event.target.value)}>
+            <option value="runninghub/tts_index2.json">runninghub/tts_index2.json</option>
+            <option value="runninghub/tts_edge.json">runninghub/tts_edge.json</option>
+            <option value="runninghub/tts_spark.json">runninghub/tts_spark.json</option>
+          </select>
+        </label>
+        <label>
+          Instance Type
+          <input value={instanceType} onChange={(event) => setInstanceType(event.target.value)} placeholder="plus" />
+        </label>
+        <label>
+          轮询间隔(秒)
+          <input type="number" min="1" max="30" step="1" value={pollIntervalSeconds} onChange={(event) => setPollIntervalSeconds(Number(event.target.value))} />
+        </label>
+        <button className="primary-button" type="submit" disabled={saving}>
+          {saving ? "保存中" : "保存配置"}
+        </button>
+      </form>
+      <form className="settings-form" onSubmit={handleSubmit}>
+        <label className="wide-field">
+          生成文本
+          <textarea rows={6} value={text} onChange={(event) => setText(event.target.value)} />
+        </label>
+        <label>
+          参考音频
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={(event) => handleFileUpload(event.target.files?.[0])}
+          />
+          {refAudioFileName && <small>{refAudioFileName}</small>}
+        </label>
+        <label>
+          Voice
+          <input value={voice} onChange={(event) => setVoice(event.target.value)} placeholder="可选" />
+        </label>
+        <label>
+          Speed
+          <input type="number" min="0.5" max="2" step="0.1" value={speed} onChange={(event) => setSpeed(Number(event.target.value))} />
+        </label>
+        <label className="wide-field">
+          已上传参考音频路径
+          <input value={refAudioPath} readOnly />
+        </label>
+        <button className="primary-button" type="submit" disabled={submitting || loading}>
+          {submitting ? "提交中" : "生成 TTS"}
+        </button>
+      </form>
+      {message && <div className="running-note">{message}</div>}
+      {error && <div className="error-box">{error}</div>}
+      {task && (
+        <div className="workflow-summary-card">
+          <strong>最新任务</strong>
+          <p>{task.message || task.status}</p>
+          <code>{task.id}</code>
+        </div>
+      )}
+      <section className="table-panel">
+        <table>
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>状态</th>
+              <th>进度</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {taskList.map((item) => (
+              <tr key={item.id}>
+                <td>{item.title}</td>
+                <td>{item.status}</td>
+                <td>{item.progress}%</td>
+                <td>{item.updated}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
     </section>
   );
 }
@@ -3728,6 +4008,140 @@ function LibraryItemModal({ item, onClose }) {
         </div>
         <pre className="result-box">{JSON.stringify(item.raw || item, null, 2)}</pre>
       </div>
+    </div>
+  );
+}
+
+function TaskRecordModal({
+  record,
+  archivedIds,
+  onClose,
+  onOpenResult,
+  onArchiveTask,
+  onDeleteTask,
+}) {
+  if (!record?.task) return null;
+
+  const { task, title, type } = record;
+  const resultSummary =
+    type === "analysis"
+      ? task.result?.summary || ""
+      : task.result?.summary || task.result?.master_prompt || "";
+  const createdAt = task.created_at
+    ? new Date(task.created_at * 1000).toLocaleString("zh-CN")
+    : "";
+  const updatedAt = task.updated_at
+    ? new Date(task.updated_at * 1000).toLocaleString("zh-CN")
+    : task.updated || "";
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section className="modal-panel task-detail-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+        <div className="panel-header">
+          <div>
+            <h2>{task.title}</h2>
+            <p>{title}</p>
+            <div className="task-detail-badges">
+              <Badge status={task.status}>{statusText[task.status] || task.status}</Badge>
+              <Badge>{task.provider || title}</Badge>
+            </div>
+          </div>
+          <button className="text-button" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+
+        <div className="task-detail-meta-grid">
+          <article className="task-detail-meta-card">
+            <span>当前状态</span>
+            <p>{task.message || "等待后端更新"}</p>
+          </article>
+          <article className="task-detail-meta-card">
+            <span>任务进度</span>
+            <p>{task.progress}%</p>
+          </article>
+          <article className="task-detail-meta-card">
+            <span>更新时间</span>
+            <p>{updatedAt || "暂无记录"}</p>
+          </article>
+          {createdAt && (
+            <article className="task-detail-meta-card">
+              <span>创建时间</span>
+              <p>{createdAt}</p>
+            </article>
+          )}
+          <article className="task-detail-meta-card">
+            <span>任务 ID</span>
+            <p>{task.id}</p>
+          </article>
+          <article className="task-detail-meta-card">
+            <span>事件数量</span>
+            <p>{task.events?.length || 0} 条</p>
+          </article>
+        </div>
+
+        <div className="progress" aria-label={`进度 ${task.progress}%`}>
+          <span style={{ width: `${task.progress}%` }} />
+        </div>
+
+        {resultSummary && (
+          <section className="analysis-section task-detail-section">
+            <strong>结果摘要</strong>
+            <p>{resultSummary}</p>
+          </section>
+        )}
+
+        {task.error && <div className="error-box">{task.error}</div>}
+
+        <div className="task-detail-actions">
+          {task.status === "done" && onOpenResult && (
+            <button className="primary-button" type="button" onClick={() => onOpenResult(task)}>
+              查看完整结果
+            </button>
+          )}
+          {task.status === "done" && onArchiveTask && (
+            <button
+              className="text-button"
+              type="button"
+              disabled={archivedIds?.has(task.id)}
+              onClick={() => onArchiveTask(task)}
+            >
+              <Archive size={15} />
+              {archivedIds?.has(task.id) ? "已归档" : "归档"}
+            </button>
+          )}
+          {onDeleteTask && (
+            <button className="text-button danger-text-button" type="button" onClick={() => onDeleteTask(task)}>
+              删除任务
+            </button>
+          )}
+        </div>
+
+        {task.events?.length > 0 && (
+          <section className="analysis-section task-detail-section">
+            <strong>进度日志</strong>
+            <div className="task-event-timeline">
+              <div className="task-event-summary">
+                <span>时间线</span>
+                <span>{task.events.length} 条</span>
+              </div>
+              {task.events.slice(-100).map((event) => (
+                <div className="task-event-row" key={event.id || `${event.created_at}-${event.message}`}>
+                  <span className="task-event-dot" />
+                  <span className="task-event-time">{event.time}</span>
+                  <span className="task-event-progress">{event.progress}%</span>
+                  <span className="task-event-message">{event.message || event.status || "更新任务状态"}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <details className="raw-json">
+          <summary>查看任务 JSON</summary>
+          <pre className="result-box">{JSON.stringify(task, null, 2)}</pre>
+        </details>
+      </section>
     </div>
   );
 }
@@ -4064,6 +4478,9 @@ function App() {
   const [activeSetting, setActiveSetting] = useState("ai-provider");
   const [activeJianyingEditor, setActiveJianyingEditor] = useState("script");
   const [activeToolId, setActiveToolId] = useState("");
+  const [activeAnalysisStatus, setActiveAnalysisStatus] = useState("running");
+  const [activePromptStatus, setActivePromptStatus] = useState("running");
+  const [selectedTaskRecord, setSelectedTaskRecord] = useState(null);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [workbench, setWorkbench] = useState(fallbackWorkbench);
@@ -4221,9 +4638,7 @@ function App() {
     setPromptReverseArchives((current) => current.filter((item) => item.task_id !== task.id && item.id !== task.id));
   }
 
-  const metrics = workbench.metrics?.length ? workbench.metrics : fallbackWorkbench.metrics;
   const tools = workbench.tools?.length ? workbench.tools : fallbackWorkbench.tools;
-  const jobs = workbench.jobs?.length ? workbench.jobs : fallbackWorkbench.jobs;
   const library = workbench.library?.length ? workbench.library : fallbackWorkbench.library;
   const integrations = workbench.integrations?.length
     ? workbench.integrations
@@ -4315,14 +4730,22 @@ function App() {
     ].filter((group) => libraryType === "all" || group.key === libraryType);
   }, [libraryType, visibleLibraryItems]);
 
-  const visibleAnalysisTasks = analysisTasks.filter((task) => !archivedAnalysisIds.has(task.id));
-  const visiblePromptReverseTasks = promptReverseTasks.filter((task) => !archivedPromptReverseIds.has(task.id));
-  const failedAnalysisTasks = visibleAnalysisTasks.filter((task) => task.status === "error");
-  const runningAnalysisTasks = visibleAnalysisTasks.filter((task) => !["done", "error"].includes(task.status));
-  const completedAnalysisTasks = visibleAnalysisTasks.filter((task) => task.status === "done");
-  const failedPromptReverseTasks = visiblePromptReverseTasks.filter((task) => task.status === "error");
-  const runningPromptReverseTasks = visiblePromptReverseTasks.filter((task) => !["done", "error"].includes(task.status));
-  const completedPromptReverseTasks = visiblePromptReverseTasks.filter((task) => task.status === "done");
+  const analysisTaskGroups = useMemo(() => groupTasksByStatus(analysisTasks), [analysisTasks]);
+  const promptReverseTaskGroups = useMemo(() => groupTasksByStatus(promptReverseTasks), [promptReverseTasks]);
+
+  useEffect(() => {
+    const nextStatus = preferredTaskStatus(analysisTaskGroups, activeAnalysisStatus);
+    if (nextStatus !== activeAnalysisStatus) {
+      setActiveAnalysisStatus(nextStatus);
+    }
+  }, [analysisTaskGroups, activeAnalysisStatus]);
+
+  useEffect(() => {
+    const nextStatus = preferredTaskStatus(promptReverseTaskGroups, activePromptStatus);
+    if (nextStatus !== activePromptStatus) {
+      setActivePromptStatus(nextStatus);
+    }
+  }, [promptReverseTaskGroups, activePromptStatus]);
 
   const [title, subtitle] = sections[activeSection];
 
@@ -4410,124 +4833,40 @@ function App() {
           </div>
         </header>
 
-        <section className={activeSection === "dashboard" ? "" : "section-cache-hidden"}>
+        {activeSection === "dashboard" && (
+          <section className="dashboard-stack">
             <DouyinCollectorPanel onBreakdown={handleCreateVideoBreakdown} onPromptReverse={handleCreatePromptReverse} />
-            {failedAnalysisTasks.length > 0 && (
-              <AnalysisTaskPanel
-                tasks={failedAnalysisTasks}
-                onOpenResult={setSelectedAnalysisTask}
-                compact
-                title="异常的 AI 视频拆解"
-              />
-            )}
-            {failedPromptReverseTasks.length > 0 && (
-              <AnalysisTaskPanel
-                tasks={failedPromptReverseTasks}
-                onOpenResult={setSelectedPromptReverseTask}
-                compact
-                title="异常的提示词反推"
-              />
-            )}
-
-            <div className="metric-grid">
-              {metrics.map((metric) => (
-                <article className="metric" key={metric.label}>
-                  <span>{metric.label}</span>
-                  <strong>{metric.value}</strong>
-                  <small>{metric.hint}</small>
-                </article>
-              ))}
-            </div>
-            <div className="dashboard-grid">
-              <section className="panel">
-                <div className="panel-header">
-                  <h2>常用工具</h2>
-                  <button className="text-button" type="button" onClick={() => setActiveSection("tools")}>
-                    查看全部
-                  </button>
+            <section className="panel task-board-panel">
+              <div className="panel-header">
+                <div>
+                  <h2>任务中心</h2>
+                  <p>任务按工具分行排列，点击状态切换列表，点击任务查看详情。</p>
                 </div>
-                <div className="tool-list">
-                  {tools.slice(0, 2).map((tool) => (
-                    <ToolCard key={tool.id} tool={tool} />
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel">
-                <div className="panel-header">
-                  <h2>最近任务</h2>
-                  <button className="text-button" type="button" onClick={() => setActiveSection("jobs")}>
-                    任务中心
-                  </button>
-                </div>
-                <div className="job-list">
-                  {jobs.slice(0, 3).map((job) => (
-                    <JobRow key={job.id} job={job} />
-                  ))}
-                </div>
-              </section>
-            </div>
-
-            <div className="sample-grid">
-              <section className="panel">
-                <div className="panel-header">
-                  <h2>工具接入流程</h2>
-                  <Badge status="ready">模板已预留</Badge>
-                </div>
-                <div className="step-list">
-                  {[
-                    ["1", "添加 GitHub 项目适配器", "在 integrations/ 下新建目录，记录仓库地址、配置项和运行入口。"],
-                    ["2", "注册到工具中心", "在后端注册工具名称、输入表单、任务类型和输出结果格式。"],
-                    ["3", "接入任务中心", "耗时任务统一进入队列，页面只关心进度、日志和结果。"],
-                  ].map(([index, name, desc]) => (
-                    <article className="step-item" key={index}>
-                      <span>{index}</span>
-                      <div>
-                        <strong>{name}</strong>
-                        <p>{desc}</p>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel">
-                <div className="panel-header">
-                  <h2>下一批样例工具</h2>
-                  <button className="text-button" type="button" onClick={() => setActiveSection("integrations")}>
-                    查看接入
-                  </button>
-                </div>
-                <div className="mini-card-list">
-                  {[
-                    ["B站收藏归档", "同步收藏夹，生成标签和摘要。"],
-                    ["图片批量放大", "封装开源超分项目，输出到素材库。"],
-                    ["日报生成器", "读取本地工作记录，生成 Markdown 日报。"],
-                  ].map(([name, desc]) => (
-                    <article className="mini-card" key={name}>
-                      <Activity size={18} />
-                      <div>
-                        <strong>{name}</strong>
-                        <p>{desc}</p>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel wide-panel">
-                <div className="panel-header">
-                  <h2>数据流转预览</h2>
-                  <Badge>示例</Badge>
-                </div>
-                <div className="flow-row">
-                  {["采集", "下载/调用开源项目", "内容分析", "入库", "页面查看"].map((item) => (
-                    <span key={item}>{item}</span>
-                  ))}
-                </div>
-              </section>
-            </div>
-        </section>
+                <Badge status={taskSyncError ? "error" : "running"}>
+                  {taskSyncError || `自动刷新中${lastTaskRefresh ? ` · ${lastTaskRefresh}` : ""}`}
+                </Badge>
+              </div>
+              <div className="task-board-rows">
+                <TaskStatusRow
+                  title="AI 视频拆解"
+                  desc="展示 AI 视频拆解的进行中、已完成和异常任务。"
+                  groups={analysisTaskGroups}
+                  activeStatus={activeAnalysisStatus}
+                  onChangeStatus={setActiveAnalysisStatus}
+                  onOpenTask={(task) => setSelectedTaskRecord({ type: "analysis", title: "AI 视频拆解", task })}
+                />
+                <TaskStatusRow
+                  title="AI 提示词反推"
+                  desc="展示提示词反推的进行中、已完成和异常任务。"
+                  groups={promptReverseTaskGroups}
+                  activeStatus={activePromptStatus}
+                  onChangeStatus={setActivePromptStatus}
+                  onOpenTask={(task) => setSelectedTaskRecord({ type: "prompt", title: "AI 提示词反推", task })}
+                />
+              </div>
+            </section>
+          </section>
+        )}
 
         {activeSection === "tools" && (
           <section>
@@ -4574,6 +4913,12 @@ function App() {
           </section>
         )}
 
+        {activeSection === "runningHubTts" && (
+          <section>
+            <RunningHubTtsPanel />
+          </section>
+        )}
+
         {activeSection === "jianyingEditor" && (
           <section>
             {activeJianyingEditor === "script" ? (
@@ -4587,91 +4932,6 @@ function App() {
         {activeSection === "draftInspector" && (
           <section>
             <DraftInspectorPanel />
-          </section>
-        )}
-
-        {activeSection === "jobs" && (
-          <section className="jobs-layout">
-            <div className={`task-sync-banner ${taskSyncError ? "error" : ""}`}>
-              {taskSyncError || `任务进度自动刷新中${lastTaskRefresh ? ` · 最后刷新 ${lastTaskRefresh}` : ""}`}
-            </div>
-            <TaskToolGroup title="AI 视频拆解" desc="查看视频商业拆解任务的运行、完成和异常状态。">
-              <AnalysisTaskPanel
-                tasks={runningAnalysisTasks}
-                onOpenResult={setSelectedAnalysisTask}
-                onDeleteTask={handleDeleteAnalysisTask}
-                onArchiveTask={handleArchiveAnalysisTask}
-                archivedIds={archivedAnalysisIds}
-                title="进行中"
-                emptyText="当前没有运行中的视频拆解任务。"
-              />
-              <AnalysisTaskPanel
-                tasks={completedAnalysisTasks}
-                onOpenResult={setSelectedAnalysisTask}
-                onDeleteTask={handleDeleteAnalysisTask}
-                onArchiveTask={handleArchiveAnalysisTask}
-                archivedIds={archivedAnalysisIds}
-                title="已完成"
-                emptyText="完成的视频拆解会显示在这里。"
-              />
-              <AnalysisTaskPanel
-                tasks={failedAnalysisTasks}
-                onOpenResult={setSelectedAnalysisTask}
-                onDeleteTask={handleDeleteAnalysisTask}
-                onArchiveTask={handleArchiveAnalysisTask}
-                archivedIds={archivedAnalysisIds}
-                title="异常"
-                emptyText="暂无异常的视频拆解任务。"
-              />
-            </TaskToolGroup>
-
-            <TaskToolGroup title="AI 提示词反推" desc="查看从视频反推出生成提示词的任务状态和结果。">
-              <AnalysisTaskPanel
-                tasks={runningPromptReverseTasks}
-                onOpenResult={setSelectedPromptReverseTask}
-                onDeleteTask={handleDeletePromptReverseTask}
-                onArchiveTask={handleArchivePromptReverseTask}
-                archivedIds={archivedPromptReverseIds}
-                title="进行中"
-                emptyText="当前没有运行中的提示词反推任务。"
-              />
-              <AnalysisTaskPanel
-                tasks={completedPromptReverseTasks}
-                onOpenResult={setSelectedPromptReverseTask}
-                onDeleteTask={handleDeletePromptReverseTask}
-                onArchiveTask={handleArchivePromptReverseTask}
-                archivedIds={archivedPromptReverseIds}
-                title="已完成"
-                emptyText="完成的提示词反推会显示在这里。"
-              />
-              <AnalysisTaskPanel
-                tasks={failedPromptReverseTasks}
-                onOpenResult={setSelectedPromptReverseTask}
-                onDeleteTask={handleDeletePromptReverseTask}
-                onArchiveTask={handleArchivePromptReverseTask}
-                archivedIds={archivedPromptReverseIds}
-                title="异常"
-                emptyText="暂无异常的提示词反推任务。"
-              />
-            </TaskToolGroup>
-            <section className="table-panel">
-              <table>
-                <thead>
-                  <tr>
-                    <th>任务</th>
-                    <th>所属工具</th>
-                    <th>状态</th>
-                    <th>进度</th>
-                    <th>更新时间</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {jobs.map((job) => (
-                    <JobRow key={job.id} job={job} table />
-                  ))}
-                </tbody>
-              </table>
-            </section>
           </section>
         )}
 
@@ -4803,6 +5063,20 @@ function App() {
           </section>
         )}
       </main>
+      <TaskRecordModal
+        record={selectedTaskRecord}
+        archivedIds={selectedTaskRecord?.type === "analysis" ? archivedAnalysisIds : archivedPromptReverseIds}
+        onClose={() => setSelectedTaskRecord(null)}
+        onOpenResult={(task) => {
+          if (selectedTaskRecord?.type === "analysis") {
+            setSelectedAnalysisTask(task);
+          } else {
+            setSelectedPromptReverseTask(task);
+          }
+        }}
+        onArchiveTask={selectedTaskRecord?.type === "analysis" ? handleArchiveAnalysisTask : handleArchivePromptReverseTask}
+        onDeleteTask={selectedTaskRecord?.type === "analysis" ? handleDeleteAnalysisTask : handleDeletePromptReverseTask}
+      />
       <AnalysisResultModal task={selectedAnalysisTask} onClose={() => setSelectedAnalysisTask(null)} />
       <PromptReverseResultModal task={selectedPromptReverseTask} onClose={() => setSelectedPromptReverseTask(null)} />
       <LibraryItemModal item={selectedLibraryItem} onClose={() => setSelectedLibraryItem(null)} />
