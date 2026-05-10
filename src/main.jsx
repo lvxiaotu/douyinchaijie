@@ -7,12 +7,15 @@ import {
   Database,
   FolderCog,
   Home,
+  Languages,
+  MoonStar,
   Plus,
   RefreshCw,
   Search,
   Settings,
   Scissors,
   Music2,
+  SunMedium,
   Wrench,
 } from "lucide-react";
 import {
@@ -60,17 +63,20 @@ import {
 import { fallbackWorkbench } from "./workbenchSeed";
 import "./styles.css";
 
+const { startTransition, useDeferredValue } = React;
 const API_BASE = import.meta.env.VITE_API_BASE || "";
+const UI_VERSION = "v0.1.0";
+const THEME_STORAGE_KEY = "douyin-ops-theme";
 
 const sections = {
-  dashboard: ["抖音解析", "采集抖音主页、作品和收藏，并在同一页查看 AI 任务状态。"],
-  draftInspector: ["查看草稿", "查看剪映草稿项目和画布详情。"],
+  dashboard: ["抖音解析", "采集抖音主页、作品和收藏，并把 AI 拆解、反推和任务状态收在同一块控制台。"],
+  draftInspector: ["查看草稿", "按项目查看剪映草稿与时间线结构，保持和主工作流一致的控制台体验。"],
   jianyingEditor: ["剪映 Skill", "围绕 AI 剧本、第三方素材补齐和剪映草稿生成的主工作流。"],
-  tools: ["工具中心", "以后每个新功能都可以作为一个独立工具接入。"],
-  runningHubTts: ["RunningHub TTS", "单独的 RunningHub index-tts 工作流入口。"],
-  library: ["素材库", "沉淀下载、分析和处理后的内容。"],
-  integrations: ["开源项目接入", "为 GitHub 项目、脚本和外部服务预留适配层。"],
-  settings: ["配置", "集中管理路径、接口地址和运行策略。"],
+  tools: ["工具中心", "保留现有工具入口，用统一的前端壳子承接后续新增能力。"],
+  runningHubTts: ["RunningHub TTS", "单独承载 RunningHub index-tts 链路，作为顶级工具并入主控制台。"],
+  library: ["素材归档", "集中查看 AI 视频拆解、提示词反推与示例素材的沉淀结果。"],
+  integrations: ["开源接入", "为 GitHub 项目、脚本和外部服务预留前端接入位。"],
+  settings: ["配置中心", "集中管理路径、接口地址、模型与运行策略。"],
 };
 
 const navItems = [
@@ -79,9 +85,9 @@ const navItems = [
   ["jianyingEditor", Scissors, "剪映 Skill"],
   ["tools", Wrench, "工具中心"],
   ["runningHubTts", Music2, "RunningHub TTS"],
-  ["library", Archive, "素材库"],
-  ["integrations", Boxes, "接入"],
-  ["settings", Settings, "配置"],
+  ["library", Archive, "素材归档"],
+  ["integrations", Boxes, "开源接入"],
+  ["settings", Settings, "配置中心"],
 ];
 
 const settingItems = [
@@ -4495,6 +4501,12 @@ function App() {
   const [selectedLibraryItem, setSelectedLibraryItem] = useState(null);
   const [taskSyncError, setTaskSyncError] = useState("");
   const [lastTaskRefresh, setLastTaskRefresh] = useState("");
+  const [showOverview, setShowOverview] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [uiTheme, setUiTheme] = useState(() => {
+    if (typeof window === "undefined") return "light";
+    return window.localStorage.getItem(THEME_STORAGE_KEY) || "light";
+  });
 
   async function refreshAnalysisTaskList() {
     const tasks = await fetchTasks("ai_video_analysis");
@@ -4520,6 +4532,12 @@ function App() {
         setApiState("示例数据");
       });
   }, []);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", "emerald");
+    document.documentElement.setAttribute("data-ui-mode", uiTheme);
+    window.localStorage.setItem(THEME_STORAGE_KEY, uiTheme);
+  }, [uiTheme]);
 
   useEffect(() => {
     async function loadArchives() {
@@ -4585,16 +4603,12 @@ function App() {
   }, []);
 
   async function handleCreateVideoBreakdown(video) {
-    try {
-      const task = await createAiVideoBreakdownJob(video);
-      const normalized = normalizeAnalysisTask(task);
-      setAnalysisTasks((current) => [normalized, ...current.filter((item) => item.id !== normalized.id)]);
-      window.setTimeout(() => refreshAnalysisTaskList().catch((err) => setTaskSyncError(`AI 视频拆解任务刷新失败：${err.message}`)), 800);
-      window.setTimeout(() => refreshAnalysisTaskList().catch((err) => setTaskSyncError(`AI 视频拆解任务刷新失败：${err.message}`)), 3000);
-      return { job_id: normalized.id, status: normalized.status, result: normalized.result };
-    } catch (err) {
-      throw err;
-    }
+    const task = await createAiVideoBreakdownJob(video);
+    const normalized = normalizeAnalysisTask(task);
+    setAnalysisTasks((current) => [normalized, ...current.filter((item) => item.id !== normalized.id)]);
+    window.setTimeout(() => refreshAnalysisTaskList().catch((err) => setTaskSyncError(`AI 视频拆解任务刷新失败：${err.message}`)), 800);
+    window.setTimeout(() => refreshAnalysisTaskList().catch((err) => setTaskSyncError(`AI 视频拆解任务刷新失败：${err.message}`)), 3000);
+    return { job_id: normalized.id, status: normalized.status, result: normalized.result };
   }
 
   async function handleCreatePromptReverse(video) {
@@ -4638,29 +4652,76 @@ function App() {
     setPromptReverseArchives((current) => current.filter((item) => item.task_id !== task.id && item.id !== task.id));
   }
 
+  async function handleGlobalRefresh() {
+    setRefreshing(true);
+    const [analysisResult, promptResult, workbenchResult, analysisArchiveResult, promptArchiveResult] = await Promise.allSettled([
+      refreshAnalysisTaskList(),
+      refreshPromptReverseTaskList(),
+      fetchWorkbench(),
+      fetchAiVideoArchives(),
+      fetchAiPromptReverseArchives(),
+    ]);
+
+    if (workbenchResult.status === "fulfilled") {
+      setWorkbench(workbenchResult.value);
+      setApiState("后端已连接");
+    } else {
+      setApiState("示例数据");
+    }
+
+    if (analysisArchiveResult.status === "fulfilled") {
+      setAnalysisArchives(analysisArchiveResult.value);
+    }
+    if (promptArchiveResult.status === "fulfilled") {
+      setPromptReverseArchives(promptArchiveResult.value);
+    }
+
+    const errors = [];
+    if (analysisResult.status === "rejected") {
+      errors.push(`AI 视频拆解任务刷新失败：${analysisResult.reason?.message || analysisResult.reason}`);
+    }
+    if (promptResult.status === "rejected") {
+      errors.push(`提示词反推任务刷新失败：${promptResult.reason?.message || promptResult.reason}`);
+    }
+    setTaskSyncError(errors.join("；"));
+    setRefreshing(false);
+  }
+
+  function openSection(sectionId) {
+    startTransition(() => {
+      setActiveSection(sectionId);
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function toggleTheme() {
+    setUiTheme((current) => (current === "light" ? "dark" : "light"));
+  }
+
   const tools = workbench.tools?.length ? workbench.tools : fallbackWorkbench.tools;
   const library = workbench.library?.length ? workbench.library : fallbackWorkbench.library;
   const integrations = workbench.integrations?.length
     ? workbench.integrations
     : fallbackWorkbench.integrations;
+  const deferredQuery = useDeferredValue(query);
 
   const filteredTools = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
+    const normalized = deferredQuery.trim().toLowerCase();
     return tools.filter((tool) => {
       if (tool.id === "jianying-editor-sdk") return false;
       const filterMatched = filter === "all" || tool.status === filter;
       const text = [tool.name, tool.desc, tool.status, ...tool.tags].join(" ").toLowerCase();
       return filterMatched && (!normalized || text.includes(normalized));
     });
-  }, [filter, query, tools]);
+  }, [deferredQuery, filter, tools]);
 
   const filteredLibrary = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
+    const normalized = deferredQuery.trim().toLowerCase();
     if (!normalized) return library;
     return library.filter((item) =>
       [item.title, item.desc, item.type, ...item.tags].join(" ").toLowerCase().includes(normalized),
     );
-  }, [query, library]);
+  }, [deferredQuery, library]);
 
   const archiveItems = useMemo(() => {
     const analysisItems = analysisArchives.map((item) => {
@@ -4689,7 +4750,7 @@ function App() {
   const archivedPromptReverseIds = useMemo(() => archiveIdSet(promptReverseArchives), [promptReverseArchives]);
   const visibleLibraryItems = useMemo(() => {
     const items = libraryType === "seed" ? filteredLibrary : archiveItems;
-    const normalized = query.trim().toLowerCase();
+    const normalized = deferredQuery.trim().toLowerCase();
     if (!normalized) return items;
     return items.filter((item) => {
       const presentation = archivePresentation(item);
@@ -4702,7 +4763,8 @@ function App() {
       ].join(" ").toLowerCase();
       return text.includes(normalized);
     });
-  }, [archiveItems, filteredLibrary, libraryType, query]);
+  }, [archiveItems, deferredQuery, filteredLibrary, libraryType]);
+
   const libraryGroups = useMemo(() => {
     if (libraryType === "seed") {
       return [
@@ -4749,320 +4811,354 @@ function App() {
 
   const [title, subtitle] = sections[activeSection];
 
+  useEffect(() => {
+    document.title = `${title} | 抖音解析`;
+  }, [title]);
+
+  const activeSectionLabel = navItems.find(([id]) => id === activeSection)?.[2] || title;
+  const subnavItems =
+    activeSection === "settings"
+      ? settingItems.map(([value, text]) => ({
+          value,
+          text,
+          active: activeSetting === value,
+          onClick: () =>
+            startTransition(() => {
+              setActiveSetting(value);
+            }),
+        }))
+      : activeSection === "jianyingEditor"
+        ? jianyingEditorItems.map(([value, text]) => ({
+            value,
+            text,
+            active: activeJianyingEditor === value,
+            onClick: () =>
+              startTransition(() => {
+                setActiveJianyingEditor(value);
+              }),
+          }))
+        : [];
+
+  let sectionContent = null;
+
+  if (activeSection === "dashboard") {
+    sectionContent = (
+      <section className="dashboard-stack">
+        <DouyinCollectorPanel onBreakdown={handleCreateVideoBreakdown} onPromptReverse={handleCreatePromptReverse} />
+        <section className="panel task-board-panel">
+          <div className="panel-header">
+            <div>
+              <h2>任务中心</h2>
+              <p>任务按工具分行排列，点击状态切换列表，点击任务查看详情。</p>
+            </div>
+            <Badge status={taskSyncError ? "error" : "running"}>
+              {taskSyncError || `自动刷新中${lastTaskRefresh ? ` · ${lastTaskRefresh}` : ""}`}
+            </Badge>
+          </div>
+          <div className="task-board-rows">
+            <TaskStatusRow
+              title="AI 视频拆解"
+              desc="展示 AI 视频拆解的进行中、已完成和异常任务。"
+              groups={analysisTaskGroups}
+              activeStatus={activeAnalysisStatus}
+              onChangeStatus={setActiveAnalysisStatus}
+              onOpenTask={(task) => setSelectedTaskRecord({ type: "analysis", title: "AI 视频拆解", task })}
+            />
+            <TaskStatusRow
+              title="AI 提示词反推"
+              desc="展示提示词反推的进行中、已完成和异常任务。"
+              groups={promptReverseTaskGroups}
+              activeStatus={activePromptStatus}
+              onChangeStatus={setActivePromptStatus}
+              onOpenTask={(task) => setSelectedTaskRecord({ type: "prompt", title: "AI 提示词反推", task })}
+            />
+          </div>
+        </section>
+      </section>
+    );
+  } else if (activeSection === "tools") {
+    sectionContent = (
+      <section>
+        {activeToolId === "jianying-editor-sdk" ? (
+          <>
+            <div className="section-toolbar">
+              <button className="text-button" type="button" onClick={() => setActiveToolId("")}>
+                返回工具列表
+              </button>
+            </div>
+            <JianyingEditorSdkPanel />
+          </>
+        ) : (
+          <>
+            <div className="section-toolbar">
+              <div className="segmented">
+                {[
+                  ["all", "全部"],
+                  ["ready", "可用"],
+                  ["draft", "草稿"],
+                ].map(([id, label]) => (
+                  <button
+                    className={filter === id ? "active" : ""}
+                    key={id}
+                    type="button"
+                    onClick={() => setFilter(id)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <Badge status="ready">{filteredTools.length} 个工具</Badge>
+            </div>
+            <div className="tool-grid">
+              {filteredTools.map((tool) => (
+                <ToolCard key={tool.id} tool={tool} onOpen={(item) => setActiveToolId(item.id)} />
+              ))}
+            </div>
+          </>
+        )}
+      </section>
+    );
+  } else if (activeSection === "runningHubTts") {
+    sectionContent = (
+      <section>
+        <RunningHubTtsPanel />
+      </section>
+    );
+  } else if (activeSection === "jianyingEditor") {
+    sectionContent = (
+      <section>
+        {activeJianyingEditor === "script" ? (
+          <JianyingNaturalScriptPanel />
+        ) : (
+          <JianyingEditorSdkPanel activeView={activeJianyingEditor} />
+        )}
+      </section>
+    );
+  } else if (activeSection === "draftInspector") {
+    sectionContent = (
+      <section>
+        <DraftInspectorPanel />
+      </section>
+    );
+  } else if (activeSection === "library") {
+    sectionContent = (
+      <section className="library-layout">
+        <aside className="filter-panel">
+          <div className="filter-panel-head">
+            <div>
+              <h2>筛选</h2>
+              <p>点击下方条目查看完整内容。</p>
+            </div>
+            <Badge>{visibleLibraryItems.length} 条结果</Badge>
+          </div>
+          <label>
+            类型
+            <select value={libraryType} onChange={(event) => setLibraryType(event.target.value)}>
+              <option value="all">AI 归档全部</option>
+              <option value="analysis">AI 拆解</option>
+              <option value="prompt">反推提示词</option>
+              <option value="seed">示例素材</option>
+            </select>
+          </label>
+          <div className="filter-panel-note">
+            <strong>搜索已生效</strong>
+            <p>顶部搜索会同步过滤归档与工具面板。</p>
+          </div>
+        </aside>
+        <div className="library-list">
+          {libraryGroups.map((group) => (
+            <LibraryArchiveGroup key={group.key} title={group.title} desc={group.desc} items={group.items}>
+              {group.items.map((item) => {
+                const presentation = archivePresentation(item);
+                return (
+                  <article
+                    className={`library-card ${item.archiveType ? "archive-library-card" : ""}`}
+                    key={item.id}
+                    onClick={() => {
+                      if (item.archiveType === "analysis") {
+                        setSelectedAnalysisTask({
+                          id: item.task_id,
+                          title: item.title,
+                          result: item.result,
+                        });
+                      }
+                      if (item.archiveType === "prompt") {
+                        setSelectedPromptReverseTask({
+                          id: item.task_id,
+                          title: item.title,
+                          result: item.result,
+                        });
+                      }
+                      if (!item.archiveType) {
+                        setSelectedLibraryItem({
+                          ...item,
+                          presentation,
+                          raw: item,
+                        });
+                      }
+                    }}
+                  >
+                    <div className="archive-thumb">
+                      <span>{presentation.toolLabel}</span>
+                      <strong>{item.archiveType === "analysis" ? "拆解" : item.archiveType === "prompt" ? "提示词" : "素材"}</strong>
+                    </div>
+                    <div className="archive-card-body">
+                      <div className="archive-card-head">
+                        <span>{presentation.toolDetail}</span>
+                        <h3>{presentation.headline}</h3>
+                      </div>
+                      <p>{presentation.summary}</p>
+                      {presentation.highlights.length > 0 && (
+                        <div className="archive-highlight-grid">
+                          {presentation.highlights.slice(0, 3).map(([label, value]) => (
+                            <div className="archive-highlight" key={label}>
+                              <span>{label}</span>
+                              <p>{value}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="library-meta">
+                        {presentation.tags.map((tag) => (
+                          <Badge key={tag}>{tag}</Badge>
+                        ))}
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </LibraryArchiveGroup>
+          ))}
+          {!visibleLibraryItems.length && <div className="empty-result">暂无归档内容。在任务中心点击“归档”后会出现在这里。</div>}
+        </div>
+      </section>
+    );
+  } else if (activeSection === "integrations") {
+    sectionContent = (
+      <section className="integration-grid">
+        {integrations.map((integration) => (
+          <article className="panel integration-card" key={integration.id}>
+            <div className="integration-icon">
+              {integration.kind === "python" ? <FolderCog size={20} /> : <Database size={20} />}
+            </div>
+            <div>
+              <h2>{integration.name}</h2>
+              <p>{integration.desc}</p>
+              <div className="tool-meta">
+                <Badge>{integration.kind}</Badge>
+                <Badge status={integration.status}>{integration.status}</Badge>
+              </div>
+            </div>
+          </article>
+        ))}
+      </section>
+    );
+  } else if (activeSection === "settings") {
+    sectionContent = (
+      <section className="settings-grid">
+        {activeSetting === "ai-provider" && <AiProviderSettingsPanel />}
+        {activeSetting === "douyin" && <DouyinSettingsPanel />}
+        {activeSetting === "ai-video" && <AiVideoSettingsPanel />}
+        {activeSetting === "ai-prompt" && <AiPromptReverseSettingsPanel />}
+        {activeSetting === "jianying" && <JianyingDraftSettingsPanel />}
+      </section>
+    );
+  }
+
   return (
     <>
-      <aside className="sidebar" aria-label="主导航">
-        <div className="brand">
-          <div className="brand-mark">T</div>
-          <div>
-            <strong>工具工作台</strong>
-            <span>Personal Ops</span>
-          </div>
-        </div>
-
-        <nav className="nav-list">
-          {navItems.map(([id, Icon, label]) => (
-            <React.Fragment key={id}>
-              <button
-                className={`nav-item ${activeSection === id ? "active" : ""}`}
-                type="button"
-                onClick={() => setActiveSection(id)}
-              >
-                <Icon size={18} />
-                <span>{label}</span>
-              </button>
-              {id === "settings" && activeSection === "settings" && (
-                <div className="settings-subnav">
-                  {settingItems.map(([value, text]) => (
+      <div className="ccx-app-shell">
+        <header className="app-header">
+          <div className="app-header-left">
+            <a className="app-logo" href="https://github.com/lvxiaotu/douyinchaijie" target="_blank" rel="noreferrer" aria-label="打开项目仓库">
+              <span>抖</span>
+            </a>
+            <div className="header-title">
+              <div className="header-nav" role="tablist" aria-label="主导航">
+                {navItems.map(([id, Icon, label], index) => (
+                  <React.Fragment key={id}>
                     <button
-                      className={`settings-subnav-item ${activeSetting === value ? "active" : ""}`}
-                      key={value}
+                      className={`api-type-text ${activeSection === id ? "active" : ""}`}
                       type="button"
-                      onClick={() => setActiveSetting(value)}
+                      onClick={() => openSection(id)}
                     >
-                      <span className="settings-subnav-arrow">{activeSetting === value ? "▾" : "▸"}</span>
-                      <span>{text}</span>
+                      <Icon size={15} />
+                      <span>{label}</span>
                     </button>
-                  ))}
-                </div>
-              )}
-              {id === "jianyingEditor" && activeSection === "jianyingEditor" && (
-                <div className="settings-subnav">
-                  {jianyingEditorItems.map(([value, text]) => (
-                    <button
-                      className={`settings-subnav-item ${activeJianyingEditor === value ? "active" : ""}`}
-                      key={value}
-                      type="button"
-                      onClick={() => setActiveJianyingEditor(value)}
-                    >
-                      <span className="settings-subnav-arrow">{activeJianyingEditor === value ? "▾" : "▸"}</span>
-                      <span>{text}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </React.Fragment>
-          ))}
-        </nav>
-
-        <div className="sidebar-footer">
-          <span className="status-dot" />
-          <span>{apiState}</span>
-        </div>
-      </aside>
-
-      <main className="shell">
-        <header className="topbar">
-          <div>
-            <h1>{title}</h1>
-            <p>{subtitle}</p>
+                    {index < navItems.length - 1 && <span className="api-type-text separator">/</span>}
+                  </React.Fragment>
+                ))}
+                <span className="brand-text">抖音解析</span>
+              </div>
+            </div>
           </div>
-          <div className="topbar-actions">
-            <label className="search-box">
-              <Search size={17} />
-              <input
-                type="search"
-                placeholder="搜索工具、任务、素材"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-            </label>
-            <button className="icon-button" type="button" title="刷新">
-              <RefreshCw size={17} />
+
+          <div className="app-header-right">
+            <div className={`version-badge ${taskSyncError ? "version-update" : "version-latest"}`}>
+              <span className="version-text">{UI_VERSION}</span>
+            </div>
+            <div className="header-info-chip">
+              <Languages size={14} />
+              <span>ZH</span>
+            </div>
+            <button className="header-btn" type="button" onClick={toggleTheme} title={uiTheme === "light" ? "切换到暗色模式" : "切换到亮色模式"}>
+              {uiTheme === "light" ? <MoonStar size={18} /> : <SunMedium size={18} />}
+            </button>
+            <button className="header-btn" type="button" onClick={() => handleGlobalRefresh().catch(() => {})} title="刷新工作台">
+              <RefreshCw size={18} className={refreshing ? "spin" : ""} />
             </button>
           </div>
         </header>
 
-        {activeSection === "dashboard" && (
-          <section className="dashboard-stack">
-            <DouyinCollectorPanel onBreakdown={handleCreateVideoBreakdown} onPromptReverse={handleCreatePromptReverse} />
-            <section className="panel task-board-panel">
-              <div className="panel-header">
-                <div>
-                  <h2>任务中心</h2>
-                  <p>任务按工具分行排列，点击状态切换列表，点击任务查看详情。</p>
-                </div>
-                <Badge status={taskSyncError ? "error" : "running"}>
-                  {taskSyncError || `自动刷新中${lastTaskRefresh ? ` · ${lastTaskRefresh}` : ""}`}
-                </Badge>
+        <main className="shell">
+          <section className="panel global-stats-panel">
+            <button className="global-stats-header" type="button" onClick={() => setShowOverview((current) => !current)}>
+              <div>
+                <span className="global-stats-eyebrow">Control Center</span>
+                <strong>{title}</strong>
+                <p>{subtitle}</p>
               </div>
-              <div className="task-board-rows">
-                <TaskStatusRow
-                  title="AI 视频拆解"
-                  desc="展示 AI 视频拆解的进行中、已完成和异常任务。"
-                  groups={analysisTaskGroups}
-                  activeStatus={activeAnalysisStatus}
-                  onChangeStatus={setActiveAnalysisStatus}
-                  onOpenTask={(task) => setSelectedTaskRecord({ type: "analysis", title: "AI 视频拆解", task })}
-                />
-                <TaskStatusRow
-                  title="AI 提示词反推"
-                  desc="展示提示词反推的进行中、已完成和异常任务。"
-                  groups={promptReverseTaskGroups}
-                  activeStatus={activePromptStatus}
-                  onChangeStatus={setActivePromptStatus}
-                  onOpenTask={(task) => setSelectedTaskRecord({ type: "prompt", title: "AI 提示词反推", task })}
-                />
+              <Badge status={taskSyncError ? "error" : "running"}>
+                {showOverview ? "收起概览" : "展开概览"}
+              </Badge>
+            </button>
+            {showOverview && (
+              <div className="global-stats-body">
+                <div className="overview-line">
+                  <span>当前区域</span>
+                  <strong>{activeSectionLabel}</strong>
+                </div>
+                <div className="overview-line">
+                  <span>后端状态</span>
+                  <strong>{apiState}</strong>
+                </div>
+                <div className="overview-line">
+                  <span>任务刷新</span>
+                  <strong>{lastTaskRefresh ? `最近同步于 ${lastTaskRefresh}` : "等待首轮同步"}</strong>
+                </div>
               </div>
-            </section>
-          </section>
-        )}
-
-        {activeSection === "tools" && (
-          <section>
-            {activeToolId === "jianying-editor-sdk" ? (
-              <>
-                <div className="section-toolbar">
-                  <button className="text-button" type="button" onClick={() => setActiveToolId("")}>
-                    返回工具列表
-                  </button>
-                </div>
-                <JianyingEditorSdkPanel />
-              </>
-            ) : (
-              <>
-                <div className="section-toolbar">
-                  <div className="segmented">
-                    {[
-                      ["all", "全部"],
-                      ["ready", "可用"],
-                      ["draft", "草稿"],
-                    ].map(([id, label]) => (
-                      <button
-                        className={filter === id ? "active" : ""}
-                        key={id}
-                        type="button"
-                        onClick={() => setFilter(id)}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  <button className="primary-button" type="button">
-                    <Plus size={16} />
-                    新工具
-                  </button>
-                </div>
-                <div className="tool-grid">
-                  {filteredTools.map((tool) => (
-                    <ToolCard key={tool.id} tool={tool} onOpen={(item) => setActiveToolId(item.id)} />
-                  ))}
-                </div>
-              </>
             )}
           </section>
-        )}
 
-        {activeSection === "runningHubTts" && (
-          <section>
-            <RunningHubTtsPanel />
-          </section>
-        )}
-
-        {activeSection === "jianyingEditor" && (
-          <section>
-            {activeJianyingEditor === "script" ? (
-              <JianyingNaturalScriptPanel />
-            ) : (
-              <JianyingEditorSdkPanel activeView={activeJianyingEditor} />
-            )}
-          </section>
-        )}
-
-        {activeSection === "draftInspector" && (
-          <section>
-            <DraftInspectorPanel />
-          </section>
-        )}
-
-        {activeSection === "library" && (
-          <section className="library-layout">
-            <aside className="filter-panel">
-              <div className="filter-panel-head">
-                <div>
-                  <h2>筛选</h2>
-                  <p>点击下方条目查看完整内容。</p>
-                </div>
-                <Badge>{visibleLibraryItems.length} 条结果</Badge>
-              </div>
-              <label>
-                类型
-                <select value={libraryType} onChange={(event) => setLibraryType(event.target.value)}>
-                  <option value="all">AI 归档全部</option>
-                  <option value="analysis">AI 拆解</option>
-                  <option value="prompt">反推提示词</option>
-                  <option value="seed">示例素材</option>
-                </select>
-              </label>
-              <label>
-                标签
-                <select>
-                  <option>全部标签</option>
-                  <option>灵感</option>
-                  <option>工作</option>
-                  <option>待处理</option>
-                </select>
-              </label>
-            </aside>
-            <div className="library-list">
-              {libraryGroups.map((group) => (
-                <LibraryArchiveGroup key={group.key} title={group.title} desc={group.desc} items={group.items}>
-                  {group.items.map((item) => {
-                    const presentation = archivePresentation(item);
-                    return (
-                      <article
-                        className={`library-card ${item.archiveType ? "archive-library-card" : ""}`}
-                        key={item.id}
-                        onClick={() => {
-                          if (item.archiveType === "analysis") {
-                            setSelectedAnalysisTask({
-                              id: item.task_id,
-                              title: item.title,
-                              result: item.result,
-                            });
-                          }
-                          if (item.archiveType === "prompt") {
-                            setSelectedPromptReverseTask({
-                              id: item.task_id,
-                              title: item.title,
-                              result: item.result,
-                            });
-                          }
-                          if (!item.archiveType) {
-                            setSelectedLibraryItem({
-                              ...item,
-                              presentation,
-                              raw: item,
-                            });
-                          }
-                        }}
-                      >
-                        <div className="archive-thumb">
-                          <span>{presentation.toolLabel}</span>
-                          <strong>{item.archiveType === "analysis" ? "拆解" : item.archiveType === "prompt" ? "提示词" : "素材"}</strong>
-                        </div>
-                        <div className="archive-card-body">
-                          <div className="archive-card-head">
-                            <span>{presentation.toolDetail}</span>
-                            <h3>{presentation.headline}</h3>
-                          </div>
-                          <p>{presentation.summary}</p>
-                          {presentation.highlights.length > 0 && (
-                            <div className="archive-highlight-grid">
-                              {presentation.highlights.slice(0, 3).map(([label, value]) => (
-                                <div className="archive-highlight" key={label}>
-                                  <span>{label}</span>
-                                  <p>{value}</p>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          <div className="library-meta">
-                            {presentation.tags.map((tag) => (
-                              <Badge key={tag}>{tag}</Badge>
-                            ))}
-                          </div>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </LibraryArchiveGroup>
+          {subnavItems.length > 0 && (
+            <div className="section-subnav">
+              {subnavItems.map((item) => (
+                <button
+                  className={`section-subnav-item ${item.active ? "active" : ""}`}
+                  key={item.value}
+                  type="button"
+                  onClick={item.onClick}
+                >
+                  {item.text}
+                </button>
               ))}
-              {!visibleLibraryItems.length && <div className="empty-result">暂无归档内容。在任务中心点击“归档”后会出现在这里。</div>}
             </div>
-          </section>
-        )}
+          )}
 
-        {activeSection === "integrations" && (
-          <section className="integration-grid">
-            {integrations.map((integration) => (
-              <article className="panel integration-card" key={integration.id}>
-                <div className="integration-icon">
-                  {integration.kind === "python" ? <FolderCog size={20} /> : <Database size={20} />}
-                </div>
-                <div>
-                  <h2>{integration.name}</h2>
-                  <p>{integration.desc}</p>
-                  <div className="tool-meta">
-                    <Badge>{integration.kind}</Badge>
-                    <Badge status={integration.status}>{integration.status}</Badge>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </section>
-        )}
+          <section className="content-shell">{sectionContent}</section>
+        </main>
+      </div>
 
-        {activeSection === "settings" && (
-          <section className="settings-grid">
-            {activeSetting === "ai-provider" && <AiProviderSettingsPanel />}
-            {activeSetting === "douyin" && <DouyinSettingsPanel />}
-            {activeSetting === "ai-video" && <AiVideoSettingsPanel />}
-            {activeSetting === "ai-prompt" && <AiPromptReverseSettingsPanel />}
-            {activeSetting === "jianying" && <JianyingDraftSettingsPanel />}
-          </section>
-        )}
-      </main>
       <TaskRecordModal
         record={selectedTaskRecord}
         archivedIds={selectedTaskRecord?.type === "analysis" ? archivedAnalysisIds : archivedPromptReverseIds}
