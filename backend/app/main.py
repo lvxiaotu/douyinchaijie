@@ -15,6 +15,7 @@ from .routes.jianying_editor_sdk import router as jianying_editor_sdk_router
 from .routes.runninghub_tts import router as runninghub_tts_router
 from .routes.studio import router as studio_router
 from .routes.tasks import router as tasks_router
+from .routes.text_to_assets import router as text_to_assets_router
 from .routes.video_script import router as video_script_router
 from .task_store import init_db
 
@@ -46,6 +47,7 @@ app.include_router(ai_video_analysis_router)
 app.include_router(ai_prompt_reverse_router)
 app.include_router(tasks_router)
 app.include_router(video_script_router)
+app.include_router(text_to_assets_router)
 app.include_router(jianying_router)
 app.include_router(jianying_editor_sdk_router)
 app.include_router(runninghub_tts_router)

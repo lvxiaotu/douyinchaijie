@@ -48,6 +48,16 @@ def get_workbench() -> WorkbenchSnapshot:
             tags=["剪映", "SDK", "自动化", "Python"],
             integration_id="jianying-editor-sdk",
         ),
+        ToolDefinition(
+            id="text-to-assets",
+            icon="TA",
+            name="一句话转素材",
+            desc="输入一句方案，AI 自动输出 A-Roll、B-Roll、SFX、BGM 和旁白台词。",
+            status="ready",
+            updated="已接入任务中心",
+            tags=["AI", "素材", "Prompt", "导演"],
+            integration_id="ai-prompt-reverse",
+        ),
     ]
 
     return WorkbenchSnapshot(

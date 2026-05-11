@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Archive,
   Boxes,
+  Clapperboard,
   Clock3,
   Database,
   FolderCog,
@@ -23,6 +24,7 @@ import {
   createAiVideoBreakdownJob,
   createAiPromptReverseJob,
   createRunningHubTtsJob,
+  createTextToAssetsJob,
   createJianyingDraftFromScript,
   deleteVideoScript,
   deleteTask,
@@ -75,6 +77,7 @@ const sections = {
   jianyingEditor: ["剪映 Skill", "围绕 AI 剧本、第三方素材补齐和剪映草稿生成的主工作流。"],
   tools: ["工具中心", "保留现有工具入口，用统一的前端壳子承接后续新增能力。"],
   runningHubTts: ["RunningHub TTS", "单独承载 RunningHub index-tts 链路，作为顶级工具并入主控制台。"],
+  textToAssets: ["一句话转素材", "输入一句抽象方案，让 AI 自动拆成 A-Roll、B-Roll、音频和旁白素材清单。"],
   library: ["素材归档", "集中查看 AI 视频拆解、提示词反推与示例素材的沉淀结果。"],
   integrations: ["开源接入", "为 GitHub 项目、脚本和外部服务预留前端接入位。"],
   settings: ["配置中心", "集中管理路径、接口地址、模型与运行策略。"],
@@ -86,6 +89,7 @@ const navItems = [
   ["jianyingEditor", Scissors, "剪映 Skill"],
   ["tools", Wrench, "工具中心"],
   ["runningHubTts", Music2, "RunningHub TTS"],
+  ["textToAssets", Clapperboard, "一句话转素材"],
   ["library", Archive, "素材归档"],
   ["integrations", Boxes, "开源接入"],
   ["settings", Settings, "配置中心"],
@@ -3574,6 +3578,46 @@ function normalizeRunningHubTtsTask(task) {
   };
 }
 
+function normalizeTextToAssetsTask(task) {
+  const normalized = normalizeAnalysisTask(task, (result) => result || {});
+  const result = normalized.result || {};
+  const aRollItems = Array.isArray(result.a_roll_prompts) ? result.a_roll_prompts : [];
+  const bRollItems = Array.isArray(result.b_roll_list) ? result.b_roll_list : [];
+  const audioPlan = result.audio_plan && typeof result.audio_plan === "object" ? result.audio_plan : {};
+  const voiceoverItems = Array.isArray(audioPlan.voiceover) ? audioPlan.voiceover : [];
+  const sfxItems = Array.isArray(audioPlan.sfx) ? audioPlan.sfx : [];
+  const creativeDirection = result.creative_direction && typeof result.creative_direction === "object" ? result.creative_direction : {};
+  const bgmStyle = audioPlan.bgm_style && typeof audioPlan.bgm_style === "object"
+    ? audioPlan.bgm_style
+    : { genre: audioPlan.bgm_style || "" };
+  const notes = Array.isArray(result.notes) ? result.notes : [];
+
+  return {
+    ...normalized,
+    title:
+      task.title ||
+      (task.payload?.idea && task.payload.idea.trim().slice(0, 40)) ||
+      "一句话转素材",
+    idea: task.payload?.idea || "",
+    creativeDirection,
+    aRollItems,
+    bRollItems,
+    audioPlan: {
+      sfx: sfxItems,
+      bgmStyle,
+      voiceover: voiceoverItems,
+    },
+    notes,
+    resultSummary:
+      result.summary ||
+      creativeDirection.positioning ||
+      creativeDirection.visual_style ||
+      aRollItems[0]?.prompt ||
+      normalized.message ||
+      "",
+  };
+}
+
 const runningHubEmotionFields = [
   ["happy", "快乐"],
   ["angry", "愤怒"],
@@ -4155,6 +4199,372 @@ function RunningHubTtsPanel() {
   );
 }
 
+function TextToAssetsResultModal({ task, onClose }) {
+  if (!task) return null;
+  const result = task.result || {};
+  const aRollItems = Array.isArray(result.a_roll_prompts) ? result.a_roll_prompts : [];
+  const bRollItems = Array.isArray(result.b_roll_list) ? result.b_roll_list : [];
+  const creativeDirection = result.creative_direction && typeof result.creative_direction === "object" ? result.creative_direction : {};
+  const audioPlan = result.audio_plan && typeof result.audio_plan === "object" ? result.audio_plan : {};
+  const sfxItems = Array.isArray(audioPlan.sfx) ? audioPlan.sfx : [];
+  const voiceoverItems = Array.isArray(audioPlan.voiceover) ? audioPlan.voiceover : [];
+  const bgmStyle = audioPlan.bgm_style && typeof audioPlan.bgm_style === "object"
+    ? audioPlan.bgm_style
+    : { genre: audioPlan.bgm_style || "" };
+  const notes = Array.isArray(result.notes) ? result.notes : [];
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section className="modal-panel" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+        <div className="panel-header">
+          <div>
+            <h2>Text-to-Assets 结果</h2>
+            <p>{task.title}</p>
+          </div>
+          <button className="text-button" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="analysis-result-body">
+          <p>{result.summary || "暂无摘要"}</p>
+          {result.master_prompt && (
+            <div className="analysis-section">
+              <strong>已应用主提示词</strong>
+              <pre className="result-box">{result.master_prompt}</pre>
+            </div>
+          )}
+          {result.draft_markdown && (
+            <div className="analysis-section">
+              <strong>AI 初稿 Markdown</strong>
+              <pre className="result-box">{result.draft_markdown}</pre>
+            </div>
+          )}
+          {result.creative_direction && (
+            <div className="analysis-section">
+              <strong>创意执行方向</strong>
+              <div className="result-grid">
+                <article>
+                  <span>内容定位</span>
+                  <p>{creativeDirection.positioning || "暂无内容"}</p>
+                </article>
+                <article>
+                  <span>目标观众</span>
+                  <p>{creativeDirection.audience || "暂无内容"}</p>
+                </article>
+                <article>
+                  <span>整体气质</span>
+                  <p>{creativeDirection.tone || "暂无内容"}</p>
+                </article>
+                <article>
+                  <span>画面风格</span>
+                  <p>{creativeDirection.visual_style || "暂无内容"}</p>
+                </article>
+                <article>
+                  <span>节奏设计</span>
+                  <p>{creativeDirection.rhythm || "暂无内容"}</p>
+                </article>
+                <article>
+                  <span>开头钩子</span>
+                  <p>{creativeDirection.hook || "暂无内容"}</p>
+                </article>
+                <article>
+                  <span>转化目标</span>
+                  <p>{creativeDirection.conversion_goal || "暂无内容"}</p>
+                </article>
+              </div>
+            </div>
+          )}
+          <div className="analysis-section">
+            <strong>主视觉画面 A-Roll 提示词</strong>
+            {aRollItems.length ? (
+              aRollItems.map((item, index) => (
+                <div className="analysis-field shot-replica-field" key={item.id || index}>
+                  <span>{item.id || `A${index + 1}`} · {item.title || `主镜头 ${index + 1}`}</span>
+                  <dl className="shot-replica-list">
+                    <div className="wide">
+                      <dt>Prompt</dt>
+                      <dd>{item.prompt || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>镜头目标</dt>
+                      <dd>{item.shot_goal || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>运镜方式</dt>
+                      <dd>{item.camera || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>构图设计</dt>
+                      <dd>{item.composition || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>光线设计</dt>
+                      <dd>{item.lighting || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>主体动作</dt>
+                      <dd>{item.subject_action || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>转场方式</dt>
+                      <dd>{item.transition || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>时长</dt>
+                      <dd>{item.duration_seconds ? `${item.duration_seconds} 秒` : "暂无内容"}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>执行补充</dt>
+                      <dd>{item.art_direction_notes || "暂无内容"}</dd>
+                    </div>
+                  </dl>
+                </div>
+              ))
+            ) : (
+              <p>暂无 A-Roll 内容</p>
+            )}
+          </div>
+          <div className="analysis-section">
+            <strong>空镜头 / B-Roll 清单</strong>
+            {bRollItems.length ? (
+              bRollItems.map((item, index) => (
+                <div className="analysis-field" key={`${item.title || "b-roll"}-${index}`}>
+                  <span>{item.title || `B-Roll ${index + 1}`}</span>
+                  <p>{item.description || "暂无内容"}</p>
+                  <p>{item.purpose ? `用途：${item.purpose}` : "用途：暂无内容"}</p>
+                  <p>{item.insert_timing ? `插入位置：${item.insert_timing}` : "插入位置：暂无内容"}</p>
+                  <p>{item.capture_notes ? `拍摄提醒：${item.capture_notes}` : "拍摄提醒：暂无内容"}</p>
+                </div>
+              ))
+            ) : (
+              <p>暂无 B-Roll 内容</p>
+            )}
+          </div>
+          <div className="analysis-section">
+            <strong>音频素材清单</strong>
+            <div className="result-grid">
+              <article>
+                <span>音效 SFX</span>
+                <p>
+                  {sfxItems.length
+                    ? sfxItems
+                        .map((item) =>
+                          typeof item === "string"
+                            ? item
+                            : [item.name, item.usage && `用途：${item.usage}`, item.timing && `时机：${item.timing}`]
+                                .filter(Boolean)
+                                .join(" / "),
+                        )
+                        .join("\n")
+                    : "暂无内容"}
+                </p>
+              </article>
+              <article>
+                <span>BGM 风格</span>
+                <p>
+                  {[
+                    bgmStyle.genre && `类型：${bgmStyle.genre}`,
+                    bgmStyle.mood && `情绪：${bgmStyle.mood}`,
+                    bgmStyle.tempo && `节奏：${bgmStyle.tempo}`,
+                    Array.isArray(bgmStyle.instruments) && bgmStyle.instruments.length
+                      ? `元素：${bgmStyle.instruments.join(" / ")}`
+                      : "",
+                    bgmStyle.mix_notes && `混音建议：${bgmStyle.mix_notes}`,
+                  ]
+                    .filter(Boolean)
+                    .join("\n") || "暂无内容"}
+                </p>
+              </article>
+            </div>
+          </div>
+          <div className="analysis-section">
+            <strong>旁白台词 Voiceover</strong>
+            {voiceoverItems.length ? (
+              voiceoverItems.map((item, index) => (
+                <div className="analysis-field" key={item.id || index}>
+                  <span>{item.id || `V${index + 1}`} {item.for_shot ? `· 对应 ${item.for_shot}` : ""}</span>
+                  <p>{item.line || "暂无内容"}</p>
+                  <p>{item.tone ? `语气：${item.tone}` : "语气：暂无内容"}</p>
+                  <p>{item.delivery_notes ? `朗读建议：${item.delivery_notes}` : "朗读建议：暂无内容"}</p>
+                </div>
+              ))
+            ) : (
+              <p>暂无旁白内容</p>
+            )}
+          </div>
+          {notes.length > 0 && (
+            <div className="analysis-section">
+              <strong>执行备注</strong>
+              {notes.map((note, index) => (
+                <div className="analysis-field" key={index}>
+                  <span>{typeof note === "string" ? `备注 ${index + 1}` : note.title || `备注 ${index + 1}`}</span>
+                  <p>{typeof note === "string" ? note : note.detail || "暂无内容"}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          {result.final_markdown && (
+            <div className="analysis-section">
+              <strong>最终汇总 Markdown</strong>
+              <pre className="result-box">{result.final_markdown}</pre>
+            </div>
+          )}
+          <details className="raw-json">
+            <summary>查看原始 JSON</summary>
+            <pre className="result-box">{JSON.stringify(task, null, 2)}</pre>
+          </details>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TextToAssetsPanel() {
+  const [idea, setIdea] = useState("做一个展示智能玻璃膜防水性能的宣传片");
+  const [title, setTitle] = useState("");
+  const [provider, setProvider] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [task, setTask] = useState(null);
+  const [taskList, setTaskList] = useState([]);
+  const [activeTaskStatus, setActiveTaskStatus] = useState("running");
+  const [selectedTaskRecord, setSelectedTaskRecord] = useState(null);
+  const [selectedResultTask, setSelectedResultTask] = useState(null);
+
+  const groupedTasks = useMemo(() => groupTasksByStatus(taskList), [taskList]);
+  const latestTask = task || taskList[0] || null;
+  const hasActiveTasks = useMemo(
+    () => taskList.some((item) => !["done", "error"].includes(item.status)),
+    [taskList],
+  );
+
+  async function refreshTextToAssetsTasks() {
+    try {
+      const tasks = await fetchTasks("text_to_assets");
+      setTaskList(tasks.map((item) => normalizeTextToAssetsTask(item)));
+    } catch {
+      // keep quiet during backend startup
+    }
+  }
+
+  useEffect(() => {
+    refreshTextToAssetsTasks();
+  }, []);
+
+  useEffect(() => {
+    if (!hasActiveTasks && !submitting) return undefined;
+    const timer = window.setInterval(async () => {
+      await refreshTextToAssetsTasks();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveTasks, submitting]);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await createTextToAssetsJob({
+        idea,
+        title,
+        provider,
+      });
+      const normalized = normalizeTextToAssetsTask(result);
+      setTask(normalized);
+      setMessage("任务已提交，正在生成素材清单。");
+      await refreshTextToAssetsTasks();
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="panel settings-wide text-to-assets-panel">
+      <div className="panel-header">
+        <div>
+          <h2>一句话转素材</h2>
+          <p>输入一个抽象方案，让 AI 拆成主视觉 Prompt、补充镜头、音效、BGM 和旁白台词。</p>
+        </div>
+        <Badge status={latestTask ? latestTask.status : "draft"}>
+          {latestTask ? statusText[latestTask.status] || latestTask.status : "等待任务"}
+        </Badge>
+      </div>
+      <form className="settings-form" onSubmit={handleSubmit}>
+        <label>
+          任务标题
+          <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="可选，不填则自动取方案前 24 个字" />
+        </label>
+        <label>
+          Provider
+          <input value={provider} onChange={(event) => setProvider(event.target.value)} placeholder="留空使用当前全局 AI provider" />
+        </label>
+        <label className="wide-field">
+          一句话方案
+          <textarea
+            rows={6}
+            value={idea}
+            onChange={(event) => setIdea(event.target.value)}
+            placeholder="例如：做一个展示智能玻璃膜防水性能的宣传片"
+          />
+        </label>
+        <button className="primary-button" type="submit" disabled={submitting}>
+          {submitting ? "生成中" : "生成素材清单"}
+        </button>
+      </form>
+      <div className="workflow-intro-strip text-to-assets-strip">
+        <span>A-Roll 主视觉 Prompt</span>
+        <span>B-Roll 补充镜头清单</span>
+        <span>SFX / BGM / Voiceover</span>
+      </div>
+      {message && <div className="running-note">{message}</div>}
+      {error && <div className="error-box">{error}</div>}
+      {latestTask && (
+        <div className="workflow-summary-card">
+          <strong>最新任务</strong>
+          <p>{latestTask.message || latestTask.status}</p>
+          <code>{latestTask.id}</code>
+        </div>
+      )}
+      <TaskStatusRow
+        title="Text-to-Assets 任务"
+        desc="按进行中 / 已完成 / 异常查看任务，点击任意任务可展开进度与结构化结果。"
+        groups={groupedTasks}
+        activeStatus={activeTaskStatus}
+        onChangeStatus={setActiveTaskStatus}
+        onOpenTask={(taskItem) =>
+          setSelectedTaskRecord({
+            type: "text_to_assets",
+            title: "一句话转素材",
+            task: taskItem,
+          })
+        }
+      />
+      <TaskRecordModal
+        record={selectedTaskRecord}
+        archivedIds={new Set()}
+        onClose={() => setSelectedTaskRecord(null)}
+        onOpenResult={(taskItem) => setSelectedResultTask(taskItem)}
+        onArchiveTask={null}
+        onDeleteTask={async (taskItem) => {
+          try {
+            await deleteTask(taskItem.id);
+            setSelectedTaskRecord(null);
+            setSelectedResultTask((current) => (current?.id === taskItem.id ? null : current));
+            await refreshTextToAssetsTasks();
+          } catch (err) {
+            setError(err.message || String(err));
+          }
+        }}
+      />
+      <TextToAssetsResultModal task={selectedResultTask} onClose={() => setSelectedResultTask(null)} />
+    </section>
+  );
+}
+
 function archivePresentation(item) {
   if (item.archiveType === "analysis") {
     const result = normalizeCommercialAnalysisResult(item.result || {});
@@ -4267,6 +4677,8 @@ function TaskRecordModal({
       ? task.result?.summary || ""
       : type === "runninghub_tts"
         ? task.resultSummary || task.outputItems?.[0]?.fileUrl || task.outputItems?.[0]?.url || ""
+        : type === "text_to_assets"
+          ? task.resultSummary || task.result?.summary || task.result?.creative_direction || ""
         : task.result?.summary || task.result?.master_prompt || "";
   const createdAt = task.created_at
     ? new Date(task.created_at * 1000).toLocaleString("zh-CN")
@@ -4372,6 +4784,34 @@ function TaskRecordModal({
                 )}
               </div>
             ))}
+          </section>
+        )}
+
+        {type === "text_to_assets" && (
+          <section className="analysis-section task-detail-section">
+            <strong>结果概览</strong>
+            <div className="result-grid">
+              <article>
+                <span>创意方向</span>
+                <p>{task.creativeDirection?.positioning || task.creativeDirection?.visual_style || "暂无内容"}</p>
+              </article>
+              <article>
+                <span>A-Roll 主镜头</span>
+                <p>{Array.isArray(task.aRollItems) ? `${task.aRollItems.length} 条` : "0 条"}</p>
+              </article>
+              <article>
+                <span>B-Roll 补充镜头</span>
+                <p>{Array.isArray(task.bRollItems) ? `${task.bRollItems.length} 条` : "0 条"}</p>
+              </article>
+              <article>
+                <span>Voiceover</span>
+                <p>{Array.isArray(task.audioPlan?.voiceover) ? `${task.audioPlan.voiceover.length} 条` : "0 条"}</p>
+              </article>
+              <article>
+                <span>执行备注</span>
+                <p>{Array.isArray(task.notes) ? `${task.notes.length} 条` : "0 条"}</p>
+              </article>
+            </div>
           </section>
         )}
 
@@ -4764,6 +5204,7 @@ function App() {
   const [activeToolId, setActiveToolId] = useState("");
   const [activeAnalysisStatus, setActiveAnalysisStatus] = useState("running");
   const [activePromptStatus, setActivePromptStatus] = useState("running");
+  const [activeTextToAssetsStatus, setActiveTextToAssetsStatus] = useState("running");
   const [selectedTaskRecord, setSelectedTaskRecord] = useState(null);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
@@ -4771,11 +5212,13 @@ function App() {
   const [apiState, setApiState] = useState("示例数据");
   const [analysisTasks, setAnalysisTasks] = useState([]);
   const [promptReverseTasks, setPromptReverseTasks] = useState([]);
+  const [textToAssetsTasks, setTextToAssetsTasks] = useState([]);
   const [analysisArchives, setAnalysisArchives] = useState([]);
   const [promptReverseArchives, setPromptReverseArchives] = useState([]);
   const [libraryType, setLibraryType] = useState("all");
   const [selectedAnalysisTask, setSelectedAnalysisTask] = useState(null);
   const [selectedPromptReverseTask, setSelectedPromptReverseTask] = useState(null);
+  const [selectedTextToAssetsTask, setSelectedTextToAssetsTask] = useState(null);
   const [selectedLibraryItem, setSelectedLibraryItem] = useState(null);
   const [taskSyncError, setTaskSyncError] = useState("");
   const [lastTaskRefresh, setLastTaskRefresh] = useState("");
@@ -4796,6 +5239,13 @@ function App() {
   async function refreshPromptReverseTaskList() {
     const tasks = await fetchTasks("ai_prompt_reverse");
     setPromptReverseTasks(tasks.map(normalizePromptReverseTask));
+    setTaskSyncError("");
+    setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  }
+
+  async function refreshTextToAssetsTaskList() {
+    const tasks = await fetchTasks("text_to_assets");
+    setTextToAssetsTasks(tasks.map(normalizeTextToAssetsTask));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   }
@@ -4860,6 +5310,29 @@ function App() {
   useEffect(() => {
     let mounted = true;
 
+    async function loadTextToAssetsTasks() {
+      try {
+        if (mounted) {
+          await refreshTextToAssetsTaskList();
+        }
+      } catch (err) {
+        if (mounted) {
+          setTaskSyncError(`一句话转素材任务刷新失败：${err.message}`);
+        }
+      }
+    }
+
+    loadTextToAssetsTasks();
+    const timer = window.setInterval(loadTextToAssetsTasks, 3000);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
     async function loadAnalysisTasks() {
       try {
         if (mounted) {
@@ -4912,6 +5385,15 @@ function App() {
     }
   }
 
+  async function handleDeleteTextToAssetsTask(task) {
+    if (!window.confirm("确认删除这个任务吗？")) {
+      return;
+    }
+    await deleteTask(task.id, false);
+    setTextToAssetsTasks((current) => current.filter((item) => item.id !== task.id));
+    setSelectedTextToAssetsTask((current) => (current?.id === task.id ? null : current));
+  }
+
   async function handleDeleteAnalysisTask(task) {
     if (!window.confirm("确认删除这个任务及关联归档吗？")) {
       return;
@@ -4932,9 +5414,10 @@ function App() {
 
   async function handleGlobalRefresh() {
     setRefreshing(true);
-    const [analysisResult, promptResult, workbenchResult, analysisArchiveResult, promptArchiveResult] = await Promise.allSettled([
+    const [analysisResult, promptResult, textToAssetsResult, workbenchResult, analysisArchiveResult, promptArchiveResult] = await Promise.allSettled([
       refreshAnalysisTaskList(),
       refreshPromptReverseTaskList(),
+      refreshTextToAssetsTaskList(),
       fetchWorkbench(),
       fetchAiVideoArchives(),
       fetchAiPromptReverseArchives(),
@@ -4960,6 +5443,9 @@ function App() {
     }
     if (promptResult.status === "rejected") {
       errors.push(`提示词反推任务刷新失败：${promptResult.reason?.message || promptResult.reason}`);
+    }
+    if (textToAssetsResult.status === "rejected") {
+      errors.push(`一句话转素材任务刷新失败：${textToAssetsResult.reason?.message || textToAssetsResult.reason}`);
     }
     setTaskSyncError(errors.join("；"));
     setRefreshing(false);
@@ -5072,6 +5558,7 @@ function App() {
 
   const analysisTaskGroups = useMemo(() => groupTasksByStatus(analysisTasks), [analysisTasks]);
   const promptReverseTaskGroups = useMemo(() => groupTasksByStatus(promptReverseTasks), [promptReverseTasks]);
+  const textToAssetsTaskGroups = useMemo(() => groupTasksByStatus(textToAssetsTasks), [textToAssetsTasks]);
 
   useEffect(() => {
     const nextStatus = preferredTaskStatus(analysisTaskGroups, activeAnalysisStatus);
@@ -5086,6 +5573,13 @@ function App() {
       setActivePromptStatus(nextStatus);
     }
   }, [promptReverseTaskGroups, activePromptStatus]);
+
+  useEffect(() => {
+    const nextStatus = preferredTaskStatus(textToAssetsTaskGroups, activeTextToAssetsStatus);
+    if (nextStatus !== activeTextToAssetsStatus) {
+      setActiveTextToAssetsStatus(nextStatus);
+    }
+  }, [textToAssetsTaskGroups, activeTextToAssetsStatus]);
 
   const [title, subtitle] = sections[activeSection];
 
@@ -5150,6 +5644,14 @@ function App() {
               onChangeStatus={setActivePromptStatus}
               onOpenTask={(task) => setSelectedTaskRecord({ type: "prompt", title: "AI 提示词反推", task })}
             />
+            <TaskStatusRow
+              title="一句话转素材"
+              desc="展示 Text-to-Assets 的进行中、已完成和异常任务。"
+              groups={textToAssetsTaskGroups}
+              activeStatus={activeTextToAssetsStatus}
+              onChangeStatus={setActiveTextToAssetsStatus}
+              onOpenTask={(task) => setSelectedTaskRecord({ type: "text_to_assets", title: "一句话转素材", task })}
+            />
           </div>
         </section>
       </section>
@@ -5200,6 +5702,12 @@ function App() {
     sectionContent = (
       <section>
         <RunningHubTtsPanel />
+      </section>
+    );
+  } else if (activeSection === "textToAssets") {
+    sectionContent = (
+      <section>
+        <TextToAssetsPanel />
       </section>
     );
   } else if (activeSection === "jianyingEditor") {
@@ -5439,20 +5947,43 @@ function App() {
 
       <TaskRecordModal
         record={selectedTaskRecord}
-        archivedIds={selectedTaskRecord?.type === "analysis" ? archivedAnalysisIds : archivedPromptReverseIds}
+        archivedIds={
+          selectedTaskRecord?.type === "analysis"
+            ? archivedAnalysisIds
+            : selectedTaskRecord?.type === "prompt"
+              ? archivedPromptReverseIds
+              : new Set()
+        }
         onClose={() => setSelectedTaskRecord(null)}
         onOpenResult={(task) => {
           if (selectedTaskRecord?.type === "analysis") {
             setSelectedAnalysisTask(task);
-          } else {
+          } else if (selectedTaskRecord?.type === "prompt") {
             setSelectedPromptReverseTask(task);
+          } else if (selectedTaskRecord?.type === "text_to_assets") {
+            setSelectedTextToAssetsTask(task);
           }
         }}
-        onArchiveTask={selectedTaskRecord?.type === "analysis" ? handleArchiveAnalysisTask : handleArchivePromptReverseTask}
-        onDeleteTask={selectedTaskRecord?.type === "analysis" ? handleDeleteAnalysisTask : handleDeletePromptReverseTask}
+        onArchiveTask={
+          selectedTaskRecord?.type === "analysis"
+            ? handleArchiveAnalysisTask
+            : selectedTaskRecord?.type === "prompt"
+              ? handleArchivePromptReverseTask
+              : null
+        }
+        onDeleteTask={
+          selectedTaskRecord?.type === "analysis"
+            ? handleDeleteAnalysisTask
+            : selectedTaskRecord?.type === "prompt"
+              ? handleDeletePromptReverseTask
+              : selectedTaskRecord?.type === "text_to_assets"
+                ? handleDeleteTextToAssetsTask
+                : null
+        }
       />
       <AnalysisResultModal task={selectedAnalysisTask} onClose={() => setSelectedAnalysisTask(null)} />
       <PromptReverseResultModal task={selectedPromptReverseTask} onClose={() => setSelectedPromptReverseTask(null)} />
+      <TextToAssetsResultModal task={selectedTextToAssetsTask} onClose={() => setSelectedTextToAssetsTask(null)} />
       <LibraryItemModal item={selectedLibraryItem} onClose={() => setSelectedLibraryItem(null)} />
     </>
   );

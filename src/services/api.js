@@ -230,6 +230,14 @@ export function createRunningHubTtsJob(payload) {
   });
 }
 
+export function createTextToAssetsJob(payload) {
+  return postJson("/api/tools/text-to-assets/jobs", {
+    idea: payload.idea || "",
+    title: payload.title || undefined,
+    provider: payload.provider || undefined,
+  });
+}
+
 export async function fetchTasks(taskType) {
   const query = taskType ? `?task_type=${encodeURIComponent(taskType)}` : "";
   const response = await fetch(`${API_BASE}/api/tasks${query}`);
