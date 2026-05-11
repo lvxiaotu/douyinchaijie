@@ -18,6 +18,12 @@
 - AI 提示词反推
   - 从视频内容反推出主提示词、负向提示词和风格关键词
   - 结果归档
+- RunningHub TTS
+  - 独立承载 RunningHub index-tts 工作流
+  - 支持保存 API Key、Workflow 标识、Workflow ID 和轮询间隔
+  - 支持引用 RunningHub 预置工作流或用户自定义 workflowId
+  - 默认切到稳定情感工作流 `2053641347223044097`
+  - 支持上传参考音频、查看任务进度、下载和试听生成音频
 - 创作工作台 Studio
   - 选题脑暴
   - 概念锁定
@@ -241,9 +247,83 @@ GET  /api/tools/ai-prompt-reverse/archives
 GET  /api/tools/ai-prompt-reverse/archives/{archive_id}
 ```
 
+### RunningHub TTS
+
+```text
+GET  /api/tools/runninghub-tts/status
+GET  /api/tools/runninghub-tts/config
+POST /api/tools/runninghub-tts/config
+POST /api/tools/runninghub-tts/upload
+POST /api/tools/runninghub-tts/jobs
+POST /api/tools/runninghub-tts/sync
+POST /api/tools/runninghub-tts/sync/{task_id}
+```
+
 ### 任务中心
 
 任务由后端写入 SQLite，前端可轮询任务状态。相关路由在 `backend/app/routes/tasks.py`。
+
+### RunningHub TTS 参数说明
+
+配置区：
+
+- `API Key`
+  - RunningHub 密钥，必填。
+  - 用于提交任务、查询任务状态、拉取输出结果。
+  - 该字段会保存到本地配置，下次打开页面自动回填。
+- `API Base`
+  - RunningHub 接口地址，默认值为 `https://www.runninghub.cn`。
+  - 除非有代理、镜像或私有部署需求，否则不建议修改。
+- `Workflow 标识`
+  - 工作流标识符。
+  - 当前默认预置为 `runninghub/tts_stable_emotion.json`，对应稳定情感工作流 `2053641347223044097`。
+  - 也支持其他预置名，如 `runninghub/tts_index2.json`。
+  - 支持直接填写 `workflowId`。
+  - 支持填写 RunningHub 工作流链接。
+  - 当 `Workflow ID` 为空时，系统会用这个字段自动解析目标工作流。
+- `Workflow ID`
+  - 显式指定 RunningHub 的 workflowId。
+  - 该字段优先级高于 `Workflow 标识`。
+  - 推荐在接入用户自己的工作流时直接填写这个字段。
+- `Instance Type`
+  - 可选，例如 `plus`。
+  - 当前版本已经会随创建任务请求一起透传给 RunningHub。
+- `轮询间隔(秒)`
+  - 后端轮询 RunningHub 状态接口的时间间隔，范围 `1-30` 秒。
+  - 建议值为 `3-5` 秒。
+  - 该参数需要先点击“保存配置”，后续新任务才会按新的轮询间隔运行。
+- `预置工作流`
+  - 用于快速填充预置的 `Workflow 标识` 和 `Workflow ID`。
+  - 当前包含稳定情感工作流，以及 `tts_index2 / tts_edge / tts_spark` 等预置项。
+
+生成区：
+
+- `生成文本`
+  - 必填。
+  - 这是最终送入 RunningHub 工作流文本输入节点的内容。
+- `参考音频`
+  - 可选。
+  - 上传后会先保存到本地，再由后端转传到 RunningHub。
+  - 只有你的目标工作流本身支持音频输入时，这个参数才会真正生效。
+- `Voice`
+  - 可选。
+  - 只有目标工作流存在 `voice`、`speaker`、`character` 之类的输入字段时才会生效。
+  - 这个值通常应填写工作流约定的角色名、音色名或 speaker id，而不是任意自然语言描述。
+- `已上传参考音频路径`
+  - 上传成功后自动回填的本地路径。
+  - 提交任务时后端会读取这个路径，并把音频上传到 RunningHub。
+- `高级配置`
+  - 前端默认收起，避免干扰主流程。
+  - 当前会把情感模式、情感参考音频、Emotion Alpha、Emotion Text 和情感滑块放入高级配置。
+  - 速度/时长控制相关参数已暂时从前端主界面隐藏，但后端仍保留兼容能力，便于后续接回其他工作流。
+
+使用建议：
+
+- 最小可用填写方式：`API Key + Workflow ID + 生成文本`。
+- 如果你引用的是自己的工作流，推荐直接填写 `Workflow ID`，不要只依赖 `Workflow 标识` 推断。
+- 如果你希望 `参考音频 / Voice / 情感控制` 生效，必须确保目标 workflow 中本身存在对应输入节点。
+- 对于默认稳定工作流 `2053641347223044097`，推荐主流程只填写 `生成文本 + 参考音频`，情感相关按需去高级配置中调整。
+- 任务完成后，任务详情会展示输出文件链接和内置音频播放器，可直接试听结果。
 
 ### Studio 创作工作台
 

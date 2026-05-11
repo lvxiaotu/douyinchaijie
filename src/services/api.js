@@ -155,7 +155,8 @@ export function saveRunningHubTtsConfig(config) {
   return postJson("/api/tools/runninghub-tts/config", {
     api_key: config.apiKey || "",
     api_base: config.apiBase || "https://www.runninghub.cn",
-    workflow_key: config.workflowKey || "runninghub/tts_index2.json",
+    workflow_key: config.workflowKey || "runninghub/tts_stable_emotion.json",
+    workflow_id: config.workflowId || "",
     instance_type: config.instanceType || "",
     poll_interval_seconds: Number(config.pollIntervalSeconds || 3),
   });
@@ -163,6 +164,17 @@ export function saveRunningHubTtsConfig(config) {
 
 export async function fetchRunningHubTtsStatus() {
   const response = await fetch(`${API_BASE}/api/tools/runninghub-tts/status`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function syncRunningHubTtsTasks() {
+  const response = await fetch(`${API_BASE}/api/tools/runninghub-tts/sync`, {
+    method: "POST",
+  });
   const data = await response.json();
   if (!response.ok) {
     throw new Error(JSON.stringify(data?.detail || data, null, 2));
@@ -188,13 +200,33 @@ export function uploadRunningHubTtsAudio(file) {
 export function createRunningHubTtsJob(payload) {
   return postJson("/api/tools/runninghub-tts/jobs", {
     text: payload.text || "",
-    workflow_key: payload.workflowKey || "runninghub/tts_index2.json",
+    workflow_key: payload.workflowKey || "runninghub/tts_stable_emotion.json",
+    workflow_id: payload.workflowId || undefined,
     api_key: payload.apiKey || undefined,
     api_base: payload.apiBase || undefined,
+    instance_type: payload.instanceType || undefined,
     ref_audio_path: payload.refAudioPath || undefined,
     ref_audio_url: payload.refAudioUrl || undefined,
     voice: payload.voice || undefined,
     speed: payload.speed != null ? Number(payload.speed) : undefined,
+    enable_duration_control: payload.enableDurationControl != null ? Boolean(payload.enableDurationControl) : undefined,
+    duration_mode: payload.durationMode || undefined,
+    speed_multiplier: payload.speedMultiplier != null ? Number(payload.speedMultiplier) : undefined,
+    target_duration: payload.targetDuration != null ? Number(payload.targetDuration) : undefined,
+    enable_emotion_control: payload.enableEmotionControl != null ? Boolean(payload.enableEmotionControl) : undefined,
+    emotion_mode: payload.emotionMode || undefined,
+    emotion_audio_path: payload.emotionAudioPath || undefined,
+    emotion_audio_url: payload.emotionAudioUrl || undefined,
+    emotion_alpha: payload.emotionAlpha != null ? Number(payload.emotionAlpha) : undefined,
+    emotion_text: payload.emotionText || undefined,
+    happy: payload.happy != null ? Number(payload.happy) : undefined,
+    angry: payload.angry != null ? Number(payload.angry) : undefined,
+    sad: payload.sad != null ? Number(payload.sad) : undefined,
+    fear: payload.fear != null ? Number(payload.fear) : undefined,
+    hate: payload.hate != null ? Number(payload.hate) : undefined,
+    love: payload.love != null ? Number(payload.love) : undefined,
+    surprise: payload.surprise != null ? Number(payload.surprise) : undefined,
+    neutral: payload.neutral != null ? Number(payload.neutral) : undefined,
   });
 }
 
