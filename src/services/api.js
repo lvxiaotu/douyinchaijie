@@ -142,6 +142,14 @@ export function createAiPromptReverseJob(video, provider) {
   return postJson("/api/tools/ai-prompt-reverse/jobs", payload);
 }
 
+export function createAiProductionReverseJob(video, provider) {
+  const payload = { video };
+  if (provider) {
+    payload.provider = provider;
+  }
+  return postJson("/api/tools/ai-production-reverse/jobs", payload);
+}
+
 export async function fetchRunningHubTtsConfig() {
   const response = await fetch(`${API_BASE}/api/tools/runninghub-tts/config`);
   const data = await response.json();
@@ -334,6 +342,33 @@ export function saveAiPromptReverseConfig(config) {
   });
 }
 
+export async function fetchAiProductionReverseStatus() {
+  const response = await fetch(`${API_BASE}/api/tools/ai-production-reverse/status`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchAiProductionReverseConfig() {
+  const response = await fetch(`${API_BASE}/api/tools/ai-production-reverse/config`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function saveAiProductionReverseConfig(config) {
+  return postJson("/api/tools/ai-production-reverse/config", {
+    output_dir: config.outputDir,
+    pipeline_mode: config.pipelineMode,
+    max_segments: Number(config.maxSegments || 18),
+    production_prompt: config.productionPrompt,
+  });
+}
+
 export async function fetchAiVideoArchives() {
   const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/archives`);
   const data = await response.json();
@@ -345,6 +380,15 @@ export async function fetchAiVideoArchives() {
 
 export async function fetchAiPromptReverseArchives() {
   const response = await fetch(`${API_BASE}/api/tools/ai-prompt-reverse/archives`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchAiProductionReverseArchives() {
+  const response = await fetch(`${API_BASE}/api/tools/ai-production-reverse/archives`);
   const data = await response.json();
   if (!response.ok) {
     throw new Error(JSON.stringify(data?.detail || data, null, 2));

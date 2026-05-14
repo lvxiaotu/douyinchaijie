@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .registry import get_workbench
 from .routes.ai_provider_config import router as ai_provider_router
+from .routes.ai_production_reverse import router as ai_production_reverse_router
 from .routes.ai_video_analysis import router as ai_video_analysis_router
 from .routes.ai_prompt_reverse import router as ai_prompt_reverse_router
 from .routes.douyin import router as douyin_router
@@ -45,6 +46,7 @@ app.include_router(douyin_router)
 app.include_router(ai_provider_router)
 app.include_router(ai_video_analysis_router)
 app.include_router(ai_prompt_reverse_router)
+app.include_router(ai_production_reverse_router)
 app.include_router(tasks_router)
 app.include_router(video_script_router)
 app.include_router(text_to_assets_router)

@@ -67,6 +67,20 @@ def init_db() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS production_reverse_archives (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT '',
+                video_json TEXT NOT NULL DEFAULT '{}',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
@@ -293,6 +307,7 @@ def delete_task(task_id: str, delete_archives: bool = True) -> bool:
         if delete_archives:
             connection.execute("DELETE FROM analysis_archives WHERE task_id = ? OR id = ?", (task_id, task_id))
             connection.execute("DELETE FROM prompt_reverse_archives WHERE task_id = ? OR id = ?", (task_id, task_id))
+            connection.execute("DELETE FROM production_reverse_archives WHERE task_id = ? OR id = ?", (task_id, task_id))
         connection.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
         cursor = connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
     return cursor.rowcount > 0
@@ -422,6 +437,66 @@ def get_prompt_reverse_archive(archive_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
         row = connection.execute("SELECT * FROM prompt_reverse_archives WHERE id = ?", (archive_id,)).fetchone()
+    return row_to_archive(row) if row else None
+
+
+def save_production_reverse_archive(
+    *,
+    archive_id: str,
+    task_id: str,
+    title: str,
+    provider: str,
+    video: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    init_db()
+    now = int(time.time())
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO production_reverse_archives (
+                id, task_id, title, provider, video_json, result_json, created_at, updated_at
+            )
+            VALUES (
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                COALESCE((SELECT created_at FROM production_reverse_archives WHERE id = ?), ?),
+                ?
+            )
+            """,
+            (
+                archive_id,
+                task_id,
+                title,
+                provider,
+                json.dumps(video, ensure_ascii=False),
+                json.dumps(result, ensure_ascii=False),
+                archive_id,
+                now,
+                now,
+            ),
+        )
+    return get_production_reverse_archive(archive_id)
+
+
+def list_production_reverse_archives(limit: int = 100) -> list[dict[str, Any]]:
+    init_db()
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM production_reverse_archives ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [row_to_archive(row) for row in rows]
+
+
+def get_production_reverse_archive(archive_id: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as connection:
+        row = connection.execute("SELECT * FROM production_reverse_archives WHERE id = ?", (archive_id,)).fetchone()
     return row_to_archive(row) if row else None
 
 

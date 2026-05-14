@@ -8,6 +8,7 @@ from backend.app.task_store import (
     list_task_events,
     list_tasks,
     save_analysis_archive,
+    save_production_reverse_archive,
     save_prompt_reverse_archive,
 )
 
@@ -45,7 +46,9 @@ def archive_task(task_id: str) -> dict[str, Any]:
 
     video = (task.get("payload") or {}).get("video") or task.get("video") or {}
     result = task.get("result") or {}
-    if task.get("type") == "ai_video_analysis":
+    task_type = task.get("type")
+
+    if task_type == "ai_video_analysis":
         archive = save_analysis_archive(
             archive_id=task_id,
             task_id=task_id,
@@ -55,7 +58,8 @@ def archive_task(task_id: str) -> dict[str, Any]:
             result=result,
         )
         return {"status": "ok", "archive_type": "analysis", "archive": archive}
-    if task.get("type") == "ai_prompt_reverse":
+
+    if task_type == "ai_prompt_reverse":
         archive = save_prompt_reverse_archive(
             archive_id=task_id,
             task_id=task_id,
@@ -66,7 +70,18 @@ def archive_task(task_id: str) -> dict[str, Any]:
         )
         return {"status": "ok", "archive_type": "prompt", "archive": archive}
 
-    raise HTTPException(status_code=400, detail=f"Task type {task.get('type')} cannot be archived")
+    if task_type == "ai_production_reverse":
+        archive = save_production_reverse_archive(
+            archive_id=task_id,
+            task_id=task_id,
+            title=task.get("title") or "AI 制作方式反推",
+            provider=task.get("provider") or "",
+            video=video,
+            result=result,
+        )
+        return {"status": "ok", "archive_type": "production", "archive": archive}
+
+    raise HTTPException(status_code=400, detail=f"Task type {task_type} cannot be archived")
 
 
 @router.delete("/{task_id}")

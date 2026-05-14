@@ -1724,6 +1724,49 @@ h1 {
   align-items: flex-start;
 }
 
+.task-row-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.task-row-toggle:hover h2 {
+  color: color-mix(in oklab, var(--blue) 78%, var(--text) 22%);
+}
+
+.task-row-toggle-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.task-row-toggle-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-row-toggle-icon {
+  color: var(--muted);
+  transition: transform 0.18s ease, color 0.18s ease;
+}
+
+.task-row-toggle-icon.expanded {
+  transform: rotate(180deg);
+  color: var(--blue);
+}
+
+.task-row-toggle.expanded h2 {
+  color: var(--blue);
+}
+
 .task-status-tabs {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2262,6 +2305,127 @@ h1 {
   line-height: 1.65;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.production-likelihood-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.production-likelihood-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.production-likelihood-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.production-likelihood-head span {
+  color: #4b647d;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.production-likelihood-head strong {
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.production-likelihood-progress {
+  height: 8px;
+}
+
+.production-likelihood-card p {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.production-evidence-details {
+  margin-top: 10px;
+  border: 1px dashed #c7d2e0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.production-evidence-details summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  color: #4b647d;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.production-evidence-stack {
+  display: grid;
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+
+.production-evidence-block {
+  display: grid;
+  gap: 10px;
+}
+
+.production-evidence-block > strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.production-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.production-evidence-grid.single-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.production-evidence-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.production-evidence-card img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #d1d9e6;
+  background: #eef2f7;
+}
+
+.production-evidence-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.production-evidence-meta span {
+  color: #4b647d;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.production-evidence-meta p {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .wide-panel {
@@ -5003,7 +5167,10 @@ body {
 .analysis-result-body .analysis-score-card span,
 .analysis-result-body .raw-json summary,
 .analysis-result-body .shot-replica-list dt,
-.analysis-result-body .field-hint {
+.analysis-result-body .field-hint,
+.analysis-result-body .production-likelihood-head span,
+.analysis-result-body .production-evidence-meta span,
+.analysis-result-body .production-evidence-details summary {
   color: var(--app-muted);
 }
 
@@ -5021,6 +5188,10 @@ body {
 .analysis-result-body .analysis-score-card strong,
 .analysis-result-body .result-grid article p,
 .analysis-result-body .shot-replica-list dd,
+.analysis-result-body .production-likelihood-head strong,
+.analysis-result-body .production-likelihood-card p,
+.analysis-result-body .production-evidence-block > strong,
+.analysis-result-body .production-evidence-meta p,
 .analysis-result-body .result-box,
 .analysis-result-body .raw-json pre {
   color: var(--app-ink);

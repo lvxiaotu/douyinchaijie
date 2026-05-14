@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Archive,
   Boxes,
+  ChevronDown,
   Clapperboard,
   Clock3,
   Database,
@@ -21,6 +22,7 @@ import {
 } from "lucide-react";
 import {
   archiveTask,
+  createAiProductionReverseJob,
   createAiVideoBreakdownJob,
   createAiPromptReverseJob,
   createRunningHubTtsJob,
@@ -34,6 +36,9 @@ import {
   fetchAiPromptReverseConfig,
   fetchAiPromptReverseStatus,
   fetchAiPromptReverseArchives,
+  fetchAiProductionReverseConfig,
+  fetchAiProductionReverseStatus,
+  fetchAiProductionReverseArchives,
   fetchRunningHubTtsConfig,
   fetchRunningHubTtsStatus,
   syncRunningHubTtsTasks,
@@ -57,6 +62,7 @@ import {
   saveDouyinConfig,
   saveAiVideoConfig,
   saveAiPromptReverseConfig,
+  saveAiProductionReverseConfig,
   saveRunningHubTtsConfig,
   saveAiProviderConfig,
   saveVideoScript,
@@ -100,6 +106,7 @@ const settingItems = [
   ["douyin", "抖音采集"],
   ["ai-video", "AI 视频拆解"],
   ["ai-prompt", "反推提示词"],
+  ["ai-production", "制作反推"],
   ["jianying", "剪映草稿"],
 ];
 
@@ -289,11 +296,12 @@ function DouyinProfileView({ result }) {
   );
 }
 
-function DouyinVideoView({ item, compact = false, onBreakdown, onPromptReverse }) {
+function DouyinVideoView({ item, compact = false, onBreakdown, onPromptReverse, onProductionReverse }) {
   const [breakdown, setBreakdown] = useState(null);
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [breakdownError, setBreakdownError] = useState("");
   const [reverseLoading, setReverseLoading] = useState(false);
+  const [productionLoading, setProductionLoading] = useState(false);
   const video = item?.video || item?.video_data || {};
   const author = item?.author || {};
   const cover =
@@ -350,6 +358,23 @@ function DouyinVideoView({ item, compact = false, onBreakdown, onPromptReverse }
     }
   }
 
+  async function handleProductionReverse() {
+    setProductionLoading(true);
+    setBreakdownError("");
+    try {
+      const videoPayload = {
+        ...item,
+        preview_cover: cover,
+        source_video_url: videoUrl,
+      };
+      await onProductionReverse?.(videoPayload);
+    } catch (err) {
+      setBreakdownError(err.message || String(err));
+    } finally {
+      setProductionLoading(false);
+    }
+  }
+
   return (
     <article className={`douyin-result-card video-result ${compact ? "compact-video-card" : ""}`}>
       <div className="media-frame">
@@ -382,6 +407,9 @@ function DouyinVideoView({ item, compact = false, onBreakdown, onPromptReverse }
           <button className="secondary-action-button" type="button" onClick={handlePromptReverse} disabled={reverseLoading}>
             {reverseLoading ? "反推中" : "反推提示词"}
           </button>
+          <button className="secondary-action-button" type="button" onClick={handleProductionReverse} disabled={productionLoading}>
+            {productionLoading ? "分析中" : "制作方式反推"}
+          </button>
         </div>
         {breakdownError && <div className="error-box">{breakdownError}</div>}
         {breakdown?.result && (
@@ -407,7 +435,7 @@ function DouyinVideoView({ item, compact = false, onBreakdown, onPromptReverse }
   );
 }
 
-function DouyinCollectionView({ result, title = "收藏作品", fetchMore, pageSize = 4, onBreakdown, onPromptReverse }) {
+function DouyinCollectionView({ result, title = "收藏作品", fetchMore, pageSize = 4, onBreakdown, onPromptReverse, onProductionReverse }) {
   const data = unwrapDouyinData(result);
   const initialItems = result?.items || data?.aweme_list || data?.videos || data?.list || [];
   const [items, setItems] = useState(initialItems);
@@ -466,6 +494,7 @@ function DouyinCollectionView({ result, title = "收藏作品", fetchMore, pageS
             compact
             onBreakdown={onBreakdown}
             onPromptReverse={onPromptReverse}
+            onProductionReverse={onProductionReverse}
           />
         ))}
       </div>
@@ -483,7 +512,7 @@ function DouyinCollectionView({ result, title = "收藏作品", fetchMore, pageS
   );
 }
 
-function DouyinResultView({ value, onBreakdown, onPromptReverse }) {
+function DouyinResultView({ value, onBreakdown, onPromptReverse, onProductionReverse }) {
   if (!value) return null;
   const data = unwrapDouyinData(value);
   const isProfile = Boolean(data?.user || data?.user_info || value?.profile);
@@ -506,6 +535,7 @@ function DouyinResultView({ value, onBreakdown, onPromptReverse }) {
           }
           onBreakdown={onBreakdown}
           onPromptReverse={onPromptReverse}
+          onProductionReverse={onProductionReverse}
         />
       )}
       {isCollection && (
@@ -514,22 +544,23 @@ function DouyinResultView({ value, onBreakdown, onPromptReverse }) {
           fetchMore={({ maxCursor, pageSize }) => fetchDouyinFavoriteItems({ maxCursor, pageSize })}
           onBreakdown={onBreakdown}
           onPromptReverse={onPromptReverse}
+          onProductionReverse={onProductionReverse}
         />
       )}
       {!isProfile && !isCollection && isVideo && (
-        <DouyinVideoView item={data} onBreakdown={onBreakdown} onPromptReverse={onPromptReverse} />
+        <DouyinVideoView item={data} onBreakdown={onBreakdown} onPromptReverse={onPromptReverse} onProductionReverse={onProductionReverse} />
       )}
     </div>
   );
 }
 
-function JsonPreview({ value, onBreakdown, onPromptReverse }) {
+function JsonPreview({ value, onBreakdown, onPromptReverse, onProductionReverse }) {
   if (!value) {
     return <div className="empty-result">结果会显示在这里</div>;
   }
   return (
     <>
-      <DouyinResultView value={value} onBreakdown={onBreakdown} onPromptReverse={onPromptReverse} />
+      <DouyinResultView value={value} onBreakdown={onBreakdown} onPromptReverse={onPromptReverse} onProductionReverse={onProductionReverse} />
       <details className="raw-json">
         <summary>查看原始 JSON</summary>
         <pre className="result-box">{JSON.stringify(value, null, 2)}</pre>
@@ -580,7 +611,7 @@ function createDateDraftName(date = new Date()) {
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日${date.getHours()}时${date.getMinutes()}分`;
 }
 
-function DouyinCollectorPanel({ onBreakdown, onPromptReverse }) {
+function DouyinCollectorPanel({ onBreakdown, onPromptReverse, onProductionReverse }) {
   const [userUrl, setUserUrl] = useState("");
   const [workUrl, setWorkUrl] = useState("");
   const [maxItems, setMaxItems] = useState(4);
@@ -712,7 +743,7 @@ function DouyinCollectorPanel({ onBreakdown, onPromptReverse }) {
 
       {activeTask && <div className="running-note">正在执行，请稍等...</div>}
       {error && <div className="error-box">{error}</div>}
-      <JsonPreview value={result} onBreakdown={onBreakdown} onPromptReverse={onPromptReverse} />
+      <JsonPreview value={result} onBreakdown={onBreakdown} onPromptReverse={onPromptReverse} onProductionReverse={onProductionReverse} />
     </section>
   );
 }
@@ -3546,6 +3577,10 @@ function normalizePromptReverseTask(task) {
   return normalizeAnalysisTask(task, (result) => result || {});
 }
 
+function normalizeProductionReverseTask(task) {
+  return normalizeAnalysisTask(task, (result) => result || {});
+}
+
 function normalizeRunningHubTtsTask(task) {
   const normalized = normalizeAnalysisTask(task, (result) => result || {});
   const result = normalized.result || {};
@@ -3656,6 +3691,7 @@ function preferredTaskStatus(groups, currentStatus) {
 }
 
 function TaskStatusRow({ title, desc, groups, activeStatus, onChangeStatus, onOpenTask }) {
+  const [expanded, setExpanded] = useState(false);
   const total = taskBoardStatuses.reduce((sum, [key]) => sum + (groups[key]?.length || 0), 0);
   const resolvedStatus = preferredTaskStatus(groups, activeStatus);
   const activeTasks = groups[resolvedStatus] || [];
@@ -3667,45 +3703,151 @@ function TaskStatusRow({ title, desc, groups, activeStatus, onChangeStatus, onOp
 
   return (
     <section className="panel task-row-panel">
-      <div className="panel-header task-row-header">
+      <button
+        className={`panel-header task-row-header task-row-toggle ${expanded ? "expanded" : ""}`}
+        type="button"
+        onClick={() => setExpanded((current) => !current)}
+        aria-expanded={expanded}
+      >
         <div>
           <h2>{title}</h2>
           <p>{desc}</p>
         </div>
-        <Badge status={total ? "running" : "draft"}>{total ? `${total} 个任务` : "暂无任务"}</Badge>
+        <div className="task-row-toggle-meta">
+          <Badge status={total ? "running" : "draft"}>{total ? `${total} 个任务` : "暂无任务"}</Badge>
+          <span className="task-row-toggle-label">{expanded ? "点击收起" : "点击展开"}</span>
+          <ChevronDown size={18} className={`task-row-toggle-icon ${expanded ? "expanded" : ""}`} />
+        </div>
+      </button>
+      {expanded && (
+        <>
+          <div className="task-status-tabs">
+            {taskBoardStatuses.map(([key, label]) => (
+              <button
+                className={`task-status-tab ${resolvedStatus === key ? "active" : ""}`}
+                key={key}
+                type="button"
+                onClick={() => onChangeStatus(key)}
+              >
+                <span>{label}</span>
+                <strong>{groups[key]?.length || 0}</strong>
+              </button>
+            ))}
+          </div>
+          <div className="task-row-list">
+            {activeTasks.length ? (
+              activeTasks.map((task) => (
+                <button className="task-list-row" key={task.id} type="button" onClick={() => onOpenTask(task)}>
+                  <div className="task-list-row-main">
+                    <strong>{task.title}</strong>
+                    <p>{task.message || `${title} 任务`}</p>
+                  </div>
+                  <div className="task-list-row-meta">
+                    <Badge status={task.status}>{statusText[task.status] || task.status}</Badge>
+                    <span className="task-list-progress">{task.progress}%</span>
+                    <span>{task.updated}</span>
+                  </div>
+                </button>
+              ))
+            ) : (
+              <div className="empty-result">{emptyText}</div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function AiProductionReverseSettingsPanel() {
+  const [outputDir, setOutputDir] = useState("./data/runtime/ai_production_reverse");
+  const [pipelineMode, setPipelineMode] = useState("evidence");
+  const [maxSegments, setMaxSegments] = useState(18);
+  const [productionPrompt, setProductionPrompt] = useState("");
+  const [statusInfo, setStatusInfo] = useState(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetchAiProductionReverseConfig()
+      .then((config) => {
+        setOutputDir(config.output_dir || "./data/runtime/ai_production_reverse");
+        setPipelineMode(config.pipeline_mode || "evidence");
+        setMaxSegments(config.max_segments || 18);
+        setProductionPrompt(config.production_prompt || "");
+      })
+      .catch((err) => setError(err.message || String(err)));
+    fetchAiProductionReverseStatus()
+      .then(setStatusInfo)
+      .catch(() => setStatusInfo(null));
+  }, []);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      await saveAiProductionReverseConfig({ outputDir, pipelineMode, maxSegments, productionPrompt });
+      setMessage("AI 制作方式反推配置已保存。");
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="panel settings-wide">
+      <div className="panel-header">
+        <div>
+          <h2>AI 制作方式反推配置</h2>
+          <p>配置素材/剪辑反推流程、片段上限和输出模板。模型连接请到“AI 模型”里统一设置。</p>
+        </div>
+        <Badge status={pipelineMode === "direct" ? "draft" : "ready"}>{pipelineMode}</Badge>
       </div>
-      <div className="task-status-tabs">
-        {taskBoardStatuses.map(([key, label]) => (
-          <button
-            className={`task-status-tab ${resolvedStatus === key ? "active" : ""}`}
-            key={key}
-            type="button"
-            onClick={() => onChangeStatus(key)}
-          >
-            <span>{label}</span>
-            <strong>{groups[key]?.length || 0}</strong>
-          </button>
-        ))}
-      </div>
-      <div className="task-row-list">
-        {activeTasks.length ? (
-          activeTasks.map((task) => (
-            <button className="task-list-row" key={task.id} type="button" onClick={() => onOpenTask(task)}>
-              <div className="task-list-row-main">
-                <strong>{task.title}</strong>
-                <p>{task.message || `${title} 任务`}</p>
-              </div>
-              <div className="task-list-row-meta">
-                <Badge status={task.status}>{statusText[task.status] || task.status}</Badge>
-                <span className="task-list-progress">{task.progress}%</span>
-                <span>{task.updated}</span>
-              </div>
-            </button>
-          ))
-        ) : (
-          <div className="empty-result">{emptyText}</div>
-        )}
-      </div>
+      {statusInfo && (
+        <div className={`task-sync-banner ${statusInfo.ready ? "" : "error"}`}>
+          反推依赖：FFmpeg {statusInfo.pipeline?.ffmpeg_ready ? "可用" : "不可用"} · FFprobe{" "}
+          {statusInfo.pipeline?.ffprobe_ready ? "可用" : "不可用"} · 转写器 {statusInfo.pipeline?.transcriber_ready ? "可用" : "不可用"}
+        </div>
+      )}
+      <form className="settings-form" onSubmit={handleSubmit}>
+        <label>
+          输出目录
+          <input value={outputDir} onChange={(event) => setOutputDir(event.target.value)} />
+        </label>
+        <label>
+          反推模式
+          <select value={pipelineMode} onChange={(event) => setPipelineMode(event.target.value)}>
+            <option value="evidence">证据管线优先</option>
+            <option value="auto">证据失败后回退整段视频</option>
+            <option value="direct">整段视频直传</option>
+          </select>
+          <span className="field-hint">建议优先用证据管线：转写 + 分段 + 关键帧网格 + 时间线制作分析。</span>
+        </label>
+        <label>
+          最大分析片段数
+          <input type="number" min="1" max="100" value={maxSegments} onChange={(event) => setMaxSegments(event.target.value)} />
+          <span className="field-hint">数值越高，时间线越完整，但耗时和 API 成本也会增加。</span>
+        </label>
+        <label className="textarea-label">
+          反推提示词模板
+          <textarea
+            value={productionPrompt}
+            onChange={(event) => setProductionPrompt(event.target.value)}
+            rows={14}
+            placeholder="可使用变量：{desc}、{author}"
+          />
+          <span className="field-hint">建议要求模型谨慎判断，不确定的地方输出“无法确认”或“推测”。</span>
+        </label>
+        <button className="primary-button" type="submit" disabled={saving}>
+          {saving ? "保存中" : "保存制作反推配置"}
+        </button>
+      </form>
+      {message && <div className="running-note">{message}</div>}
+      {error && <div className="error-box">{error}</div>}
     </section>
   );
 }
@@ -4596,6 +4738,21 @@ function archivePresentation(item) {
       tags: [item.provider, "提示词反推"].filter(Boolean),
     };
   }
+  if (item.archiveType === "production") {
+    const result = item.result || {};
+    return {
+      toolLabel: "AI 制作方式反推",
+      toolDetail: "制作流程归档",
+      headline: item.title || "未命名视频",
+      summary: result.summary || result.production_overview?.main_workflow || "暂无摘要",
+      highlights: [
+        ["内容类型", result.production_overview?.content_type],
+        ["工具痕迹", Array.isArray(result.production_overview?.tool_signatures) ? result.production_overview.tool_signatures[0] : ""],
+        ["模板感", result.production_overview?.template_signature || result.production_overview?.automation_level || result.production_overview?.main_workflow],
+      ].filter(([, value]) => value),
+      tags: [item.provider, "制作反推"].filter(Boolean),
+    };
+  }
   return {
     toolLabel: item.type || "素材",
     toolDetail: "示例素材",
@@ -5197,6 +5354,77 @@ function PromptReverseResultModal({ task, onClose }) {
   );
 }
 
+function renderTextList(value) {
+  return Array.isArray(value) && value.length ? value.join(" / ") : "暂无内容";
+}
+
+function buildProductionEvidenceUrl(path) {
+  if (!path) return "";
+  return `${API_BASE}/api/tools/ai-production-reverse/evidence-file?path=${encodeURIComponent(path)}`;
+}
+
+function normalizeLikelihoods(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      return {
+        name: item.name || item.label || "",
+        score: typeof item.score === "number" ? item.score : Number.isFinite(Number(item.score)) ? Number(item.score) : null,
+        reason: item.reason || item.evidence || "",
+      };
+    })
+    .filter((item) => item?.name);
+}
+
+function EvidenceGallery({ title, items }) {
+  if (!Array.isArray(items) || !items.length) return null;
+  return (
+    <div className="production-evidence-block">
+      <strong>{title}</strong>
+      <div className="production-evidence-grid">
+        {items.map((item, index) => {
+          const imagePath = item?.image_path || "";
+          const src = buildProductionEvidenceUrl(imagePath);
+          return (
+            <article className="production-evidence-card" key={`${title}-${imagePath || index}`}>
+              {src ? <img src={src} alt={item?.time_label || `${title} ${index + 1}`} loading="lazy" /> : <div className="empty-result">暂无图片</div>}
+              <div className="production-evidence-meta">
+                <span>{item?.time_label || `证据 ${index + 1}`}</span>
+                <p>{item?.reason || "暂无说明"}</p>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function LikelihoodPanel({ title, items }) {
+  const normalizedItems = normalizeLikelihoods(items);
+  if (!normalizedItems.length) return null;
+  return (
+    <div className="analysis-section">
+      <strong>{title}</strong>
+      <div className="production-likelihood-grid">
+        {normalizedItems.map((item) => (
+          <article className="production-likelihood-card" key={`${title}-${item.name}`}>
+            <div className="production-likelihood-head">
+              <span>{item.name}</span>
+              <strong>{item.score != null ? `${item.score}` : "-"}</strong>
+            </div>
+            <div className="progress production-likelihood-progress" aria-label={`${item.name} 倾向评分`}>
+              <span style={{ width: `${Math.max(0, Math.min(100, item.score || 0))}%` }} />
+            </div>
+            <p>{item.reason || "暂无依据说明"}</p>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [activeSection, setActiveSection] = useState("dashboard");
   const [activeSetting, setActiveSetting] = useState("ai-provider");
@@ -5204,6 +5432,7 @@ function App() {
   const [activeToolId, setActiveToolId] = useState("");
   const [activeAnalysisStatus, setActiveAnalysisStatus] = useState("running");
   const [activePromptStatus, setActivePromptStatus] = useState("running");
+  const [activeProductionStatus, setActiveProductionStatus] = useState("running");
   const [activeTextToAssetsStatus, setActiveTextToAssetsStatus] = useState("running");
   const [selectedTaskRecord, setSelectedTaskRecord] = useState(null);
   const [filter, setFilter] = useState("all");
@@ -5212,12 +5441,15 @@ function App() {
   const [apiState, setApiState] = useState("示例数据");
   const [analysisTasks, setAnalysisTasks] = useState([]);
   const [promptReverseTasks, setPromptReverseTasks] = useState([]);
+  const [productionReverseTasks, setProductionReverseTasks] = useState([]);
   const [textToAssetsTasks, setTextToAssetsTasks] = useState([]);
   const [analysisArchives, setAnalysisArchives] = useState([]);
   const [promptReverseArchives, setPromptReverseArchives] = useState([]);
+  const [productionReverseArchives, setProductionReverseArchives] = useState([]);
   const [libraryType, setLibraryType] = useState("all");
   const [selectedAnalysisTask, setSelectedAnalysisTask] = useState(null);
   const [selectedPromptReverseTask, setSelectedPromptReverseTask] = useState(null);
+  const [selectedProductionReverseTask, setSelectedProductionReverseTask] = useState(null);
   const [selectedTextToAssetsTask, setSelectedTextToAssetsTask] = useState(null);
   const [selectedLibraryItem, setSelectedLibraryItem] = useState(null);
   const [taskSyncError, setTaskSyncError] = useState("");
@@ -5239,6 +5471,13 @@ function App() {
   async function refreshPromptReverseTaskList() {
     const tasks = await fetchTasks("ai_prompt_reverse");
     setPromptReverseTasks(tasks.map(normalizePromptReverseTask));
+    setTaskSyncError("");
+    setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  }
+
+  async function refreshProductionReverseTaskList() {
+    const tasks = await fetchTasks("ai_production_reverse");
+    setProductionReverseTasks(tasks.map(normalizeProductionReverseTask));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   }
@@ -5270,19 +5509,21 @@ function App() {
   useEffect(() => {
     async function loadArchives() {
       try {
-        const [analysis, promptReverse] = await Promise.all([
+        const [analysis, promptReverse, productionReverse] = await Promise.all([
           fetchAiVideoArchives(),
           fetchAiPromptReverseArchives(),
+          fetchAiProductionReverseArchives(),
         ]);
         setAnalysisArchives(analysis);
         setPromptReverseArchives(promptReverse);
+        setProductionReverseArchives(productionReverse);
       } catch {
         // Archive panels can stay empty if backend is still starting.
       }
     }
 
     loadArchives();
-  }, [analysisTasks, promptReverseTasks]);
+  }, [analysisTasks, promptReverseTasks, productionReverseTasks]);
 
   useEffect(() => {
     let mounted = true;
@@ -5301,6 +5542,29 @@ function App() {
 
     loadPromptReverseTasks();
     const timer = window.setInterval(loadPromptReverseTasks, 2500);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadProductionReverseTasks() {
+      try {
+        if (mounted) {
+          await refreshProductionReverseTaskList();
+        }
+      } catch (err) {
+        if (mounted) {
+          setTaskSyncError(`制作方式反推任务刷新失败：${err.message}`);
+        }
+      }
+    }
+
+    loadProductionReverseTasks();
+    const timer = window.setInterval(loadProductionReverseTasks, 2500);
     return () => {
       mounted = false;
       window.clearInterval(timer);
@@ -5371,6 +5635,15 @@ function App() {
     return { job_id: normalized.id, status: normalized.status, result: normalized.result };
   }
 
+  async function handleCreateProductionReverse(video) {
+    const task = await createAiProductionReverseJob(video);
+    const normalized = normalizeProductionReverseTask(task);
+    setProductionReverseTasks((current) => [normalized, ...current.filter((item) => item.id !== normalized.id)]);
+    window.setTimeout(() => refreshProductionReverseTaskList().catch((err) => setTaskSyncError(`制作方式反推任务刷新失败：${err.message}`)), 800);
+    window.setTimeout(() => refreshProductionReverseTaskList().catch((err) => setTaskSyncError(`制作方式反推任务刷新失败：${err.message}`)), 3000);
+    return { job_id: normalized.id, status: normalized.status, result: normalized.result };
+  }
+
   async function handleArchiveAnalysisTask(task) {
     const response = await archiveTask(task.id);
     if (response.archive) {
@@ -5382,6 +5655,13 @@ function App() {
     const response = await archiveTask(task.id);
     if (response.archive) {
       setPromptReverseArchives((current) => [response.archive, ...current.filter((item) => (item.task_id || item.id) !== task.id)]);
+    }
+  }
+
+  async function handleArchiveProductionReverseTask(task) {
+    const response = await archiveTask(task.id);
+    if (response.archive) {
+      setProductionReverseArchives((current) => [response.archive, ...current.filter((item) => (item.task_id || item.id) !== task.id)]);
     }
   }
 
@@ -5412,15 +5692,26 @@ function App() {
     setPromptReverseArchives((current) => current.filter((item) => item.task_id !== task.id && item.id !== task.id));
   }
 
+  async function handleDeleteProductionReverseTask(task) {
+    if (!window.confirm("确认删除这个任务及关联归档吗？")) {
+      return;
+    }
+    await deleteTask(task.id);
+    setProductionReverseTasks((current) => current.filter((item) => item.id !== task.id));
+    setProductionReverseArchives((current) => current.filter((item) => item.task_id !== task.id && item.id !== task.id));
+  }
+
   async function handleGlobalRefresh() {
     setRefreshing(true);
-    const [analysisResult, promptResult, textToAssetsResult, workbenchResult, analysisArchiveResult, promptArchiveResult] = await Promise.allSettled([
+    const [analysisResult, promptResult, productionResult, textToAssetsResult, workbenchResult, analysisArchiveResult, promptArchiveResult, productionArchiveResult] = await Promise.allSettled([
       refreshAnalysisTaskList(),
       refreshPromptReverseTaskList(),
+      refreshProductionReverseTaskList(),
       refreshTextToAssetsTaskList(),
       fetchWorkbench(),
       fetchAiVideoArchives(),
       fetchAiPromptReverseArchives(),
+      fetchAiProductionReverseArchives(),
     ]);
 
     if (workbenchResult.status === "fulfilled") {
@@ -5436,6 +5727,9 @@ function App() {
     if (promptArchiveResult.status === "fulfilled") {
       setPromptReverseArchives(promptArchiveResult.value);
     }
+    if (productionArchiveResult.status === "fulfilled") {
+      setProductionReverseArchives(productionArchiveResult.value);
+    }
 
     const errors = [];
     if (analysisResult.status === "rejected") {
@@ -5443,6 +5737,9 @@ function App() {
     }
     if (promptResult.status === "rejected") {
       errors.push(`提示词反推任务刷新失败：${promptResult.reason?.message || promptResult.reason}`);
+    }
+    if (productionResult.status === "rejected") {
+      errors.push(`制作方式反推任务刷新失败：${productionResult.reason?.message || productionResult.reason}`);
     }
     if (textToAssetsResult.status === "rejected") {
       errors.push(`一句话转素材任务刷新失败：${textToAssetsResult.reason?.message || textToAssetsResult.reason}`);
@@ -5504,14 +5801,22 @@ function App() {
       type: "AI 提示词反推",
       desc: item.result?.summary || item.result?.master_prompt || "提示词反推档案",
     }));
-    const combined = [...analysisItems, ...promptItems];
+    const productionItems = productionReverseArchives.map((item) => ({
+      ...item,
+      archiveType: "production",
+      type: "AI 制作方式反推",
+      desc: item.result?.summary || item.result?.production_overview?.main_workflow || "制作方式反推档案",
+    }));
+    const combined = [...analysisItems, ...promptItems, ...productionItems];
     if (libraryType === "analysis") return analysisItems;
     if (libraryType === "prompt") return promptItems;
+    if (libraryType === "production") return productionItems;
     return combined;
-  }, [analysisArchives, promptReverseArchives, libraryType]);
+  }, [analysisArchives, promptReverseArchives, productionReverseArchives, libraryType]);
 
   const archivedAnalysisIds = useMemo(() => archiveIdSet(analysisArchives), [analysisArchives]);
   const archivedPromptReverseIds = useMemo(() => archiveIdSet(promptReverseArchives), [promptReverseArchives]);
+  const archivedProductionReverseIds = useMemo(() => archiveIdSet(productionReverseArchives), [productionReverseArchives]);
   const visibleLibraryItems = useMemo(() => {
     const items = libraryType === "seed" ? filteredLibrary : archiveItems;
     const normalized = deferredQuery.trim().toLowerCase();
@@ -5553,11 +5858,18 @@ function App() {
         desc: "手动归档的生成提示词反推结果，适合二次创作和模型复用。",
         items: visibleLibraryItems.filter((item) => item.archiveType === "prompt"),
       },
+      {
+        key: "production",
+        title: "AI 制作方式反推",
+        desc: "手动归档的视频制作方式反推结果，适合复做素材、包装和剪辑流程。",
+        items: visibleLibraryItems.filter((item) => item.archiveType === "production"),
+      },
     ].filter((group) => libraryType === "all" || group.key === libraryType);
   }, [libraryType, visibleLibraryItems]);
 
   const analysisTaskGroups = useMemo(() => groupTasksByStatus(analysisTasks), [analysisTasks]);
   const promptReverseTaskGroups = useMemo(() => groupTasksByStatus(promptReverseTasks), [promptReverseTasks]);
+  const productionReverseTaskGroups = useMemo(() => groupTasksByStatus(productionReverseTasks), [productionReverseTasks]);
   const textToAssetsTaskGroups = useMemo(() => groupTasksByStatus(textToAssetsTasks), [textToAssetsTasks]);
 
   useEffect(() => {
@@ -5573,6 +5885,13 @@ function App() {
       setActivePromptStatus(nextStatus);
     }
   }, [promptReverseTaskGroups, activePromptStatus]);
+
+  useEffect(() => {
+    const nextStatus = preferredTaskStatus(productionReverseTaskGroups, activeProductionStatus);
+    if (nextStatus !== activeProductionStatus) {
+      setActiveProductionStatus(nextStatus);
+    }
+  }, [productionReverseTaskGroups, activeProductionStatus]);
 
   useEffect(() => {
     const nextStatus = preferredTaskStatus(textToAssetsTaskGroups, activeTextToAssetsStatus);
@@ -5616,7 +5935,11 @@ function App() {
   if (activeSection === "dashboard") {
     sectionContent = (
       <section className="dashboard-stack">
-        <DouyinCollectorPanel onBreakdown={handleCreateVideoBreakdown} onPromptReverse={handleCreatePromptReverse} />
+        <DouyinCollectorPanel
+          onBreakdown={handleCreateVideoBreakdown}
+          onPromptReverse={handleCreatePromptReverse}
+          onProductionReverse={handleCreateProductionReverse}
+        />
         <section className="panel task-board-panel">
           <div className="panel-header">
             <div>
@@ -5643,6 +5966,14 @@ function App() {
               activeStatus={activePromptStatus}
               onChangeStatus={setActivePromptStatus}
               onOpenTask={(task) => setSelectedTaskRecord({ type: "prompt", title: "AI 提示词反推", task })}
+            />
+            <TaskStatusRow
+              title="AI 制作方式反推"
+              desc="展示制作方式反推的进行中、已完成和异常任务。"
+              groups={productionReverseTaskGroups}
+              activeStatus={activeProductionStatus}
+              onChangeStatus={setActiveProductionStatus}
+              onOpenTask={(task) => setSelectedTaskRecord({ type: "production", title: "AI 制作方式反推", task })}
             />
             <TaskStatusRow
               title="一句话转素材"
@@ -5743,6 +6074,7 @@ function App() {
               <option value="all">AI 归档全部</option>
               <option value="analysis">AI 拆解</option>
               <option value="prompt">反推提示词</option>
+              <option value="production">制作方式反推</option>
               <option value="seed">示例素材</option>
             </select>
           </label>
@@ -5770,6 +6102,13 @@ function App() {
                       }
                       if (item.archiveType === "prompt") {
                         setSelectedPromptReverseTask({
+                          id: item.task_id,
+                          title: item.title,
+                          result: item.result,
+                        });
+                      }
+                      if (item.archiveType === "production") {
+                        setSelectedProductionReverseTask({
                           id: item.task_id,
                           title: item.title,
                           result: item.result,
@@ -5846,6 +6185,7 @@ function App() {
         {activeSetting === "douyin" && <DouyinSettingsPanel />}
         {activeSetting === "ai-video" && <AiVideoSettingsPanel />}
         {activeSetting === "ai-prompt" && <AiPromptReverseSettingsPanel />}
+        {activeSetting === "ai-production" && <AiProductionReverseSettingsPanel />}
         {activeSetting === "jianying" && <JianyingDraftSettingsPanel />}
       </section>
     );
@@ -5952,6 +6292,8 @@ function App() {
             ? archivedAnalysisIds
             : selectedTaskRecord?.type === "prompt"
               ? archivedPromptReverseIds
+              : selectedTaskRecord?.type === "production"
+                ? archivedProductionReverseIds
               : new Set()
         }
         onClose={() => setSelectedTaskRecord(null)}
@@ -5960,6 +6302,8 @@ function App() {
             setSelectedAnalysisTask(task);
           } else if (selectedTaskRecord?.type === "prompt") {
             setSelectedPromptReverseTask(task);
+          } else if (selectedTaskRecord?.type === "production") {
+            setSelectedProductionReverseTask(task);
           } else if (selectedTaskRecord?.type === "text_to_assets") {
             setSelectedTextToAssetsTask(task);
           }
@@ -5969,6 +6313,8 @@ function App() {
             ? handleArchiveAnalysisTask
             : selectedTaskRecord?.type === "prompt"
               ? handleArchivePromptReverseTask
+              : selectedTaskRecord?.type === "production"
+                ? handleArchiveProductionReverseTask
               : null
         }
         onDeleteTask={
@@ -5976,6 +6322,8 @@ function App() {
             ? handleDeleteAnalysisTask
             : selectedTaskRecord?.type === "prompt"
               ? handleDeletePromptReverseTask
+              : selectedTaskRecord?.type === "production"
+                ? handleDeleteProductionReverseTask
               : selectedTaskRecord?.type === "text_to_assets"
                 ? handleDeleteTextToAssetsTask
                 : null
@@ -5983,9 +6331,291 @@ function App() {
       />
       <AnalysisResultModal task={selectedAnalysisTask} onClose={() => setSelectedAnalysisTask(null)} />
       <PromptReverseResultModal task={selectedPromptReverseTask} onClose={() => setSelectedPromptReverseTask(null)} />
+      <ProductionReverseResultModal task={selectedProductionReverseTask} onClose={() => setSelectedProductionReverseTask(null)} />
       <TextToAssetsResultModal task={selectedTextToAssetsTask} onClose={() => setSelectedTextToAssetsTask(null)} />
       <LibraryItemModal item={selectedLibraryItem} onClose={() => setSelectedLibraryItem(null)} />
     </>
+  );
+}
+
+function ProductionReverseResultModal({ task, onClose }) {
+  if (!task) return null;
+  const result = task.result || {};
+  const timelineBreakdown = Array.isArray(result.timeline_breakdown) ? result.timeline_breakdown : [];
+  const segmentBreakdowns = Array.isArray(result.segment_production_breakdowns) ? result.segment_production_breakdowns : [];
+  const overview = result.production_overview || {};
+  const inventory = result.asset_inventory || {};
+  const editingStyle = result.editing_style || {};
+  const audioAnalysis = result.audio_analysis || {};
+  const reproductionPlan = result.reproduction_plan || {};
+  const evidence = result.evidence || {};
+  const evidenceMedia = result.evidence_media || {};
+  const overviewHighlights = [
+    ["内容类型", overview.content_type],
+    ["主流程", overview.main_workflow],
+    ["可能工具", renderTextList(overview.estimated_tools)],
+    ["制作难度", overview.difficulty],
+    ["素材构成", renderTextList(overview.source_mix)],
+    ["工具痕迹", renderTextList(overview.tool_signatures)],
+    ["模板痕迹", overview.template_signature],
+    ["自动化程度", overview.automation_level],
+  ];
+  const styleHighlights = [
+    ["节奏", editingStyle.pace],
+    ["镜头规律", editingStyle.shot_pattern],
+    ["字幕风格", editingStyle.subtitle_style],
+    ["字幕动效", editingStyle.subtitle_animation],
+    ["转场风格", editingStyle.transition_style],
+    ["贴纸风格", editingStyle.sticker_style],
+    ["覆盖布局", editingStyle.overlay_layout],
+    ["包装风格", editingStyle.packaging_style],
+    ["镜头运动模式", editingStyle.camera_motion_pattern],
+    ["卡点方式", editingStyle.rhythm_sync_style],
+    ["人声类型", audioAnalysis.voice_type],
+    ["声线特征", audioAnalysis.voice_character],
+    ["BGM 类型", audioAnalysis.bgm_type],
+    ["音效类型", renderTextList(audioAnalysis.sfx_type)],
+    ["混音判断", audioAnalysis.mixing_guess],
+    ["音画同步", audioAnalysis.beat_sync_style],
+  ];
+  const reproductionHighlights = [
+    ["最少素材", renderTextList(reproductionPlan.minimum_assets_needed)],
+    ["建议步骤", renderTextList(reproductionPlan.recommended_production_steps)],
+    ["可交给 AI", renderTextList(reproductionPlan.can_be_generated_by_ai)],
+    ["需手工剪辑", renderTextList(reproductionPlan.need_manual_editing)],
+    ["可能工具链", renderTextList(reproductionPlan.likely_toolchain)],
+    ["质检点", renderTextList(reproductionPlan.quality_control_points)],
+  ];
+  const topToolLikelihoods = overview.tool_likelihoods || [];
+  const topSourceLikelihoods = overview.source_likelihoods || [];
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section className="modal-panel" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+        <div className="panel-header">
+          <div>
+            <h2>AI 制作方式反推结果</h2>
+            <p>{task.title}</p>
+          </div>
+          <button className="text-button" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="analysis-result-body">
+          <p>{result.summary || "暂无摘要"}</p>
+          {(result.production_mode || evidence.evidence_path) && (
+            <div className="analysis-section">
+              <strong>证据包</strong>
+              <div className="analysis-field">
+                <span>分析模式</span>
+                <p>{result.production_mode || "暂无内容"}</p>
+              </div>
+              <div className="analysis-field">
+                <span>转写信息</span>
+                <p>
+                  {(evidence.transcript_provider || "未知转写器")} · {evidence.transcript_model || "未知模型"} ·{" "}
+                  {evidence.transcript_segments_count || 0} 个转写片段 · {evidence.analysis_segments_count || 0} 个分析片段 ·{" "}
+                  {evidence.keyframes_count || 0} 张关键帧
+                </p>
+              </div>
+              {result.pipeline_error && (
+                <div className="analysis-field">
+                  <span>回退原因</span>
+                  <p>{result.pipeline_error}</p>
+                </div>
+              )}
+              <div className="analysis-field">
+                <span>证据图统计</span>
+                <p>
+                  {evidenceMedia.segment_count || timelineBreakdown.length || 0} 个片段 · {evidenceMedia.keyframe_grid_count || 0} 张关键帧网格 ·{" "}
+                  {evidenceMedia.keyframe_count || 0} 张关键帧 · {evidenceMedia.highlight_screenshot_count || 0} 张高价值截图
+                </p>
+              </div>
+            </div>
+          )}
+          <LikelihoodPanel title="工具倾向评分" items={topToolLikelihoods} />
+          <LikelihoodPanel title="素材来源倾向评分" items={topSourceLikelihoods} />
+          <div className="analysis-section">
+            <strong>制作总览</strong>
+            {overviewHighlights.map(([label, value]) => (
+              <div className="analysis-field" key={label}>
+                <span>{label}</span>
+                <p>{value || "暂无内容"}</p>
+              </div>
+            ))}
+          </div>
+          <div className="analysis-section">
+            <strong>时间线拆解</strong>
+            {timelineBreakdown.length ? (
+              timelineBreakdown.map((item, index) => (
+                <div className="analysis-field shot-replica-field" key={item.segment_id || index}>
+                  <span>{item.time_range || item.segment_id || `片段 ${index + 1}`} {item.segment_role ? `· ${item.segment_role}` : ""}</span>
+                  <dl className="shot-replica-list">
+                    <div>
+                      <dt>画面来源</dt>
+                      <dd>{item.visual_source_type || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>剪辑动作</dt>
+                      <dd>{Array.isArray(item.editing_actions) && item.editing_actions.length ? item.editing_actions.join(" / ") : "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>转场</dt>
+                      <dd>{[item.transition, item.transition_confidence ? `信心 ${item.transition_confidence}` : ""].filter(Boolean).join(" / ") || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>滤镜/调色</dt>
+                      <dd>{[item.filter_or_grade, item.filter_strength ? `强度 ${item.filter_strength}` : ""].filter(Boolean).join(" / ") || "暂无内容"}</dd>
+                    </div>
+                    <div>
+                      <dt>贴纸覆盖</dt>
+                      <dd>{renderTextList(item.stickers_overlays)}</dd>
+                    </div>
+                    <div>
+                      <dt>屏幕文字</dt>
+                      <dd>{renderTextList(item.onscreen_text)}</dd>
+                    </div>
+                    <div>
+                      <dt>音频判断</dt>
+                      <dd>{renderTextList(item.audio_guess)}</dd>
+                    </div>
+                    <div>
+                      <dt>信心</dt>
+                      <dd>{item.confidence || "暂无内容"}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>素材元素</dt>
+                      <dd>{renderTextList(item.material_elements)}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>来源推测</dt>
+                      <dd>{renderTextList(item.source_provenance)}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>字幕包装</dt>
+                      <dd>{[item.subtitle_style, item.subtitle_animation].filter(Boolean).join(" / ") || "暂无内容"}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>贴纸与布局</dt>
+                      <dd>{[item.sticker_style, item.overlay_layout].filter(Boolean).join(" / ") || "暂无内容"}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>镜头与轨道</dt>
+                      <dd>{[item.camera_movement_guess, renderTextList(item.track_layer_guess)].filter(Boolean).join(" / ") || "暂无内容"}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>卡点说明</dt>
+                      <dd>{renderTextList(item.sync_points)}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>生成/工具猜测</dt>
+                      <dd>{[renderTextList(item.generation_guess), renderTextList(item.tool_signatures), item.template_signature].filter((value) => value && value !== "暂无内容").join(" / ") || "暂无内容"}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>判断依据</dt>
+                      <dd>{renderTextList(item.evidence)}</dd>
+                    </div>
+                    {item.notes && (
+                      <div className="wide">
+                        <dt>备注</dt>
+                        <dd>{item.notes}</dd>
+                      </div>
+                    )}
+                  </dl>
+                  <LikelihoodPanel title="片段工具倾向" items={item.tool_likelihoods} />
+                  <LikelihoodPanel title="片段来源倾向" items={item.source_likelihoods} />
+                  <details className="production-evidence-details">
+                    <summary>查看该片段证据图</summary>
+                    <div className="production-evidence-stack">
+                      {item.evidence_media?.keyframe_grid?.image_path ? (
+                        <div className="production-evidence-block">
+                          <strong>关键帧网格</strong>
+                          <div className="production-evidence-grid single-grid">
+                            <article className="production-evidence-card">
+                              <img
+                                src={buildProductionEvidenceUrl(item.evidence_media.keyframe_grid.image_path)}
+                                alt={`${item.time_range || item.segment_id || `片段 ${index + 1}`} 关键帧网格`}
+                                loading="lazy"
+                              />
+                              <div className="production-evidence-meta">
+                                <span>关键帧网格</span>
+                                <p>用于辅助判断这段画面的节奏、转场和包装连续性。</p>
+                              </div>
+                            </article>
+                          </div>
+                        </div>
+                      ) : null}
+                      <EvidenceGallery title="关键帧" items={item.evidence_media?.keyframes} />
+                      <EvidenceGallery title="高价值截图" items={item.evidence_media?.highlight_screenshots} />
+                    </div>
+                  </details>
+                </div>
+              ))
+            ) : (
+              <p>暂无时间线拆解</p>
+            )}
+          </div>
+          {segmentBreakdowns.length > 0 && (
+            <div className="analysis-section">
+              <strong>分段证据判断</strong>
+              {segmentBreakdowns.map((segment, index) => (
+                <div className="analysis-field" key={segment.segment_id || index}>
+                  <span>{segment.time_range || segment.segment_id || `片段 ${index + 1}`}</span>
+                  <p>
+                    {[
+                      segment.visual_source_type,
+                      renderTextList(segment.editing_actions),
+                      segment.transition,
+                      segment.filter_or_grade,
+                      segment.subtitle_style,
+                      segment.sticker_style,
+                    ].filter(Boolean).join(" / ") || "暂无内容"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="analysis-section">
+            <strong>素材盘点</strong>
+            {[
+              ["视频素材", inventory.video_materials],
+              ["图片素材", inventory.image_materials],
+              ["音频素材", inventory.audio_materials],
+              ["贴纸图形", inventory.graphics_and_stickers],
+              ["文字元素", inventory.text_elements],
+              ["来源推测", inventory.source_provenance],
+            ].map(([label, value]) => (
+              <div className="analysis-field" key={label}>
+                <span>{label}</span>
+                <p>{renderTextList(value)}</p>
+              </div>
+            ))}
+          </div>
+          <div className="analysis-section">
+            <strong>剪辑与音频风格</strong>
+            {styleHighlights.map(([label, value]) => (
+              <div className="analysis-field" key={label}>
+                <span>{label}</span>
+                <p>{value || "暂无内容"}</p>
+              </div>
+            ))}
+          </div>
+          <div className="analysis-section">
+            <strong>复做方案</strong>
+            {reproductionHighlights.map(([label, value]) => (
+              <div className="analysis-field" key={label}>
+                <span>{label}</span>
+                <p>{value || "暂无内容"}</p>
+              </div>
+            ))}
+          </div>
+          <details className="raw-json">
+            <summary>查看原始 JSON</summary>
+            <pre className="result-box">{JSON.stringify(result.raw_model_json || result, null, 2)}</pre>
+          </details>
+        </div>
+      </section>
+    </div>
   );
 }
 
