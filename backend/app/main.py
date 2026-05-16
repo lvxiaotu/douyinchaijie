@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -15,6 +15,8 @@ from .routes.jianying import router as jianying_router
 from .routes.jianying_editor_sdk import router as jianying_editor_sdk_router
 from .routes.runninghub_tts import router as runninghub_tts_router
 from .routes.studio import router as studio_router
+from .routes.tikhub_douyin import router as tikhub_douyin_router
+from .routes.douyin_target import router as douyin_target_router
 from .routes.tasks import router as tasks_router
 from .routes.text_to_assets import router as text_to_assets_router
 from .routes.video_script import router as video_script_router
@@ -54,6 +56,8 @@ app.include_router(jianying_router)
 app.include_router(jianying_editor_sdk_router)
 app.include_router(runninghub_tts_router)
 app.include_router(studio_router)
+app.include_router(tikhub_douyin_router)
+app.include_router(douyin_target_router)
 
 
 DIST_DIR = Path(__file__).resolve().parents[2] / "dist"
@@ -76,3 +80,5 @@ if DIST_DIR.exists():
         if target.is_file() and DIST_DIR in target.parents:
             return FileResponse(target)
         return FileResponse(DIST_DIR / "index.html")
+
+
