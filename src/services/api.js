@@ -1,4 +1,26 @@
-const API_BASE = import.meta.env.VITE_API_BASE || "";
+const RAW_API_BASE = import.meta.env.VITE_API_BASE || "";
+const API_BASE = (() => {
+  if (typeof window === "undefined" || !RAW_API_BASE) {
+    return RAW_API_BASE;
+  }
+  try {
+    const pageUrl = new URL(window.location.href);
+    const apiUrl = new URL(RAW_API_BASE, pageUrl.origin);
+    const localHosts = new Set(["127.0.0.1", "localhost"]);
+    const viteDevPorts = new Set(["5173", "5174"]);
+    if (
+      localHosts.has(pageUrl.hostname) &&
+      localHosts.has(apiUrl.hostname) &&
+      viteDevPorts.has(pageUrl.port) &&
+      apiUrl.port === "8010"
+    ) {
+      return "";
+    }
+  } catch {
+    // Fall back to the configured API base if URL parsing fails.
+  }
+  return RAW_API_BASE.replace(/\/$/, "");
+})();
 
 export async function fetchWorkbench() {
   const response = await fetch(`${API_BASE}/api/workbench`);
@@ -24,7 +46,12 @@ async function postJson(path, payload) {
       data?.detail?.error ||
       data?.detail ||
       `Request failed: ${response.status}`;
-    throw new Error(typeof message === "string" ? message : JSON.stringify(message, null, 2));
+    const hint = data?.detail?.hint ? `\n${data.detail.hint}` : "";
+    const errorType = data?.detail?.error_type ? `${data.detail.error_type}: ` : "";
+    if (typeof message === "string") {
+      throw new Error(`${errorType}${message}${hint}`);
+    }
+    throw new Error(JSON.stringify(message, null, 2));
   }
   return data;
 }
@@ -132,6 +159,140 @@ export function createAiVideoBreakdownJob(video, provider) {
     payload.provider = provider;
   }
   return postJson("/api/tools/ai-video-analysis/jobs", payload);
+}
+
+async function patchJson(path, payload) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    const message =
+      data?.detail?.message ||
+      data?.detail?.error ||
+      data?.detail ||
+      `Request failed: ${response.status}`;
+    const hint = data?.detail?.hint ? `\n${data.detail.hint}` : "";
+    const errorType = data?.detail?.error_type ? `${data.detail.error_type}: ` : "";
+    if (typeof message === "string") {
+      throw new Error(`${errorType}${message}${hint}`);
+    }
+    throw new Error(typeof message === "string" ? message : JSON.stringify(message, null, 2));
+  }
+  return data;
+}
+
+export function searchDouyinTargets(payload) {
+  return postJson("/api/tools/douyin-target/search", {
+    keyword: payload.keyword || "",
+    page: Number(payload.page || 1),
+    count: Number(payload.count || 20),
+    minFollowers: payload.minFollowers !== "" && payload.minFollowers != null ? Number(payload.minFollowers) : undefined,
+    maxFollowers: payload.maxFollowers !== "" && payload.maxFollowers != null ? Number(payload.maxFollowers) : undefined,
+    minLikes: payload.minLikes !== "" && payload.minLikes != null ? Number(payload.minLikes) : undefined,
+    maxLikes: payload.maxLikes !== "" && payload.maxLikes != null ? Number(payload.maxLikes) : undefined,
+    minVideos: payload.minVideos !== "" && payload.minVideos != null ? Number(payload.minVideos) : undefined,
+    maxVideos: payload.maxVideos !== "" && payload.maxVideos != null ? Number(payload.maxVideos) : undefined,
+    recentWithinDays: payload.recentWithinDays !== "" && payload.recentWithinDays != null ? Number(payload.recentWithinDays) : undefined,
+    olderThanDays: payload.olderThanDays !== "" && payload.olderThanDays != null ? Number(payload.olderThanDays) : undefined,
+    verified: payload.verified || "all",
+    privateFilter: payload.privateFilter || "exclude",
+    sortBy: payload.sortBy || "relevance",
+  });
+}
+
+export async function fetchDouyinTargetSets() {
+  const response = await fetch(`${API_BASE}/api/tools/douyin-target/sets`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchDouyinTargetSet(setId) {
+  const response = await fetch(`${API_BASE}/api/tools/douyin-target/sets/${encodeURIComponent(setId)}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function saveDouyinTargetUsers(payload) {
+  return postJson("/api/tools/douyin-target/users/bulk-save", {
+    users: payload.users || [],
+    set_id: payload.setId || undefined,
+    set_name: payload.setName || "",
+    note: payload.note || "",
+    keyword: payload.keyword || "",
+    filters: payload.filters || {},
+  });
+}
+
+export function createDouyinTargetSet(payload) {
+  return postJson("/api/tools/douyin-target/sets", {
+    name: payload.name || "",
+    note: payload.note || "",
+    keyword: payload.keyword || "",
+    filters: payload.filters || {},
+    video_strategy: payload.videoStrategy || {},
+    status: payload.status || "draft",
+  });
+}
+
+export function updateDouyinTargetSet(setId, payload) {
+  return patchJson(`/api/tools/douyin-target/sets/${encodeURIComponent(setId)}`, {
+    name: payload.name,
+    note: payload.note,
+    keyword: payload.keyword,
+    filters: payload.filters,
+    video_strategy: payload.videoStrategy,
+    status: payload.status,
+  });
+}
+
+export async function deleteDouyinTargetSet(setId) {
+  const response = await fetch(`${API_BASE}/api/tools/douyin-target/sets/${encodeURIComponent(setId)}`, {
+    method: "DELETE",
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function collectDouyinTargetVideos(payload) {
+  return postJson("/api/tools/douyin-target/videos/collect", {
+    set_id: payload.setId,
+    user_ids: payload.userIds || [],
+    strategy: {
+      mode: payload.mode || "top",
+      per_user_limit: Number(payload.perUserLimit || 5),
+      fetch_count: Number(payload.fetchCount || 20),
+      sort_metric: payload.sortMetric || "digg_count",
+    },
+  });
+}
+
+export function enqueueDouyinTargetAnalysis(payload) {
+  return postJson("/api/tools/douyin-target/analysis/enqueue", {
+    set_id: payload.setId || "",
+    video_ids: payload.videoIds || [],
+    force: Boolean(payload.force),
+    provider: payload.provider || undefined,
+  });
+}
+
+export function syncDouyinTargetAnalysis(setId) {
+  const query = setId ? `?set_id=${encodeURIComponent(setId)}` : "";
+  return postJson(`/api/tools/douyin-target/analysis/sync${query}`, {});
 }
 
 export function createAiPromptReverseJob(video, provider) {

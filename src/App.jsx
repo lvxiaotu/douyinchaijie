@@ -5,6 +5,7 @@ import { Database, FolderCog, Languages, MoonStar, RefreshCw, SunMedium } from "
 import { Badge, ToolCard } from "./components/common/index";
 import { THEME_STORAGE_KEY, UI_VERSION, jianyingEditorItems, navItems, sections, settingItems } from "./constants/appConfig";
 import { DouyinCollectorPanel } from "./features/douyin";
+import { DouyinTargetPanel } from "./features/douyinTarget";
 import { DraftInspectorPanel, JianyingEditorSdkPanel, JianyingNaturalScriptPanel } from "./features/jianying";
 import { LibraryArchiveGroup, LibraryItemModal } from "./features/library/LibraryPanels";
 import { AnalysisResultModal, ProductionReverseResultModal, PromptReverseResultModal } from "./features/results";
@@ -27,7 +28,6 @@ export function App() {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [workbench, setWorkbench] = useState(fallbackWorkbench);
-  const [apiState, setApiState] = useState("示例数据");
   const [analysisTasks, setAnalysisTasks] = useState([]);
   const [promptReverseTasks, setPromptReverseTasks] = useState([]);
   const [productionReverseTasks, setProductionReverseTasks] = useState([]);
@@ -43,7 +43,6 @@ export function App() {
   const [selectedLibraryItem, setSelectedLibraryItem] = useState(null);
   const [taskSyncError, setTaskSyncError] = useState("");
   const [lastTaskRefresh, setLastTaskRefresh] = useState("");
-  const [showOverview, setShowOverview] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [uiTheme, setUiTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
@@ -82,10 +81,6 @@ export function App() {
     fetchWorkbench()
       .then((data) => {
         setWorkbench(data);
-        setApiState("后端已连接");
-      })
-      .catch(() => {
-        setApiState("示例数据");
       });
   }, []);
 
@@ -305,9 +300,6 @@ export function App() {
 
     if (workbenchResult.status === "fulfilled") {
       setWorkbench(workbenchResult.value);
-      setApiState("后端已连接");
-    } else {
-      setApiState("示例数据");
     }
 
     if (analysisArchiveResult.status === "fulfilled") {
@@ -489,13 +481,12 @@ export function App() {
     }
   }, [textToAssetsTaskGroups, activeTextToAssetsStatus]);
 
-  const [title, subtitle] = sections[activeSection];
+  const [title] = sections[activeSection];
 
   useEffect(() => {
     document.title = `${title} | 抖音解析`;
   }, [title]);
 
-  const activeSectionLabel = navItems.find(([id]) => id === activeSection)?.[2] || title;
   const subnavItems =
     activeSection === "settings"
       ? settingItems.map(([value, text]) => ({
@@ -574,6 +565,12 @@ export function App() {
             />
           </div>
         </section>
+      </section>
+    );
+  } else if (activeSection === "douyinTarget") {
+    sectionContent = (
+      <section>
+        <DouyinTargetPanel />
       </section>
     );
   } else if (activeSection === "tools") {
@@ -826,35 +823,6 @@ export function App() {
         </header>
 
         <main className="shell">
-          <section className="panel global-stats-panel">
-            <button className="global-stats-header" type="button" onClick={() => setShowOverview((current) => !current)}>
-              <div>
-                <span className="global-stats-eyebrow">Control Center</span>
-                <strong>{title}</strong>
-                <p>{subtitle}</p>
-              </div>
-              <Badge status={taskSyncError ? "error" : "running"}>
-                {showOverview ? "收起概览" : "展开概览"}
-              </Badge>
-            </button>
-            {showOverview && (
-              <div className="global-stats-body">
-                <div className="overview-line">
-                  <span>当前区域</span>
-                  <strong>{activeSectionLabel}</strong>
-                </div>
-                <div className="overview-line">
-                  <span>后端状态</span>
-                  <strong>{apiState}</strong>
-                </div>
-                <div className="overview-line">
-                  <span>任务刷新</span>
-                  <strong>{lastTaskRefresh ? `最近同步于 ${lastTaskRefresh}` : "等待首轮同步"}</strong>
-                </div>
-              </div>
-            )}
-          </section>
-
           {subnavItems.length > 0 && (
             <div className="section-subnav">
               {subnavItems.map((item) => (

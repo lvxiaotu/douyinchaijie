@@ -1,4 +1,4 @@
-import { Archive, Boxes, Clapperboard, Database, Home, Music2, Scissors, Settings, Wrench } from "lucide-react";
+import { Archive, Boxes, Clapperboard, Crosshair, Database, Home, Music2, Scissors, Settings, Wrench } from "lucide-react";
 
 export const API_BASE = import.meta.env.VITE_API_BASE || "";
 
@@ -8,6 +8,7 @@ export const THEME_STORAGE_KEY = "douyin-ops-theme";
 
 export const sections = {
   dashboard: ["抖音解析", "采集抖音主页、作品和收藏，并把 AI 拆解、反推和任务状态收在同一块控制台。"],
+  douyinTarget: ["抖音对标", "按关键词发现对标账号，筛选后批量采集视频，并进入 AI 拆解任务池。"],
   draftInspector: ["查看草稿", "按项目查看剪映草稿与时间线结构，保持和主工作流一致的控制台体验。"],
   jianyingEditor: ["剪映 Skill", "围绕 AI 剧本、第三方素材补齐和剪映草稿生成的主工作流。"],
   tools: ["工具中心", "保留现有工具入口，用统一的前端壳子承接后续新增能力。"],
@@ -20,6 +21,7 @@ export const sections = {
 
 export const navItems = [
   ["dashboard", Home, "抖音解析"],
+  ["douyinTarget", Crosshair, "抖音对标"],
   ["draftInspector", Database, "查看草稿"],
   ["jianyingEditor", Scissors, "剪映 Skill"],
   ["tools", Wrench, "工具中心"],
