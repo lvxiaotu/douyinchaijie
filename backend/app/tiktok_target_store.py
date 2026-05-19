@@ -1206,6 +1206,21 @@ def get_target_video(video_id: str) -> dict[str, Any] | None:
     return row_to_target_video(row) if row else None
 
 
+def resolve_target_video(video_id_or_aweme_id: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM tiktok_target_videos
+            WHERE id = ? OR aweme_id = ?
+            ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, updated_at DESC
+            LIMIT 1
+            """,
+            (video_id_or_aweme_id, video_id_or_aweme_id, video_id_or_aweme_id),
+        ).fetchone()
+    return row_to_target_video(row) if row else None
+
+
 def list_target_videos(
     *,
     set_id: str | None = None,
@@ -1410,9 +1425,10 @@ def get_target_video_interaction_insights(video_id: str) -> dict[str, Any] | Non
 
 
 def get_target_video_interaction_dataset(video_id: str) -> dict[str, Any]:
-    video = get_target_video(video_id)
-    comments = get_target_video_comments(video_id, include_replies=True, limit=1000)
-    insights = get_target_video_interaction_insights(video_id)
+    video = resolve_target_video(video_id)
+    resolved_video_id = str(video.get("id") or video_id) if video else video_id
+    comments = get_target_video_comments(resolved_video_id, include_replies=True, limit=1000)
+    insights = get_target_video_interaction_insights(resolved_video_id)
     return {
         "video": video,
         "comments": comments,

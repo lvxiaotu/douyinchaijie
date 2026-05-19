@@ -53,7 +53,7 @@ class TiktokTargetInteractionTests(unittest.TestCase):
 
     def test_comments_replies_and_insights_are_persisted(self):
         store.create_target_video(
-            "aweme-2",
+            "video-row-2",
             "user-1",
             {
                 "aweme_id": "aweme-2",
@@ -98,9 +98,12 @@ class TiktokTargetInteractionTests(unittest.TestCase):
             },
         ]
 
-        dataset = store.replace_target_video_comments("aweme-2", comments)
+        dataset = store.replace_target_video_comments("video-row-2", comments)
+        aweme_dataset = store.get_target_video_interaction_dataset("aweme-2")
 
         self.assertEqual(dataset["comment_count"], 3)
+        self.assertEqual(aweme_dataset["comment_count"], 3)
+        self.assertEqual(aweme_dataset["video"]["id"], "video-row-2")
         self.assertEqual(dataset["reply_count"], 1)
         self.assertEqual(dataset["video"]["comment_snapshot_status"], "done")
         self.assertEqual(dataset["video"]["comment_saved_count"], 3)

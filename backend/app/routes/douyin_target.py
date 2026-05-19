@@ -34,6 +34,7 @@ from backend.app.tiktok_target_store import (
     normalize_comment,
     remove_user_from_target_set,
     replace_target_video_comments,
+    resolve_target_video,
     update_target_set,
     update_target_task_from_ai_task,
     upsert_target_user,
@@ -883,15 +884,15 @@ def videos(
 
 @router.get("/videos/{video_id}/interactions")
 def video_interactions(video_id: str) -> dict[str, Any]:
-    video = get_target_video(video_id)
+    video = resolve_target_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Target video not found")
-    return get_target_video_interaction_dataset(video_id)
+    return get_target_video_interaction_dataset(video["id"])
 
 
 @router.post("/videos/{video_id}/comments/collect")
 def collect_video_comments(video_id: str, payload: CollectCommentsRequest | None = None) -> dict[str, Any]:
-    video = get_target_video(video_id)
+    video = resolve_target_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Target video not found")
     request = payload or CollectCommentsRequest(video_ids=[video_id])
@@ -933,11 +934,12 @@ def collect_comments(payload: CollectCommentsRequest) -> dict[str, Any]:
 
 @router.delete("/videos/{video_id}/analysis")
 def delete_video_analysis(video_id: str, delete_archives: bool = Query(default=True)) -> dict[str, Any]:
-    video = get_target_video(video_id)
+    video = resolve_target_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Target video not found")
 
-    target_tasks = list_target_tasks(video_id=video_id, limit=2000)
+    resolved_video_id = str(video.get("id") or video_id)
+    target_tasks = list_target_tasks(video_id=resolved_video_id, limit=2000)
     linked_task_id = str(video.get("analysis_task_id") or "")
     if linked_task_id and linked_task_id not in {str(item.get("task_id") or "") for item in target_tasks}:
         target_tasks.append(
@@ -979,7 +981,7 @@ def delete_video_analysis(video_id: str, delete_archives: bool = Query(default=T
             }
         )
 
-    cleared_video = clear_target_video_analysis(video_id)
+    cleared_video = clear_target_video_analysis(resolved_video_id)
     if not cleared_video:
         raise HTTPException(status_code=404, detail="Target video not found")
     return {
