@@ -42,6 +42,7 @@ export function App() {
   const [selectedPromptReverseTask, setSelectedPromptReverseTask] = useState(null);
   const [selectedProductionReverseTask, setSelectedProductionReverseTask] = useState(null);
   const [selectedTextToAssetsTask, setSelectedTextToAssetsTask] = useState(null);
+  const [activeResultPage, setActiveResultPage] = useState(null);
   const [selectedLibraryItem, setSelectedLibraryItem] = useState(null);
   const [taskSyncError, setTaskSyncError] = useState("");
   const [lastTaskRefresh, setLastTaskRefresh] = useState("");
@@ -235,6 +236,16 @@ export function App() {
     } catch (err) {
       setTaskSyncError(`任务详情加载失败：${err.message}`);
     }
+  }
+
+  function openResultPage(task, type = "analysis") {
+    setActiveResultPage({ type, task });
+    setActiveSection("taskCenter");
+    setSelectedTaskRecord(null);
+    setSelectedAnalysisTask(null);
+    setSelectedPromptReverseTask(null);
+    setSelectedProductionReverseTask(null);
+    setSelectedTextToAssetsTask(null);
   }
 
   async function openArchiveItem(item, presentation) {
@@ -550,53 +561,65 @@ export function App() {
     );
   } else if (activeSection === "taskCenter") {
     sectionContent = (
-      <section className="dashboard-stack task-center-page">
-        <section className="panel task-board-panel">
-          <div className="panel-header">
-            <div>
-              <h2>任务中心</h2>
-              <p>任务按工具分行排列，点击状态切换列表，点击任务查看详情。</p>
+      activeResultPage ? (
+        activeResultPage.type === "analysis" ? (
+          <AnalysisResultModal task={activeResultPage.task} pageMode onClose={() => setActiveResultPage(null)} />
+        ) : activeResultPage.type === "prompt" ? (
+          <PromptReverseResultModal task={activeResultPage.task} pageMode onClose={() => setActiveResultPage(null)} />
+        ) : activeResultPage.type === "production" ? (
+          <ProductionReverseResultModal task={activeResultPage.task} pageMode onClose={() => setActiveResultPage(null)} />
+        ) : activeResultPage.type === "text_to_assets" ? (
+          <TextToAssetsResultModal task={activeResultPage.task} pageMode onClose={() => setActiveResultPage(null)} />
+        ) : null
+      ) : (
+        <section className="dashboard-stack task-center-page">
+          <section className="panel task-board-panel">
+            <div className="panel-header">
+              <div>
+                <h2>任务中心</h2>
+                <p>任务按工具分行排列，点击状态切换列表，点击任务查看详情。</p>
+              </div>
+              <Badge status={taskSyncError ? "error" : "running"}>
+                {taskSyncError || `自动刷新中${lastTaskRefresh ? ` · ${lastTaskRefresh}` : ""}`}
+              </Badge>
             </div>
-            <Badge status={taskSyncError ? "error" : "running"}>
-              {taskSyncError || `自动刷新中${lastTaskRefresh ? ` · ${lastTaskRefresh}` : ""}`}
-            </Badge>
-          </div>
-          <div className="task-board-rows">
-            <TaskStatusRow
-              title="AI 视频拆解"
-              desc="展示 AI 视频拆解的进行中、已完成和异常任务。"
-              groups={analysisTaskGroups}
-              activeStatus={activeAnalysisStatus}
-              onChangeStatus={setActiveAnalysisStatus}
-              onOpenTask={(task) => openTaskRecord("analysis", "AI 视频拆解", task)}
-            />
-            <TaskStatusRow
-              title="AI 提示词反推"
-              desc="展示提示词反推的进行中、已完成和异常任务。"
-              groups={promptReverseTaskGroups}
-              activeStatus={activePromptStatus}
-              onChangeStatus={setActivePromptStatus}
-              onOpenTask={(task) => openTaskRecord("prompt", "AI 提示词反推", task)}
-            />
-            <TaskStatusRow
-              title="AI 制作方式反推"
-              desc="展示制作方式反推的进行中、已完成和异常任务。"
-              groups={productionReverseTaskGroups}
-              activeStatus={activeProductionStatus}
-              onChangeStatus={setActiveProductionStatus}
-              onOpenTask={(task) => openTaskRecord("production", "AI 制作方式反推", task)}
-            />
-            <TaskStatusRow
-              title="一句话转素材"
-              desc="展示 Text-to-Assets 的进行中、已完成和异常任务。"
-              groups={textToAssetsTaskGroups}
-              activeStatus={activeTextToAssetsStatus}
-              onChangeStatus={setActiveTextToAssetsStatus}
-              onOpenTask={(task) => openTaskRecord("text_to_assets", "一句话转素材", task)}
-            />
-          </div>
+            <div className="task-board-rows">
+              <TaskStatusRow
+                title="AI 视频拆解"
+                desc="展示 AI 视频拆解的进行中、已完成和异常任务。"
+                groups={analysisTaskGroups}
+                activeStatus={activeAnalysisStatus}
+                onChangeStatus={setActiveAnalysisStatus}
+                onOpenTask={(task) => openTaskRecord("analysis", "AI 视频拆解", task)}
+              />
+              <TaskStatusRow
+                title="AI 提示词反推"
+                desc="展示提示词反推的进行中、已完成和异常任务。"
+                groups={promptReverseTaskGroups}
+                activeStatus={activePromptStatus}
+                onChangeStatus={setActivePromptStatus}
+                onOpenTask={(task) => openTaskRecord("prompt", "AI 提示词反推", task)}
+              />
+              <TaskStatusRow
+                title="AI 制作方式反推"
+                desc="展示制作方式反推的进行中、已完成和异常任务。"
+                groups={productionReverseTaskGroups}
+                activeStatus={activeProductionStatus}
+                onChangeStatus={setActiveProductionStatus}
+                onOpenTask={(task) => openTaskRecord("production", "AI 制作方式反推", task)}
+              />
+              <TaskStatusRow
+                title="一句话转素材"
+                desc="展示 Text-to-Assets 的进行中、已完成和异常任务。"
+                groups={textToAssetsTaskGroups}
+                activeStatus={activeTextToAssetsStatus}
+                onChangeStatus={setActiveTextToAssetsStatus}
+                onOpenTask={(task) => openTaskRecord("text_to_assets", "一句话转素材", task)}
+              />
+            </div>
+          </section>
         </section>
-      </section>
+      )
     );
   } else if (activeSection === "tools") {
     sectionContent = (
@@ -857,15 +880,7 @@ export function App() {
         }
         onClose={() => setSelectedTaskRecord(null)}
         onOpenResult={(task) => {
-          if (selectedTaskRecord?.type === "analysis") {
-            setSelectedAnalysisTask(task);
-          } else if (selectedTaskRecord?.type === "prompt") {
-            setSelectedPromptReverseTask(task);
-          } else if (selectedTaskRecord?.type === "production") {
-            setSelectedProductionReverseTask(task);
-          } else if (selectedTaskRecord?.type === "text_to_assets") {
-            setSelectedTextToAssetsTask(task);
-          }
+          openResultPage(task, selectedTaskRecord?.type || "analysis");
         }}
         onArchiveTask={
           selectedTaskRecord?.type === "analysis"

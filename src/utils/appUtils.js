@@ -256,6 +256,51 @@ export function firstArray(source, keys) {
   return [];
 }
 
+export function firstUrlFromObject(source, keys) {
+  if (!source || typeof source !== "object") return "";
+  for (const key of keys) {
+    const value = source[key];
+    const url = firstUrl(value);
+    if (url) return url;
+  }
+  return "";
+}
+
+export function normalizeTagList(...sources) {
+  const tags = [];
+  const seen = new Set();
+  for (const source of sources) {
+    const values = Array.isArray(source)
+      ? source
+      : typeof source === "string"
+        ? source.split(/[,，、/|]/)
+        : source && typeof source === "object"
+          ? [
+              source.tags,
+              source.keywords,
+              source.hashtags,
+              source.topic_tags,
+              source.topic_list,
+              source.aweme_text_extra,
+            ]
+          : [];
+    for (const value of values.flat?.() || values) {
+      const text = typeof value === "string"
+        ? value.trim()
+        : value && typeof value === "object"
+          ? (value.name || value.keyword || value.text || value.tag_name || value.challenge_name || value.hashtag_name || "").trim?.() || ""
+          : "";
+      const cleaned = text.replace(/^#/, "").trim();
+      if (!cleaned || seen.has(cleaned.toLowerCase())) continue;
+      seen.add(cleaned.toLowerCase());
+      tags.push(cleaned);
+      if (tags.length >= 12) break;
+    }
+    if (tags.length >= 12) break;
+  }
+  return tags;
+}
+
 export function normalizeCommercialAnalysisResult(source) {
   const nested = source?.result && typeof source.result === "object" ? source.result : source;
   const summaryJson = parseJsonString(nested?.summary);
@@ -274,6 +319,17 @@ export function normalizeCommercialAnalysisResult(source) {
   const interactionSnapshot = firstObject(douyinTarget, ["interaction_snapshot", "interaction", "互动快照"]);
   const targetMetrics = firstObject(douyinTarget, ["metrics", "指标"]);
   const rawSegments = Array.isArray(raw?.segment_breakdowns) ? raw.segment_breakdowns : [];
+  const authorSource = firstObject(raw, ["author", "user", "owner", "作者", "博主", "account", "profile"]);
+  const videoSource = firstObject(raw, ["video", "video_data", "aweme", "作品", "视频"]);
+  const mediaTags = normalizeTagList(
+    raw?.tags,
+    raw?.keywords,
+    raw?.topic_tags,
+    raw?.topic_list,
+    authorSource,
+    videoSource,
+    douyinTarget,
+  );
 
   return {
     analysis_mode: firstText(raw, ["analysis_mode"]),
@@ -281,6 +337,28 @@ export function normalizeCommercialAnalysisResult(source) {
     evidence: raw?.evidence && typeof raw.evidence === "object" && !Array.isArray(raw.evidence) ? raw.evidence : {},
     genre: firstText(raw, ["genre", "赛道", "内容赛道"]) || firstText(contentIdentity, ["track", "内容赛道", "赛道"]),
     summary: firstText(raw, ["summary", "摘要", "视频摘要", "一句话摘要"]),
+    author: {
+      nickname: firstText(authorSource, ["nickname", "name", "author_name", "unique_id", "user_name", "username", "sec_nickname"]),
+      unique_id: firstText(authorSource, ["unique_id", "user_id", "uid", "sec_uid", "sec_user_id"]),
+      signature: firstText(authorSource, ["signature", "desc", "intro", "bio"]),
+      avatar: firstUrlFromObject(authorSource, ["avatar", "avatar_url", "avatar_larger", "avatar_thumb", "avatar_300x300", "avatar_medium"]),
+      follower_count: Number(firstText(authorSource, ["follower_count", "fans_count", "粉丝数"]) || 0),
+      following_count: Number(firstText(authorSource, ["following_count", "关注数"]) || 0),
+      like_count: Number(firstText(authorSource, ["like_count", "total_favorited", "获赞"]) || 0),
+      aweme_count: Number(firstText(authorSource, ["aweme_count", "作品数", "video_count"]) || 0),
+      verified: Boolean(authorSource?.verified || authorSource?.is_verified),
+    },
+    video: {
+      aweme_id: firstText(videoSource, ["aweme_id", "id", "video_id", "item_id"]),
+      desc: firstText(videoSource, ["desc", "title", "text", "content", "video_desc"]),
+      create_time: firstText(videoSource, ["create_time", "created_at", "publish_time", "发布时间"]),
+      duration: firstText(videoSource, ["duration", "duration_seconds", "video_duration"]),
+      music_title: firstText(videoSource, ["music_title", "music_name", "bgm", "song_title"]),
+      share_url: firstText(videoSource, ["share_url", "share_link", "url"]),
+      cover: firstUrlFromObject(videoSource, ["cover", "cover_url", "origin_cover", "dynamic_cover"]),
+      play_url: firstUrlFromObject(videoSource, ["play_addr", "download_addr", "play_url", "video_url"]),
+    },
+    tags: mediaTags,
     content_identity: {
       track: firstText(contentIdentity, ["track", "内容赛道", "赛道"]),
       niche_fit: firstText(contentIdentity, ["niche_fit", "赛道适配", "适配方向"]),

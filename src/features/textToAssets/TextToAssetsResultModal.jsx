@@ -1,4 +1,4 @@
-export function TextToAssetsResultModal({ task, onClose }) {
+export function TextToAssetsResultModal({ task, onClose, pageMode = false }) {
   if (!task) return null;
   const result = task.result || {};
   const aRollItems = Array.isArray(result.a_roll_prompts) ? result.a_roll_prompts : [];
@@ -11,17 +11,23 @@ export function TextToAssetsResultModal({ task, onClose }) {
     ? audioPlan.bgm_style
     : { genre: audioPlan.bgm_style || "" };
   const notes = Array.isArray(result.notes) ? result.notes : [];
+  const isPageMode = Boolean(pageMode);
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <section className="modal-panel" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+    <div className={isPageMode ? "result-page-host" : "modal-backdrop"} role={isPageMode ? undefined : "presentation"} onClick={isPageMode ? undefined : onClose}>
+      <section
+        className={`modal-panel ${isPageMode ? "result-page-panel" : ""}`}
+        role={isPageMode ? "region" : "dialog"}
+        aria-modal={isPageMode ? undefined : true}
+        onClick={isPageMode ? undefined : (event) => event.stopPropagation()}
+      >
         <div className="panel-header">
           <div>
             <h2>Text-to-Assets 结果</h2>
             <p>{task.title}</p>
           </div>
           <button className="text-button" type="button" onClick={onClose}>
-            关闭
+            {isPageMode ? "返回列表" : "关闭"}
           </button>
         </div>
         <div className="analysis-result-body">

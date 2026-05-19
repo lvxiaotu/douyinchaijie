@@ -32,8 +32,8 @@ export function TaskRecordModal({
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <section className="modal-panel task-detail-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-        <div className="panel-header">
-          <div>
+        <div className="panel-header task-detail-header">
+          <div className="task-detail-header-main">
             <h2>{task.title}</h2>
             <p>{title}</p>
             <div className="task-detail-badges">
@@ -41,9 +41,16 @@ export function TaskRecordModal({
               <Badge>{task.provider || title}</Badge>
             </div>
           </div>
-          <button className="text-button" type="button" onClick={onClose}>
-            关闭
-          </button>
+          <div className="task-detail-header-actions">
+            {task.status === "done" && onOpenResult && (
+              <button className="primary-button" type="button" onClick={() => onOpenResult(task)}>
+                查看完整结果
+              </button>
+            )}
+            <button className="text-button" type="button" onClick={onClose}>
+              关闭
+            </button>
+          </div>
         </div>
 
         <div className="task-detail-meta-grid">
@@ -162,11 +169,6 @@ export function TaskRecordModal({
         {type === "analysis" && <ModelRunSummary runs={task.modelRuns || task.result?.model_runs || task.model_runs} compact />}
 
         <div className="task-detail-actions">
-          {task.status === "done" && onOpenResult && (
-            <button className="primary-button" type="button" onClick={() => onOpenResult(task)}>
-              查看完整结果
-            </button>
-          )}
           {task.status === "done" && onArchiveTask && (
             <button
               className="text-button"

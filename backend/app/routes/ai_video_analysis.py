@@ -4,8 +4,10 @@ import os
 import json
 from uuid import uuid4
 from typing import Any
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend.app.task_store import (
@@ -46,6 +48,7 @@ from backend.app.video_analysis_worker import coordinator as ai_video_coordinato
 from backend.app.video_task_limiter import video_task_concurrency_limit, video_task_semaphore
 
 router = APIRouter(prefix="/api/tools/ai-video-analysis", tags=["ai-video-analysis"])
+ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
 class BreakdownRequest(BaseModel):
@@ -127,6 +130,137 @@ def attach_model_runs(task_id: str, result: dict[str, Any]) -> dict[str, Any]:
     if not runs:
         return result
     return {**result, "model_runs": runs}
+
+
+def _resolve_repo_path(value: str | Path) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path.resolve()
+
+
+def _analysis_roots() -> list[Path]:
+    instance = adapter()
+    output_dir = instance.output_dir
+    if not output_dir.is_absolute():
+        output_dir = ROOT_DIR / output_dir
+    return [
+        output_dir.resolve(),
+        (ROOT_DIR / "data" / "runtime" / "ai_video_analysis").resolve(),
+    ]
+
+
+def _is_allowed_analysis_path(path: Path) -> bool:
+    return any(path == root or root in path.parents for root in _analysis_roots())
+
+
+def _safe_existing_analysis_path(value: Any) -> Path | None:
+    if not value:
+        return None
+    try:
+        path = _resolve_repo_path(str(value))
+    except Exception:
+        return None
+    if not path.exists() or not _is_allowed_analysis_path(path):
+        return None
+    return path
+
+
+def _result_evidence_path(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else {}
+    return str(evidence.get("evidence_path") or result.get("evidence_path") or "")
+
+
+def _fallback_evidence_path(task_id: str) -> Path | None:
+    for root in _analysis_roots():
+        candidate = root / "evidence" / task_id / "analysis_evidence.json"
+        if candidate.exists() and _is_allowed_analysis_path(candidate):
+            return candidate
+    return None
+
+
+def _evidence_path_for_task(task_id: str) -> Path | None:
+    task = get_task(task_id)
+    if task:
+        path = _safe_existing_analysis_path(_result_evidence_path(task.get("result")))
+        if path:
+            return path
+
+    archive = get_analysis_archive(task_id)
+    if archive:
+        path = _safe_existing_analysis_path(_result_evidence_path(archive.get("result")))
+        if path:
+            return path
+
+    dataset = get_analysis_dataset(task_id)
+    if dataset:
+        run = dataset.get("run") or {}
+        path = _safe_existing_analysis_path(run.get("evidence_path"))
+        if path:
+            return path
+
+    return _fallback_evidence_path(task_id)
+
+
+def _read_evidence_for_task(task_id: str) -> tuple[dict[str, Any], Path]:
+    evidence_path = _evidence_path_for_task(task_id)
+    if not evidence_path:
+        raise HTTPException(status_code=404, detail="Evidence package not found")
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Evidence package read failed: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(evidence, dict):
+        raise HTTPException(status_code=500, detail="Evidence package is not a JSON object")
+    evidence["evidence_path"] = str(evidence_path)
+    return evidence, evidence_path
+
+
+def _evidence_file_path(evidence: dict[str, Any], evidence_path: Path, kind: str) -> Path | None:
+    metadata = evidence.get("metadata") if isinstance(evidence.get("metadata"), dict) else {}
+    checkpoints = evidence.get("checkpoints") if isinstance(evidence.get("checkpoints"), dict) else {}
+    if kind == "video":
+        value = metadata.get("video_path")
+    elif kind == "audio":
+        value = metadata.get("audio_path") or checkpoints.get("audio_path")
+    elif kind == "transcript":
+        value = checkpoints.get("transcript_path")
+    else:
+        value = ""
+    path = _safe_existing_analysis_path(value)
+    if path:
+        return path
+    fallback_name = {
+        "audio": "audio.wav",
+        "transcript": "transcript.json",
+    }.get(kind)
+    if kind == "video":
+        candidates = list(evidence_path.parent.glob("*.mp4"))
+        return candidates[0] if candidates else None
+    if fallback_name:
+        fallback = evidence_path.parent / fallback_name
+        if fallback.exists() and _is_allowed_analysis_path(fallback.resolve()):
+            return fallback.resolve()
+    return None
+
+
+def _media_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".mp4":
+        return "video/mp4"
+    if suffix == ".mov":
+        return "video/quicktime"
+    if suffix == ".webm":
+        return "video/webm"
+    if suffix == ".wav":
+        return "audio/wav"
+    if suffix == ".mp3":
+        return "audio/mpeg"
+    if suffix == ".json":
+        return "application/json"
+    return "application/octet-stream"
 
 
 def run_breakdown_task(task_id: str, video: dict[str, Any], provider: str | None = None) -> None:
@@ -297,6 +431,44 @@ def analysis_dataset(run_id: str) -> dict[str, Any]:
     if not dataset:
         raise HTTPException(status_code=404, detail="Analysis dataset not found")
     return dataset
+
+
+@router.get("/jobs/{task_id}/evidence")
+def job_evidence(task_id: str) -> dict[str, Any]:
+    evidence, evidence_path = _read_evidence_for_task(task_id)
+    metadata = evidence.get("metadata") if isinstance(evidence.get("metadata"), dict) else {}
+    checkpoints = evidence.get("checkpoints") if isinstance(evidence.get("checkpoints"), dict) else {}
+    video_file = _evidence_file_path(evidence, evidence_path, "video")
+    audio_file = _evidence_file_path(evidence, evidence_path, "audio")
+    transcript = evidence.get("transcript") if isinstance(evidence.get("transcript"), dict) else {}
+    return {
+        "status": "ok",
+        "task_id": task_id,
+        "evidence_path": str(evidence_path),
+        "metadata": metadata,
+        "transcript": transcript,
+        "asr": evidence.get("asr") if isinstance(evidence.get("asr"), dict) else {},
+        "analysis_segments": evidence.get("analysis_segments") if isinstance(evidence.get("analysis_segments"), list) else [],
+        "keyframes": evidence.get("keyframes") if isinstance(evidence.get("keyframes"), list) else [],
+        "checkpoints": checkpoints,
+        "media": {
+            "video_available": bool(video_file),
+            "audio_available": bool(audio_file),
+            "video_url": f"/api/tools/ai-video-analysis/jobs/{task_id}/evidence-file?kind=video" if video_file else "",
+            "audio_url": f"/api/tools/ai-video-analysis/jobs/{task_id}/evidence-file?kind=audio" if audio_file else "",
+        },
+    }
+
+
+@router.get("/jobs/{task_id}/evidence-file")
+def job_evidence_file(task_id: str, kind: str = Query(default="video")):
+    if kind not in {"video", "audio", "transcript"}:
+        raise HTTPException(status_code=400, detail="Unsupported evidence file kind")
+    evidence, evidence_path = _read_evidence_for_task(task_id)
+    file_path = _evidence_file_path(evidence, evidence_path, kind)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="Evidence file not found")
+    return FileResponse(file_path, media_type=_media_type_for_path(file_path), filename=file_path.name)
 
 
 @router.post("/datasets/backfill")

@@ -552,6 +552,40 @@ export async function fetchAiVideoQueueStatus(taskId, backlogLimit = 20) {
   return data;
 }
 
+export async function fetchAiVideoEvidence(taskId) {
+  const path = `/api/tools/ai-video-analysis/jobs/${encodeURIComponent(taskId)}/evidence`;
+  const bases = [API_BASE];
+  if (typeof window !== "undefined" && ["127.0.0.1", "localhost"].includes(window.location.hostname)) {
+    bases.push("", "http://127.0.0.1:8010");
+  }
+  let lastError = null;
+  for (const base of [...new Set(bases)]) {
+    try {
+      const response = await fetch(`${base}${path}`);
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : null;
+      if (!response.ok) {
+        lastError = new Error(JSON.stringify(data?.detail || data || `Request failed: ${response.status}`, null, 2));
+        continue;
+      }
+      if (base && data?.media) {
+        return {
+          ...data,
+          media: {
+            ...data.media,
+            video_url: data.media.video_url?.startsWith("/api/") ? `${base}${data.media.video_url}` : data.media.video_url || "",
+            audio_url: data.media.audio_url?.startsWith("/api/") ? `${base}${data.media.audio_url}` : data.media.audio_url || "",
+          },
+        };
+      }
+      return data;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error("Evidence API failed");
+}
+
 export async function cancelAiVideoQueueJob(taskId) {
   const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/jobs/${encodeURIComponent(taskId)}/cancel`, {
     method: "POST",

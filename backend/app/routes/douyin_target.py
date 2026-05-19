@@ -487,10 +487,159 @@ def _looks_like_tiktok_noise(video: dict[str, Any]) -> bool:
     return sum(1 for marker in markers if marker in desc) >= 2
 
 
-def _analysis_video_payload(video: dict[str, Any]) -> dict[str, Any]:
+def _analysis_author_payload(video: dict[str, Any], target_user: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = video.get("source_json") if isinstance(video.get("source_json"), dict) else {}
+    raw = source.get("raw") if isinstance(source.get("raw"), dict) else {}
+    author: dict[str, Any] = {}
+    for container in (
+        _nested_dict(raw, "author"),
+        _nested_dict(raw, "user"),
+        _nested_dict(source, "author"),
+        _nested_dict(source, "user"),
+        video.get("author") if isinstance(video.get("author"), dict) else {},
+        video.get("user") if isinstance(video.get("user"), dict) else {},
+        video.get("owner") if isinstance(video.get("owner"), dict) else {},
+    ):
+        for key, value in container.items():
+            if value is None or value == "":
+                continue
+            author[key] = value
+
+    if target_user:
+        user_source = target_user.get("source_json") if isinstance(target_user.get("source_json"), dict) else {}
+
+        def pick_text(*values: Any) -> str:
+            for value in values:
+                if value is None or value == "" or isinstance(value, (dict, list)):
+                    continue
+                text = str(value).strip()
+                if text:
+                    return text
+            return ""
+
+        def pick_number(*values: Any) -> int | None:
+            fallback: int | None = None
+            for value in values:
+                number = _maybe_int(value)
+                if number is None:
+                    continue
+                if number > 0:
+                    return number
+                if fallback is None:
+                    fallback = number
+            return fallback
+
+        user_id = pick_text(target_user.get("id"), author.get("uid"), author.get("user_id"))
+        if user_id:
+            author["uid"] = author.get("uid") or user_id
+            author["user_id"] = author.get("user_id") or user_id
+            author["id"] = author.get("id") or user_id
+
+        sec_uid = pick_text(target_user.get("sec_uid"), target_user.get("sec_user_id"), author.get("sec_uid"), author.get("sec_user_id"))
+        if sec_uid:
+            author["sec_uid"] = sec_uid
+            author["sec_user_id"] = author.get("sec_user_id") or sec_uid
+
+        unique_id = pick_text(target_user.get("unique_id"), author.get("unique_id"), author.get("uniqueId"), author.get("short_id"), author.get("display_id"))
+        if unique_id:
+            author["unique_id"] = unique_id
+            author["uniqueId"] = author.get("uniqueId") or unique_id
+            author["short_id"] = author.get("short_id") or unique_id
+            author["display_id"] = author.get("display_id") or unique_id
+
+        nickname = pick_text(target_user.get("nickname"), author.get("nickname"), author.get("name"), author.get("author_name"), author.get("user_name"), unique_id, user_id)
+        if nickname:
+            author["nickname"] = nickname
+            author["name"] = author.get("name") or nickname
+            author["author_name"] = author.get("author_name") or nickname
+            author["user_name"] = author.get("user_name") or nickname
+
+        signature = pick_text(target_user.get("signature"), author.get("signature"), author.get("desc"), author.get("intro"), author.get("bio"))
+        if signature:
+            author["signature"] = signature
+            author["desc"] = author.get("desc") or signature
+            author["intro"] = author.get("intro") or signature
+            author["bio"] = author.get("bio") or signature
+
+        avatar = pick_text(
+            target_user.get("avatar_url"),
+            target_user.get("avatar"),
+            author.get("avatar"),
+            author.get("avatar_url"),
+            author.get("avatar_thumb"),
+            author.get("avatar_medium"),
+            author.get("avatar_large"),
+        )
+        if avatar:
+            author["avatar"] = avatar
+            author["avatar_url"] = avatar
+
+        follower_count = pick_number(
+            target_user.get("follower_count"),
+            author.get("follower_count"),
+            author.get("fans_count"),
+            author.get("followers"),
+            user_source.get("follower_count") if isinstance(user_source, dict) else None,
+        )
+        if follower_count is not None:
+            author["follower_count"] = follower_count
+            author["fans_count"] = follower_count
+            author["followers"] = follower_count
+
+        like_count = pick_number(
+            target_user.get("like_count"),
+            author.get("like_count"),
+            author.get("total_favorited"),
+            author.get("total_favorite"),
+            author.get("digg_count"),
+            user_source.get("like_count") if isinstance(user_source, dict) else None,
+        )
+        if like_count is not None:
+            author["like_count"] = like_count
+            author["total_favorited"] = like_count
+            author["total_favorite"] = like_count
+            author["digg_count"] = like_count
+
+        aweme_count = pick_number(
+            target_user.get("aweme_count"),
+            author.get("aweme_count"),
+            author.get("video_count"),
+            author.get("item_count"),
+            user_source.get("aweme_count") if isinstance(user_source, dict) else None,
+        )
+        if aweme_count is not None:
+            author["aweme_count"] = aweme_count
+            author["video_count"] = aweme_count
+            author["item_count"] = aweme_count
+
+        following_count = pick_number(
+            target_user.get("following_count"),
+            author.get("following_count"),
+            author.get("follow_count"),
+            user_source.get("following_count") if isinstance(user_source, dict) else None,
+        )
+        if following_count is not None:
+            author["following_count"] = following_count
+            author["follow_count"] = following_count
+
+        if target_user.get("verified") is True:
+            author["verified"] = True
+            author["is_verified"] = True
+
+        if target_user.get("is_private") is not None:
+            author["is_private"] = bool(target_user.get("is_private"))
+
+        author["target_user_id"] = target_user.get("id") or author.get("target_user_id") or ""
+        author["source"] = "tiktok_target_users"
+
+    return author
+
+
+def _analysis_video_payload(video: dict[str, Any], target_user: dict[str, Any] | None = None) -> dict[str, Any]:
     source = video.get("source_json") if isinstance(video.get("source_json"), dict) else {}
     payload = {**source}
     metrics = video.get("metrics") if isinstance(video.get("metrics"), dict) else {}
+    author = _analysis_author_payload(video, target_user)
     payload.update(
         {
             "id": video.get("aweme_id") or video.get("id"),
@@ -524,15 +673,26 @@ def _analysis_video_payload(video: dict[str, Any]) -> dict[str, Any]:
                 "engagement_rate": video.get("engagement_rate"),
                 "metrics": metrics,
             },
+            "author": author,
+            "user": author,
+            "owner": author,
+            "author_user_id": author.get("uid") or author.get("user_id") or (target_user.get("id") if target_user else video.get("user_id")) or "",
         }
     )
+    raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+    raw = dict(raw)
+    raw["author"] = author
+    raw["user"] = author
+    raw["owner"] = author
+    payload["raw"] = raw
     return payload
 
 
-def _analysis_target_context(video: dict[str, Any]) -> dict[str, Any]:
+def _analysis_target_context(video: dict[str, Any], target_user: dict[str, Any] | None = None) -> dict[str, Any]:
     dataset = get_target_video_interaction_dataset(video["id"])
     insights = dataset.get("insights") or {}
     comments = dataset.get("comments") or []
+    author = _analysis_author_payload(video, target_user)
     top_comments = [
         {
             "comment_id": item.get("comment_id"),
@@ -551,6 +711,7 @@ def _analysis_target_context(video: dict[str, Any]) -> dict[str, Any]:
         "set_id": video.get("set_id"),
         "video_id": video.get("id"),
         "aweme_id": video.get("aweme_id"),
+        "author": author,
         "metrics": {
             "create_time": video.get("create_time"),
             "publish_hour": video.get("publish_hour"),
@@ -887,7 +1048,18 @@ def video_interactions(video_id: str) -> dict[str, Any]:
     video = resolve_target_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Target video not found")
-    return get_target_video_interaction_dataset(video["id"])
+    dataset = get_target_video_interaction_dataset(video["id"])
+    target_user = get_target_user(video.get("user_id") or "")
+    author = _analysis_author_payload(video, target_user)
+    dataset["author"] = author
+    dataset["video"] = {
+        **(dataset.get("video") if isinstance(dataset.get("video"), dict) else video),
+        "author": author,
+        "user": author,
+        "owner": author,
+        "author_user_id": author.get("uid") or author.get("user_id") or video.get("user_id") or "",
+    }
+    return dataset
 
 
 @router.post("/videos/{video_id}/comments/collect")
@@ -1098,8 +1270,9 @@ def enqueue_analysis(payload: EnqueueAnalysisRequest) -> dict[str, Any]:
                     }
                 )
 
-        analysis_video = _analysis_video_payload(target_video)
-        target_context = _analysis_target_context(target_video)
+        target_user = get_target_user(target_video.get("user_id") or "")
+        analysis_video = _analysis_video_payload(target_video, target_user)
+        target_context = _analysis_target_context(target_video, target_user)
         analysis_video["douyin_target_context"] = target_context
         task_id = f"target-breakdown-{target_video.get('aweme_id') or target_video['id']}-{int(time.time())}-{uuid4().hex[:8]}"
         task = create_task(
@@ -1107,7 +1280,7 @@ def enqueue_analysis(payload: EnqueueAnalysisRequest) -> dict[str, Any]:
             task_type="ai_video_analysis",
             title=video_title(analysis_video),
             provider=provider,
-            payload={"video": analysis_video, "douyin_target": target_context},
+            payload={"video": analysis_video, "author": analysis_video.get("author") or {}, "douyin_target": target_context},
             message="已从抖音对标工具加入拆解队列",
         )
         enqueue_ai_video_job(task_id=task_id, video=analysis_video, provider=provider)
