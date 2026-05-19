@@ -185,6 +185,29 @@ class TiktokTargetInteractionTests(unittest.TestCase):
         self.assertEqual(low_plan["max_comments"], 20)
         self.assertEqual(low_plan["replies_per_comment"], 1)
 
+    def test_duplicate_comments_are_deduped_in_interaction_insights(self):
+        store.create_target_video(
+            "aweme-dedupe",
+            "user-1",
+            {
+                "aweme_id": "aweme-dedupe",
+                "desc": "duplicate comments",
+                "digg_count": 100,
+                "comment_count": 2,
+            },
+        )
+        comment = {
+            "cid": "same-comment",
+            "text": "\u91cd\u590d\u8bc4\u8bba",
+            "digg_count": 99,
+            "user": {"uid": "fan-1", "nickname": "fan"},
+        }
+
+        dataset = store.replace_target_video_comments("aweme-dedupe", [comment, comment])
+
+        self.assertEqual(len(dataset["insights"]["top_comments"]), 1)
+        self.assertEqual(dataset["insights"]["top_comments"][0]["comment_id"], "same-comment")
+
     def test_clear_analysis_preserves_comments_and_interaction_insights(self):
         store.create_target_video(
             "aweme-6",

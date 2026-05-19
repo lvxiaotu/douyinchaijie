@@ -169,10 +169,27 @@ function normalizeCommentItem(comment, index = 0) {
   };
 }
 
+function commentIdentity(comment) {
+  const primaryId = firstTextValue(comment?.comment_id, comment?.id, comment?.cid);
+  if (primaryId) return `id:${primaryId}`;
+  const text = firstTextValue(comment?.text, comment?.content, comment?.comment)
+    .replace(/\s+/g, "")
+    .slice(0, 120);
+  const nickname = firstTextValue(comment?.nickname, comment?.unique_id, comment?.user_name).replace(/\s+/g, "");
+  return `text:${nickname}:${text}`;
+}
+
 function sortTopComments(comments, limit = 8) {
+  const seen = new Set();
   return (Array.isArray(comments) ? comments : [])
     .map(normalizeCommentItem)
-    .filter((comment) => comment.text)
+    .filter((comment) => {
+      if (!comment.text) return false;
+      const key = commentIdentity(comment);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .sort((a, b) => commentLikeCount(b) - commentLikeCount(a))
     .slice(0, limit);
 }

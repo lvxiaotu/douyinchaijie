@@ -746,6 +746,22 @@ def _compact_comment(comment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _dedupe_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for comment in comments:
+        identity = str(comment.get("comment_id") or comment.get("id") or "").strip()
+        if not identity:
+            text = re.sub(r"\s+", "", str(comment.get("text") or ""))
+            nickname = re.sub(r"\s+", "", str(comment.get("nickname") or comment.get("unique_id") or ""))
+            identity = f"{nickname}:{text[:120]}"
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(comment)
+    return unique
+
+
 def _genre_keyword_set(genre: str = "") -> tuple[str, ...]:
     normalized_genre = normalize_genre(genre)
     genre_keywords = GENRE_INTERACTION_KEYWORDS.get(normalized_genre, ())
@@ -841,6 +857,7 @@ def build_interaction_insights(
     raw_ai: dict[str, Any] | None = None,
     genre: str = "",
 ) -> dict[str, Any]:
+    comments = _dedupe_comments(comments)
     fan_comments = [comment for comment in comments if not comment.get("is_author")]
     texts = [str(comment.get("text") or "") for comment in fan_comments if comment.get("text")]
     normalized_genre = normalize_genre(genre)
