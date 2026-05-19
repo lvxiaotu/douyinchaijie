@@ -1,5 +1,6 @@
 import { Badge } from "../../components/common/index";
 import { statusText } from "../../constants/appConfig";
+import { ModelRunSummary } from "../results/ModelRunSummary";
 import { Archive } from "lucide-react";
 
 export function TaskRecordModal({
@@ -157,6 +158,8 @@ export function TaskRecordModal({
         )}
 
         {task.error && <div className="error-box">{task.error}</div>}
+
+        {type === "analysis" && <ModelRunSummary runs={task.modelRuns || task.result?.model_runs || task.model_runs} compact />}
 
         <div className="task-detail-actions">
           {task.status === "done" && onOpenResult && (

@@ -1,7 +1,7 @@
 import React, { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
-import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchives, fetchAiPromptReverseArchives, fetchAiVideoArchives, fetchTasks, fetchWorkbench } from "./services/api";
+import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchive, fetchAiProductionReverseArchives, fetchAiPromptReverseArchive, fetchAiPromptReverseArchives, fetchAiVideoArchive, fetchAiVideoArchives, fetchTask, fetchTasks, fetchWorkbench } from "./services/api";
 import { fallbackWorkbench } from "./workbenchSeed";
-import { Database, FolderCog, Languages, MoonStar, RefreshCw, SunMedium } from "lucide-react";
+import { Database, FolderCog, Layers3, Languages, MoonStar, RefreshCw, SunMedium } from "lucide-react";
 import { Badge, ToolCard } from "./components/common/index";
 import { THEME_STORAGE_KEY, UI_VERSION, jianyingEditorItems, navItems, sections, settingItems } from "./constants/appConfig";
 import { DouyinCollectorPanel } from "./features/douyin";
@@ -9,6 +9,7 @@ import { DouyinTargetPanel } from "./features/douyinTarget";
 import { DraftInspectorPanel, JianyingEditorSdkPanel, JianyingNaturalScriptPanel } from "./features/jianying";
 import { LibraryArchiveGroup, LibraryItemModal } from "./features/library/LibraryPanels";
 import { AnalysisResultModal, ProductionReverseResultModal, PromptReverseResultModal } from "./features/results";
+import { AiVideoQueuePanel } from "./features/queue";
 import { RunningHubTtsPanel } from "./features/runningHub/RunningHubTtsPanel";
 import { AiProductionReverseSettingsPanel, AiPromptReverseSettingsPanel, AiProviderSettingsPanel, AiVideoSettingsPanel, DouyinSettingsPanel, JianyingDraftSettingsPanel } from "./features/settings";
 import { TaskRecordModal, TaskStatusRow } from "./features/tasks";
@@ -44,37 +45,66 @@ export function App() {
   const [taskSyncError, setTaskSyncError] = useState("");
   const [lastTaskRefresh, setLastTaskRefresh] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [archivesLoaded, setArchivesLoaded] = useState(false);
   const [uiTheme, setUiTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
     return window.localStorage.getItem(THEME_STORAGE_KEY) || "light";
   });
+  const hasTrackedActiveTasks = useMemo(
+    () =>
+      [...analysisTasks, ...promptReverseTasks, ...productionReverseTasks, ...textToAssetsTasks].some(
+        (task) => !["done", "error"].includes(task.status),
+      ),
+    [analysisTasks, promptReverseTasks, productionReverseTasks, textToAssetsTasks],
+  );
 
-  async function refreshAnalysisTaskList() {
-    const tasks = await fetchTasks("ai_video_analysis");
+  async function refreshAnalysisTaskList(options = {}) {
+    const tasks = await fetchTasks("ai_video_analysis", options);
     setAnalysisTasks(tasks.map((task) => normalizeAnalysisTask(task)));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   }
 
-  async function refreshPromptReverseTaskList() {
-    const tasks = await fetchTasks("ai_prompt_reverse");
+  async function refreshPromptReverseTaskList(options = {}) {
+    const tasks = await fetchTasks("ai_prompt_reverse", options);
     setPromptReverseTasks(tasks.map(normalizePromptReverseTask));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   }
 
-  async function refreshProductionReverseTaskList() {
-    const tasks = await fetchTasks("ai_production_reverse");
+  async function refreshProductionReverseTaskList(options = {}) {
+    const tasks = await fetchTasks("ai_production_reverse", options);
     setProductionReverseTasks(tasks.map(normalizeProductionReverseTask));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   }
 
-  async function refreshTextToAssetsTaskList() {
-    const tasks = await fetchTasks("text_to_assets");
+  async function refreshTextToAssetsTaskList(options = {}) {
+    const tasks = await fetchTasks("text_to_assets", options);
     setTextToAssetsTasks(tasks.map(normalizeTextToAssetsTask));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  }
+
+  async function refreshAllTaskLists(options = {}) {
+    await Promise.all([
+      refreshAnalysisTaskList(options),
+      refreshPromptReverseTaskList(options),
+      refreshProductionReverseTaskList(options),
+      refreshTextToAssetsTaskList(options),
+    ]);
+  }
+
+  async function refreshArchives(options = {}) {
+    const [analysis, promptReverse, productionReverse] = await Promise.all([
+      fetchAiVideoArchives(options),
+      fetchAiPromptReverseArchives(options),
+      fetchAiProductionReverseArchives(options),
+    ]);
+    setAnalysisArchives(analysis);
+    setPromptReverseArchives(promptReverse);
+    setProductionReverseArchives(productionReverse);
+    setArchivesLoaded(true);
   }
 
   useEffect(() => {
@@ -91,115 +121,52 @@ export function App() {
   }, [uiTheme]);
 
   useEffect(() => {
-    async function loadArchives() {
-      try {
-        const [analysis, promptReverse, productionReverse] = await Promise.all([
-          fetchAiVideoArchives(),
-          fetchAiPromptReverseArchives(),
-          fetchAiProductionReverseArchives(),
-        ]);
-        setAnalysisArchives(analysis);
-        setPromptReverseArchives(promptReverse);
-        setProductionReverseArchives(productionReverse);
-      } catch {
-        // Archive panels can stay empty if backend is still starting.
-      }
-    }
-
-    loadArchives();
-  }, [analysisTasks, promptReverseTasks, productionReverseTasks]);
-
-  useEffect(() => {
+    if (activeSection !== "dashboard" && !hasTrackedActiveTasks) return undefined;
     let mounted = true;
+    let timer = 0;
 
-    async function loadPromptReverseTasks() {
+    async function loadAllTasks() {
       try {
         if (mounted) {
-          await refreshPromptReverseTaskList();
+          await refreshAllTaskLists();
         }
       } catch (err) {
         if (mounted) {
-          setTaskSyncError(`提示词反推任务刷新失败：${err.message}`);
+          setTaskSyncError(`任务刷新失败：${err.message}`);
         }
+      }
+      if (mounted) {
+        timer = window.setTimeout(loadAllTasks, 10000);
       }
     }
 
-    loadPromptReverseTasks();
-    const timer = window.setInterval(loadPromptReverseTasks, 2500);
+    loadAllTasks();
     return () => {
       mounted = false;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
-  }, []);
+  }, [activeSection, hasTrackedActiveTasks]);
 
   useEffect(() => {
+    if (activeSection !== "library" && activeSection !== "dashboard") return;
+    if (archivesLoaded) return;
     let mounted = true;
 
-    async function loadProductionReverseTasks() {
+    async function loadArchivesOnce() {
       try {
-        if (mounted) {
-          await refreshProductionReverseTaskList();
-        }
+        await refreshArchives();
       } catch (err) {
         if (mounted) {
-          setTaskSyncError(`制作方式反推任务刷新失败：${err.message}`);
+          setTaskSyncError(`归档刷新失败：${err.message}`);
         }
       }
     }
 
-    loadProductionReverseTasks();
-    const timer = window.setInterval(loadProductionReverseTasks, 2500);
+    loadArchivesOnce();
     return () => {
       mounted = false;
-      window.clearInterval(timer);
     };
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-
-    async function loadTextToAssetsTasks() {
-      try {
-        if (mounted) {
-          await refreshTextToAssetsTaskList();
-        }
-      } catch (err) {
-        if (mounted) {
-          setTaskSyncError(`一句话转素材任务刷新失败：${err.message}`);
-        }
-      }
-    }
-
-    loadTextToAssetsTasks();
-    const timer = window.setInterval(loadTextToAssetsTasks, 3000);
-    return () => {
-      mounted = false;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-
-    async function loadAnalysisTasks() {
-      try {
-        if (mounted) {
-          await refreshAnalysisTaskList();
-        }
-      } catch (err) {
-        if (mounted) {
-          setTaskSyncError(`AI 视频拆解任务刷新失败：${err.message}`);
-        }
-      }
-    }
-
-    loadAnalysisTasks();
-    const timer = window.setInterval(loadAnalysisTasks, 2500);
-    return () => {
-      mounted = false;
-      window.clearInterval(timer);
-    };
-  }, []);
+  }, [activeSection, archivesLoaded]);
 
   async function handleCreateVideoBreakdown(video) {
     const task = await createAiVideoBreakdownJob(video);
@@ -232,6 +199,7 @@ export function App() {
     const response = await archiveTask(task.id);
     if (response.archive) {
       setAnalysisArchives((current) => [response.archive, ...current.filter((item) => (item.task_id || item.id) !== task.id)]);
+      setArchivesLoaded(true);
     }
   }
 
@@ -239,6 +207,7 @@ export function App() {
     const response = await archiveTask(task.id);
     if (response.archive) {
       setPromptReverseArchives((current) => [response.archive, ...current.filter((item) => (item.task_id || item.id) !== task.id)]);
+      setArchivesLoaded(true);
     }
   }
 
@@ -246,6 +215,63 @@ export function App() {
     const response = await archiveTask(task.id);
     if (response.archive) {
       setProductionReverseArchives((current) => [response.archive, ...current.filter((item) => (item.task_id || item.id) !== task.id)]);
+      setArchivesLoaded(true);
+    }
+  }
+
+  async function openTaskRecord(type, title, task) {
+    setSelectedTaskRecord({ type, title, task });
+    try {
+      const fullTask = await fetchTask(task.id);
+      const normalizers = {
+        analysis: normalizeAnalysisTask,
+        prompt: normalizePromptReverseTask,
+        production: normalizeProductionReverseTask,
+        text_to_assets: normalizeTextToAssetsTask,
+      };
+      const normalized = (normalizers[type] || ((item) => item))(fullTask);
+      setSelectedTaskRecord({ type, title, task: normalized });
+    } catch (err) {
+      setTaskSyncError(`任务详情加载失败：${err.message}`);
+    }
+  }
+
+  async function openArchiveItem(item, presentation) {
+    if (!item.archiveType) {
+      setSelectedLibraryItem({
+        ...item,
+        presentation,
+        raw: item,
+      });
+      return;
+    }
+    try {
+      if (item.archiveType === "analysis") {
+        const archive = await fetchAiVideoArchive(item.id);
+        setSelectedAnalysisTask({
+          id: archive.task_id,
+          title: archive.title,
+          result: archive.result,
+        });
+      }
+      if (item.archiveType === "prompt") {
+        const archive = await fetchAiPromptReverseArchive(item.id);
+        setSelectedPromptReverseTask({
+          id: archive.task_id,
+          title: archive.title,
+          result: archive.result,
+        });
+      }
+      if (item.archiveType === "production") {
+        const archive = await fetchAiProductionReverseArchive(item.id);
+        setSelectedProductionReverseTask({
+          id: archive.task_id,
+          title: archive.title,
+          result: archive.result,
+        });
+      }
+    } catch (err) {
+      setTaskSyncError(`归档详情加载失败：${err.message}`);
     }
   }
 
@@ -287,43 +313,22 @@ export function App() {
 
   async function handleGlobalRefresh() {
     setRefreshing(true);
-    const [analysisResult, promptResult, productionResult, textToAssetsResult, workbenchResult, analysisArchiveResult, promptArchiveResult, productionArchiveResult] = await Promise.allSettled([
-      refreshAnalysisTaskList(),
-      refreshPromptReverseTaskList(),
-      refreshProductionReverseTaskList(),
-      refreshTextToAssetsTaskList(),
+    const [taskResult, workbenchResult, archiveResult] = await Promise.allSettled([
+      refreshAllTaskLists(),
       fetchWorkbench(),
-      fetchAiVideoArchives(),
-      fetchAiPromptReverseArchives(),
-      fetchAiProductionReverseArchives(),
+      refreshArchives(),
     ]);
 
     if (workbenchResult.status === "fulfilled") {
       setWorkbench(workbenchResult.value);
     }
 
-    if (analysisArchiveResult.status === "fulfilled") {
-      setAnalysisArchives(analysisArchiveResult.value);
-    }
-    if (promptArchiveResult.status === "fulfilled") {
-      setPromptReverseArchives(promptArchiveResult.value);
-    }
-    if (productionArchiveResult.status === "fulfilled") {
-      setProductionReverseArchives(productionArchiveResult.value);
-    }
-
     const errors = [];
-    if (analysisResult.status === "rejected") {
-      errors.push(`AI 视频拆解任务刷新失败：${analysisResult.reason?.message || analysisResult.reason}`);
+    if (taskResult.status === "rejected") {
+      errors.push(`任务刷新失败：${taskResult.reason?.message || taskResult.reason}`);
     }
-    if (promptResult.status === "rejected") {
-      errors.push(`提示词反推任务刷新失败：${promptResult.reason?.message || promptResult.reason}`);
-    }
-    if (productionResult.status === "rejected") {
-      errors.push(`制作方式反推任务刷新失败：${productionResult.reason?.message || productionResult.reason}`);
-    }
-    if (textToAssetsResult.status === "rejected") {
-      errors.push(`一句话转素材任务刷新失败：${textToAssetsResult.reason?.message || textToAssetsResult.reason}`);
+    if (archiveResult.status === "rejected") {
+      errors.push(`归档刷新失败：${archiveResult.reason?.message || archiveResult.reason}`);
     }
     setTaskSyncError(errors.join("；"));
     setRefreshing(false);
@@ -481,7 +486,7 @@ export function App() {
     }
   }, [textToAssetsTaskGroups, activeTextToAssetsStatus]);
 
-  const [title] = sections[activeSection];
+  const [title] = sections[activeSection] || ["AI 视频队列"];
 
   useEffect(() => {
     document.title = `${title} | 抖音解析`;
@@ -509,6 +514,14 @@ export function App() {
               }),
           }))
         : [];
+  const headerNavItems =
+    navItems.some(([id]) => id === "aiVideoQueue")
+      ? navItems
+      : [
+          ...navItems.slice(0, 7),
+          ["aiVideoQueue", Layers3, "AI 视频队列"],
+          ...navItems.slice(7),
+        ];
 
   let sectionContent = null;
 
@@ -537,7 +550,7 @@ export function App() {
               groups={analysisTaskGroups}
               activeStatus={activeAnalysisStatus}
               onChangeStatus={setActiveAnalysisStatus}
-              onOpenTask={(task) => setSelectedTaskRecord({ type: "analysis", title: "AI 视频拆解", task })}
+              onOpenTask={(task) => openTaskRecord("analysis", "AI 视频拆解", task)}
             />
             <TaskStatusRow
               title="AI 提示词反推"
@@ -545,7 +558,7 @@ export function App() {
               groups={promptReverseTaskGroups}
               activeStatus={activePromptStatus}
               onChangeStatus={setActivePromptStatus}
-              onOpenTask={(task) => setSelectedTaskRecord({ type: "prompt", title: "AI 提示词反推", task })}
+              onOpenTask={(task) => openTaskRecord("prompt", "AI 提示词反推", task)}
             />
             <TaskStatusRow
               title="AI 制作方式反推"
@@ -553,7 +566,7 @@ export function App() {
               groups={productionReverseTaskGroups}
               activeStatus={activeProductionStatus}
               onChangeStatus={setActiveProductionStatus}
-              onOpenTask={(task) => setSelectedTaskRecord({ type: "production", title: "AI 制作方式反推", task })}
+              onOpenTask={(task) => openTaskRecord("production", "AI 制作方式反推", task)}
             />
             <TaskStatusRow
               title="一句话转素材"
@@ -561,7 +574,7 @@ export function App() {
               groups={textToAssetsTaskGroups}
               activeStatus={activeTextToAssetsStatus}
               onChangeStatus={setActiveTextToAssetsStatus}
-              onOpenTask={(task) => setSelectedTaskRecord({ type: "text_to_assets", title: "一句话转素材", task })}
+              onOpenTask={(task) => openTaskRecord("text_to_assets", "一句话转素材", task)}
             />
           </div>
         </section>
@@ -627,6 +640,12 @@ export function App() {
         <TextToAssetsPanel />
       </section>
     );
+  } else if (activeSection === "aiVideoQueue") {
+    sectionContent = (
+      <section>
+        <AiVideoQueuePanel onDeleted={() => refreshAnalysisTaskList().catch((err) => setTaskSyncError(`AI 视频拆解任务刷新失败：${err.message}`))} />
+      </section>
+    );
   } else if (activeSection === "jianyingEditor") {
     sectionContent = (
       <section>
@@ -678,36 +697,7 @@ export function App() {
                   <article
                     className={`library-card ${item.archiveType ? "archive-library-card" : ""}`}
                     key={item.id}
-                    onClick={() => {
-                      if (item.archiveType === "analysis") {
-                        setSelectedAnalysisTask({
-                          id: item.task_id,
-                          title: item.title,
-                          result: item.result,
-                        });
-                      }
-                      if (item.archiveType === "prompt") {
-                        setSelectedPromptReverseTask({
-                          id: item.task_id,
-                          title: item.title,
-                          result: item.result,
-                        });
-                      }
-                      if (item.archiveType === "production") {
-                        setSelectedProductionReverseTask({
-                          id: item.task_id,
-                          title: item.title,
-                          result: item.result,
-                        });
-                      }
-                      if (!item.archiveType) {
-                        setSelectedLibraryItem({
-                          ...item,
-                          presentation,
-                          raw: item,
-                        });
-                      }
-                    }}
+                    onClick={() => openArchiveItem(item, presentation)}
                   >
                     <div className="archive-thumb">
                       <span>{presentation.toolLabel}</span>
@@ -787,7 +777,7 @@ export function App() {
             </a>
             <div className="header-title">
               <div className="header-nav" role="tablist" aria-label="主导航">
-                {navItems.map(([id, Icon, label], index) => (
+                {headerNavItems.map(([id, Icon, label], index) => (
                   <React.Fragment key={id}>
                     <button
                       className={`api-type-text ${activeSection === id ? "active" : ""}`}
@@ -797,7 +787,7 @@ export function App() {
                       <Icon size={15} />
                       <span>{label}</span>
                     </button>
-                    {index < navItems.length - 1 && <span className="api-type-text separator">/</span>}
+                    {index < headerNavItems.length - 1 && <span className="api-type-text separator">/</span>}
                   </React.Fragment>
                 ))}
                 <span className="brand-text">抖音解析</span>

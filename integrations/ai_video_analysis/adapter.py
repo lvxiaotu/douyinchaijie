@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import base64
 import json
-import mimetypes
 import os
 import re
 import time
@@ -15,47 +13,122 @@ from dotenv import load_dotenv
 
 from integrations.base import IntegrationAdapter, IntegrationManifest
 from backend.app.ai_provider_state import active_ai_provider
+from backend.app.video_analysis_queue import record_ai_model_run
 from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
+from integrations.ai_video_analysis.relay_clients import DeepSeekChatClient, GeminiGenerateContentRelayClient, OpenAICompatibleRelayClient
 
 
 DEFAULT_OUTPUT_DIR = Path("data/runtime/ai_video_analysis")
+GENRE_ALIASES = {
+    "knowledge": "knowledge",
+    "education": "knowledge",
+    "science": "knowledge",
+    "科普": "knowledge",
+    "知识": "knowledge",
+    "干货": "knowledge",
+    "beauty": "beauty",
+    "makeup": "beauty",
+    "skincare": "beauty",
+    "美妆": "beauty",
+    "护肤": "beauty",
+    "好物": "commerce",
+    "种草": "commerce",
+    "带货": "commerce",
+    "commerce": "commerce",
+    "product": "commerce",
+    "探店": "local_life",
+    "本地生活": "local_life",
+    "local_life": "local_life",
+    "剧情": "drama",
+    "情感": "drama",
+    "drama": "drama",
+    "story": "drama",
+    "玄学": "mysticism",
+    "塔罗": "mysticism",
+    "占卜": "mysticism",
+    "星座": "mysticism",
+    "tarot": "mysticism",
+    "mysticism": "mysticism",
+}
+
+GENRE_PROFILES = {
+    "generic": {
+        "label": "泛赛道",
+        "timeline": "钩子筛选 -> 痛点/价值铺垫 -> 证据/反转 -> 情绪或利益强化 -> CTA",
+        "dimensions": "受众筛选、好奇心、信任建构、评论诱因、转化路径、复刻变量",
+    },
+    "knowledge": {
+        "label": "知识/科普",
+        "timeline": "反常识提问 -> 现状否定 -> 底层原理解析 -> 案例证明 -> 总结避坑/收藏",
+        "dimensions": "知识密度、可信证据、概念降维、误区纠正、收藏动机",
+    },
+    "beauty": {
+        "label": "美妆/护肤",
+        "timeline": "痛点唤醒 -> 成分/效果展示 -> 前后对比 -> 使用场景 -> 价格/优惠刺激",
+        "dimensions": "肤质/妆效痛点、视觉前后差、产品证据、真实感、求链接动机",
+    },
+    "commerce": {
+        "label": "好物/种草/带货",
+        "timeline": "问题场景 -> 产品介入 -> 效果证明 -> 信任背书 -> 限时/价格/下单 CTA",
+        "dimensions": "商品利益点、信任背书、购买阻力、评论求链接、转化口令",
+    },
+    "drama": {
+        "label": "剧情/情感",
+        "timeline": "冲突爆发 -> 关系张力 -> 反转制造 -> 情绪释放 -> 金句/评论站队",
+        "dimensions": "人物关系、冲突强度、反转节奏、共鸣台词、站队评论",
+    },
+    "local_life": {
+        "label": "探店/本地生活",
+        "timeline": "地点/价格钩子 -> 环境展示 -> 核心体验 -> 避坑/性价比 -> 到店 CTA",
+        "dimensions": "地理位置、价格锚点、环境真实感、体验证据、到店理由",
+    },
+    "mysticism": {
+        "label": "玄学/塔罗/星座",
+        "timeline": "命中式开场 -> 情绪安慰 -> 象征解释 -> 评论仪式 -> 安全化 CTA",
+        "dimensions": "情绪安慰、仪式感、模糊命中、评论打卡、避免绝对承诺",
+    },
+}
+
 VIRAL_BREAKDOWN_GUIDE = """
-爆款拆解增强要求：
-1. 不要只总结内容，要拆出可进入公式库的结构：钩子、情绪、冲突、镜头、文案、评论诱因、转化设计。
-2. 必须判断该视频能否迁移到三个重点方向：玄学、AI小动物、AI带货。
-3. 必须给出可复刻公式、三赛道改编建议、制作难度、模仿优先级。
-4. 必须检查风险：AIGC标识、版权/肖像、虚假宣传、迷信绝对承诺、疗效/财富/情感保证。
-5. 评分必须是 0-100 的整数；无法确认的内容请说明“未能从视频中确认，但可推测为……”，不要编造硬数据。
+泛赛道爆款拆解要求：
+1. 不要只总结内容，要拆出通用短视频结构：钩子、冲突/价值、信任证据、视觉行为、评论诱因、转化设计。
+2. 使用“数据指标抓异常，分段多模态抓手法，全局大模型找公式”的口径，所有结论必须能回到文本、时间点、评论或关键帧证据。
+3. 根据 genre 自适应行业术语，但输出字段必须保持通用，方便美妆、知识科普、剧情、探店、好物推荐、玄学等赛道共用。
+4. 必须给出脱敏后的标准复刻脚本模板，使用 [人群]、[痛点]、[场景]、[证据]、[反转]、[CTA] 等占位符。
+5. 必须检查平台风险：AIGC 标识、版权/肖像、虚假宣传、绝对化承诺、疗效/财富/情感保证、价格误导。
+6. 评分必须是 0-100 的整数；无法确认的内容请说明“未能从证据中确认，但可推测为……”，不要编造硬数据。
 """.strip()
+
 JSON_RESPONSE_CONTRACT = """
 请只返回一个合法 JSON 对象，不要返回 Markdown、解释文字或代码块。字段名必须使用下面这些英文 key：
 {
+  "genre": "视频赛道，优先使用输入 genre；如果自动识别，请写识别结果",
   "summary": "一句话概括视频的爆款套路和可复用价值",
   "content_identity": {
-    "track": "内容赛道：玄学/AI小动物/AI带货/泛娱乐/种草/其他",
-    "niche_fit": "是否适合迁移到玄学、AI小动物、AI带货，说明原因",
+    "track": "内容赛道：美妆/知识科普/剧情情感/探店/好物推荐/玄学/泛娱乐/其他",
+    "niche_fit": "该结构适合迁移到哪些赛道，说明迁移变量，不要局限于固定三赛道",
     "account_persona": "账号人设、叙事视角或可复制角色"
   },
   "core_hook": {
-    "opening_3s": "开头 3 秒如何抓住注意力",
-    "curiosity_gap": "制造了什么信息差、悬念或反常识",
+    "opening_3s": "开头 3 秒如何完成受众筛选或好奇心勾引",
+    "curiosity_gap": "制造了什么信息差、悬念、反常识或未完成感",
     "emotional_trigger": "触发了什么情绪：焦虑、爽感、治愈、猎奇、共鸣、占便宜等",
-    "comment_bait": "诱发评论、争议、转发或收藏的点"
+    "comment_bait": "诱发评论、争议、转发、收藏、求链接或打卡的点"
   },
   "need_context": {
     "pain_point": "用户痛点或焦虑",
-    "application_scene": "具体生活或工作场景",
+    "application_scene": "具体生活、消费、关系或工作场景",
     "hidden_desire": "用户没有明说但会被击中的深层欲望"
   },
   "product_power": {
-    "core_benefit": "核心功能或利益点",
-    "trigger_moment": "让观众想买、想试或想收藏的瞬间",
-    "trust_builder": "信任背书、证据、对比或真实感来源",
-    "product_role": "产品在视频里扮演主角、解决方案、道具、仪式感载体还是隐形植入"
+    "core_benefit": "核心功能、情绪价值、信息价值或利益点",
+    "trigger_moment": "让观众想买、想试、想收藏、想评论或想转发的瞬间",
+    "trust_builder": "信任背书、证据、对比、实测或真实感来源",
+    "product_role": "产品/观点/人物在视频里扮演主角、解决方案、道具、证据还是隐形植入"
   },
   "visual_structure": {
     "shot_structure": "镜头流转逻辑",
-    "reusable_elements": "可复刻的转场、BGM、花字、特效、角度或节奏",
+    "reusable_elements": "可复刻的转场、BGM、花字、特效、角度、道具或节奏",
     "timeline_beats": ["00:00-00:03：钩子", "00:03-00:08：冲突/铺垫"],
     "audio_rhythm": "口播、BGM、音效、停顿、字幕节奏"
   },
@@ -63,25 +136,27 @@ JSON_RESPONSE_CONTRACT = """
     "title_formula": "标题公式，使用变量占位",
     "script_formula": "脚本公式，按步骤拆成可替换模板",
     "golden_lines": ["可复用金句、字幕或口播句式"],
-    "cta": "关注、评论、收藏、私信、下单等行动号召"
+    "cta": "关注、评论、收藏、私信、求链接、到店、下单等行动号召"
   },
   "market_positioning": {
-    "suitable_products": "这种套路适合的关联产品",
+    "suitable_products": "这种套路适合的关联产品、服务、账号类型或内容栏目",
     "target_audience": "目标人群画像",
     "creative_direction": "后续适合深耕的创作方向"
   },
   "replication_plan": {
     "pattern_name": "给这个爆款结构起一个便于归档的公式名",
     "reusable_formula": "一句话描述可复刻公式：谁在什么场景遇到什么冲突，如何反转并转化",
-    "mysticism_variant": "迁移到玄学方向的改编建议",
-    "ai_pet_variant": "迁移到 AI 小动物方向的改编建议",
-    "ai_commerce_variant": "迁移到 AI 带货方向的改编建议",
+    "cross_genre_variants": "至少给出 3 个跨赛道改写方向",
+    "mysticism_variant": "如适用，迁移到玄学方向的安全化改编建议；不适用也说明原因",
+    "ai_pet_variant": "如适用，迁移到 AI 小动物方向的改编建议；不适用也说明原因",
+    "ai_commerce_variant": "如适用，迁移到 AI 带货方向的改编建议；不适用也说明原因",
     "difficulty": "低/中/高，并说明制作难点",
     "priority": "低/中/高，并说明是否值得优先模仿"
   },
+  "standard_remake_template": "将原视频完全脱敏后的通用复刻脚本模板，必须使用 [占位符]",
   "risk_control": {
     "risk_level": "低/中/高",
-    "platform_risks": ["可能的平台、版权、AIGC标识、虚假宣传或迷信承诺风险"],
+    "platform_risks": ["可能的平台、版权、AIGC标识、虚假宣传或绝对化承诺风险"],
     "safe_rewrite": "更稳妥的表达方式"
   },
   "viral_scores": {
@@ -93,88 +168,24 @@ JSON_RESPONSE_CONTRACT = """
   }
 }
 """.strip()
+
 DEFAULT_ANALYSIS_PROMPT = """
-你是一个顶级短视频爆款拆解师、AI 内容编导和带货转化顾问。请分析这个视频，并只返回 JSON，不要返回 Markdown。
+你是泛赛道短视频逆向工程专家。请分析这个视频，并只返回 JSON，不要返回 Markdown。
 
 视频标题或描述：{desc}
 作者：{author}
+视频赛道类型：{genre}
 
-目标：不要只总结内容，要拆出可以沉淀进素材库的爆款公式，方便后续迁移到“玄学、AI 小动物、AI 带货”三个方向。
+目标：把原视频拆成一套可迁移到任意赛道的多模态爆款公式，而不是只服务某个垂类。请综合文本、画面、节奏、评论反馈和数据指标，输出可沉淀进公式库的结构。
 
 拆解原则：
-1. 先判断它属于什么赛道、靠什么火：情绪、猎奇、爽感、信息差、痛点、视觉奇观、评论争议、商品利益点。
-2. 拆开头 3 秒、剧情推进、镜头节奏、文案公式、评论诱因、转化设计。
-3. 不要照抄原视频的具体表达，要抽象成可替换变量和可复用模板。
-4. 如果视频不带货，也要判断它能否迁移成带货内容。
-5. 如果涉及玄学、疗效、财富、情感挽回、夸大效果、真实人物肖像、AI 生成内容等风险，必须指出并给出安全改写。
-6. 评分使用 0-100 的整数，越高越值得优先模仿。
-
-请严格按以下 JSON 结构输出，字段名必须保持英文不变，字段值使用中文：
-{
-  "summary": "一句话概括这个视频的爆款套路和可复用价值",
-  "content_identity": {
-    "track": "内容赛道：玄学/AI小动物/AI带货/泛娱乐/种草/其他",
-    "niche_fit": "是否适合迁移到玄学、AI小动物、AI带货，说明原因",
-    "account_persona": "账号人设、叙事视角或可复制角色"
-  },
-  "core_hook": {
-    "opening_3s": "开头3秒钩子：视频如何抓住注意力，是视觉冲击、悬念提问、利益承诺、情绪共鸣还是反差画面？",
-    "curiosity_gap": "信息差/悬念：观众为什么想继续看？",
-    "emotional_trigger": "情绪触发：焦虑、爽感、治愈、猎奇、共鸣、占便宜、恐惧错过等。",
-    "comment_bait": "评论诱因：哪些表达会让观众想评论、反驳、求链接、求后续或艾特别人？"
-  },
-  "need_context": {
-    "pain_point": "痛点定位：戳中了用户生活中的哪个具体痛点或焦虑？",
-    "application_scene": "应用场景：发生在什么具体生活或工作场景？",
-    "hidden_desire": "隐性欲望：用户真正想获得的安全感、掌控感、陪伴感、变美、变强、好运、效率或省钱是什么？"
-  },
-  "product_power": {
-    "core_benefit": "利益点提炼：展示的核心功能、情绪价值、仪式感或结果承诺是什么？",
-    "trigger_moment": "转化瞬间：哪个瞬间让观众产生我想买/想试/想收藏/想转发的冲动？",
-    "trust_builder": "信任来源：对比、实测、前后变化、专家/达人背书、真实生活细节、评论反馈等。",
-    "product_role": "产品角色：主角、解决方案、剧情道具、仪式感载体、陪伴物、隐形植入或无产品。"
-  },
-  "visual_structure": {
-    "shot_structure": "镜头结构：按时间顺序拆解为钩子 -> 铺垫 -> 冲突 -> 反转/效果 -> 信任 -> 行动号召。",
-    "reusable_elements": "可复用元素：角色、场景、转场、BGM、花字、特效、拍摄角度、AI画面风格、节奏等。",
-    "timeline_beats": ["00:00-00:03：钩子", "00:03-00:08：冲突/铺垫", "00:08-00:15：反转/证明"],
-    "audio_rhythm": "声音节奏：口播速度、BGM情绪、音效点、停顿、字幕密度。"
-  },
-  "copywriting_formula": {
-    "title_formula": "标题公式：用变量占位，比如【人群】千万别在【场景】做【行为】。",
-    "script_formula": "脚本公式：按 1/2/3/4 步写成可替换模板。",
-    "golden_lines": ["可复用金句、字幕或口播句式"],
-    "cta": "行动号召：关注、评论、收藏、私信、求链接、下单等。"
-  },
-  "market_positioning": {
-    "suitable_products": "适合产品：这种套路还适合哪些关联产品？",
-    "target_audience": "目标人群：性别、年龄、职业、心理状态等画像。",
-    "creative_direction": "创作方向：后续适合深耕的细分赛道或风格。"
-  },
-  "replication_plan": {
-    "pattern_name": "给这个爆款结构起一个便于归档的公式名。",
-    "reusable_formula": "一句话公式：谁在什么场景遇到什么冲突，如何反转并转化。",
-    "mysticism_variant": "玄学方向改编：星座、塔罗、运势、能量、民俗、梦境、情绪安慰等怎么套，但避免绝对承诺。",
-    "ai_pet_variant": "AI小动物方向改编：适合什么动物角色、剧情设定、连续剧冲突和视觉风格。",
-    "ai_commerce_variant": "AI带货方向改编：适合什么产品、如何自然植入、如何展示结果和信任。",
-    "difficulty": "低/中/高，并说明制作难点。",
-    "priority": "低/中/高，并说明是否值得优先模仿。"
-  },
-  "risk_control": {
-    "risk_level": "低/中/高",
-    "platform_risks": ["可能的平台、版权、AIGC标识、虚假宣传或迷信承诺风险"],
-    "safe_rewrite": "更稳妥的表达方式。"
-  },
-  "viral_scores": {
-    "viral_potential": 0,
-    "imitation_value": 0,
-    "commerce_value": 0,
-    "comment_potential": 0,
-    "overall": 0
-  }
-}
-
-请尽量具体，优先输出“能直接进入公式库”的内容。不要编造视频里不存在的硬性数据；如果无法判断，请写“未能从视频中确认，但可推测为……”。
+1. 先判断它属于什么赛道、靠什么火：情绪共鸣、争议互动、干货收藏、视觉爽点、反常识、商品利益、关系冲突、地点/价格吸引等。
+2. 拆开头 3 秒、剧情推进、镜头节奏、文案公式、评论诱因、信任建构、转化设计。
+3. 不要照抄原视频具体表达，要抽象成可替换变量和可复用模板。
+4. 如果视频不带货，也要判断它能否迁移成商业内容；如果视频是商业内容，也要拆出非商业赛道可复用的叙事结构。
+5. 对不同赛道使用对应行业术语，但最终字段保持通用。
+6. 如果涉及玄学、疗效、财富、情感挽回、夸大效果、真实人物肖像、AI 生成内容等风险，必须指出并给出安全改写。
+7. 评分使用 0-100 的整数，越高越值得优先复刻。
 """.strip()
 
 
@@ -195,8 +206,31 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         load_dotenv()
         self.config = config or {}
         self.provider = self.config.get("provider") or active_ai_provider(os.getenv("AI_VIDEO_PROVIDER") or "mock")
-        self.gemini_model = self.config.get("gemini_model") or os.getenv("GEMINI_MODEL") or os.getenv("AI_MODEL", "gemini-2.5-flash")
-        self.gemini_access_mode = self.config.get("gemini_access_mode") or os.getenv("GEMINI_ACCESS_MODE") or os.getenv("AI_ACCESS_MODE") or "official"
+        self.gemini_model = (
+            self.config.get("gemini_model")
+            or os.getenv("AI_VIDEO_VISION_MODEL")
+            or os.getenv("GEMINI_MODEL")
+            or os.getenv("YUNWU_MODEL")
+            or os.getenv("AI_MODEL", "gemini-2.5-flash")
+        )
+        self.gemini_access_mode = "relay"
+        self.summary_provider = (
+            self.config.get("summary_provider")
+            or os.getenv("AI_VIDEO_SUMMARY_PROVIDER")
+            or os.getenv("AI_VIDEO_GLOBAL_SUMMARY_PROVIDER")
+            or ""
+        ).lower()
+        self.summary_model = (
+            self.config.get("summary_model")
+            or os.getenv("AI_VIDEO_SUMMARY_MODEL")
+            or os.getenv("DEEPSEEK_MODEL")
+            or "deepseek-v4-flash"
+        )
+        self.summary_fallback_provider = (
+            self.config.get("summary_fallback_provider")
+            or os.getenv("AI_VIDEO_SUMMARY_FALLBACK_PROVIDER")
+            or "vision"
+        ).lower()
         self.analysis_prompt = self.config.get("analysis_prompt") or os.getenv("AI_VIDEO_ANALYSIS_PROMPT") or DEFAULT_ANALYSIS_PROMPT
         self.pipeline_mode = (self.config.get("pipeline_mode") or os.getenv("AI_VIDEO_PIPELINE_MODE") or "auto").lower()
         self.output_dir = Path(
@@ -210,15 +244,26 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         provider = cfg.get("provider") or os.getenv("AI_VIDEO_PROVIDER", self.provider)
         errors = []
         if provider == "gemini":
-            access_mode = cfg.get("gemini_access_mode") or os.getenv("GEMINI_ACCESS_MODE") or os.getenv("AI_ACCESS_MODE", self.gemini_access_mode)
-            if access_mode == "relay" and not (os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
+            access_mode = "relay"
+            if self._uses_openai_compatible_relay():
+                if not (os.getenv("AI_VIDEO_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
+                    errors.append("Missing AI_VIDEO_RELAY_API_KEY")
+            elif not (os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
                 errors.append("Missing GEMINI_RELAY_API_KEY")
-            if access_mode != "relay" and not (os.getenv("GEMINI_API_KEY") or os.getenv("AI_NATIVE_API_KEY")):
-                errors.append("Missing GEMINI_API_KEY")
-        if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
-            errors.append("Missing OPENAI_API_KEY")
+        if provider == "openai" and not (os.getenv("OPENAI_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY")):
+            errors.append("Missing OPENAI_RELAY_API_KEY")
+        if provider == "yunwu" and self._uses_openai_compatible_relay(provider):
+            if not (os.getenv("AI_VIDEO_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
+                errors.append("Missing AI_VIDEO_RELAY_API_KEY")
         if provider == "local" and not os.getenv("LOCAL_VIDEO_MODEL_ENDPOINT"):
             errors.append("Missing LOCAL_VIDEO_MODEL_ENDPOINT")
+        summary_provider = (cfg.get("summary_provider") or os.getenv("AI_VIDEO_SUMMARY_PROVIDER") or "").lower()
+        if summary_provider == "deepseek" and not (os.getenv("AI_VIDEO_SUMMARY_API_KEY") or os.getenv("DEEPSEEK_API_KEY")):
+            errors.append("Missing DEEPSEEK_API_KEY")
+        if (os.getenv("AI_VIDEO_TRANSCRIBER", "auto").lower() in {"doubao", "doubao_file_asr", "volcengine", "volcengine_asr"}):
+            from integrations.ai_video_analysis.doubao_asr import validate_doubao_asr_environment
+
+            errors.extend(validate_doubao_asr_environment())
         return errors
 
     def run(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -249,7 +294,11 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
                 progress(60, "生成 mock 拆解结果")
             result = self._mock_result(video)
             status = "done"
-        elif selected_provider == "gemini" or self._uses_gemini_relay_provider(selected_provider):
+        elif (
+            selected_provider == "gemini"
+            or self._uses_gemini_relay_provider(selected_provider)
+            or self._uses_openai_compatible_relay(selected_provider)
+        ):
             result = self._analysis_result(video, selected_provider=selected_provider, job_id=job_id, progress=progress, prompt=prompt)
             status = "done"
         else:
@@ -316,6 +365,7 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         max_segments = int(os.getenv("AI_VIDEO_MAX_SEGMENTS", "18"))
         selected_segments = segments[:max_segments]
         evidence_path = Path(str(evidence.get("evidence_path") or ""))
+        task_id = evidence_path.parent.name if evidence_path.parent else ""
         checkpoint_dir = (evidence_path.parent if evidence_path.parent else self.output_dir) / "segment_breakdowns"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         resume_enabled = os.getenv("AI_VIDEO_RESUME_ENABLED", "true").lower() not in {"0", "false", "no"}
@@ -323,8 +373,10 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             skipped = len(segments) - len(selected_segments)
             suffix = f"，跳过 {skipped} 个超出上限片段" if skipped > 0 else ""
             progress(60, f"准备分段 AI 拆解：{len(selected_segments)} 个片段{suffix}")
+        genre_context = self._prompt_context(video, evidence)
         segment_breakdowns = []
         for index, segment in enumerate(selected_segments, start=1):
+            segment.setdefault("genre", genre_context["genre"])
             checkpoint_path = checkpoint_dir / f"{segment.get('segment_id') or index}.json"
             if resume_enabled and checkpoint_path.exists():
                 try:
@@ -342,7 +394,32 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             image_paths = self._segment_image_paths(segment)
             if progress and image_paths:
                 progress(60 + int(20 * (index - 1) / max(1, len(selected_segments))), f"附带关键帧网格图：{Path(image_paths[0]).name}")
-            text = self._generate_text_json(prompt, action="请求模型生成分段拆解", image_paths=image_paths)
+            started = time.perf_counter()
+            try:
+                text = self._generate_text_json(prompt, action="请求模型生成分段拆解", image_paths=image_paths)
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                self._record_model_run(
+                    task_id=task_id,
+                    chunk_id=str(segment.get("segment_id") or index),
+                    purpose="segment_breakdown",
+                    input_uri=str((segment.get("keyframe_grid") or {}).get("image_path") or ""),
+                    output_uri=str(checkpoint_path),
+                    latency_ms=latency_ms,
+                    usage=self._consume_last_model_usage(),
+                )
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                self._record_model_run(
+                    task_id=task_id,
+                    chunk_id=str(segment.get("segment_id") or index),
+                    purpose="segment_breakdown",
+                    input_uri=str((segment.get("keyframe_grid") or {}).get("image_path") or ""),
+                    output_uri=str(checkpoint_path),
+                    status="failed",
+                    latency_ms=latency_ms,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                )
+                raise
             parsed = self._parse_segment_json(text, segment)
             parsed["checkpoint_path"] = str(checkpoint_path)
             checkpoint_path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -363,13 +440,63 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
                     progress(92, "断点续跑：复用全局爆款公式汇总")
             except Exception:
                 global_prompt = self._global_breakdown_prompt(video, evidence=evidence, segment_breakdowns=segment_breakdowns)
-                global_text = self._generate_text_json(global_prompt, action="请求模型汇总全局爆款公式")
+                started = time.perf_counter()
+                try:
+                    global_text = self._generate_global_summary_json(global_prompt, action="请求模型汇总全局爆款公式")
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+                    self._record_model_run(
+                        task_id=task_id,
+                        purpose="global_breakdown",
+                        input_uri=str(evidence_path),
+                        output_uri=str(global_checkpoint),
+                        latency_ms=latency_ms,
+                        usage=self._consume_last_model_usage(),
+                        provider=self._last_model_provider("global_breakdown"),
+                        model=self._last_model_name("global_breakdown"),
+                    )
+                except Exception as exc:
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+                    self._record_model_run(
+                        task_id=task_id,
+                        purpose="global_breakdown",
+                        input_uri=str(evidence_path),
+                        output_uri=str(global_checkpoint),
+                        status="failed",
+                        latency_ms=latency_ms,
+                        error_message=f"{type(exc).__name__}: {exc}",
+                    )
+                    raise
                 result = self._parse_model_json(global_text)
                 result["checkpoint_path"] = str(global_checkpoint)
                 global_checkpoint.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         else:
             global_prompt = self._global_breakdown_prompt(video, evidence=evidence, segment_breakdowns=segment_breakdowns)
-            global_text = self._generate_text_json(global_prompt, action="请求模型汇总全局爆款公式")
+            started = time.perf_counter()
+            try:
+                global_text = self._generate_global_summary_json(global_prompt, action="请求模型汇总全局爆款公式")
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                self._record_model_run(
+                    task_id=task_id,
+                    purpose="global_breakdown",
+                    input_uri=str(evidence_path),
+                    output_uri=str(global_checkpoint),
+                    latency_ms=latency_ms,
+                    usage=self._consume_last_model_usage(),
+                    provider=self._last_model_provider("global_breakdown"),
+                    model=self._last_model_name("global_breakdown"),
+                )
+            except Exception as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                self._record_model_run(
+                    task_id=task_id,
+                    purpose="global_breakdown",
+                    input_uri=str(evidence_path),
+                    output_uri=str(global_checkpoint),
+                    status="failed",
+                    latency_ms=latency_ms,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                )
+                raise
             result = self._parse_model_json(global_text)
             result["checkpoint_path"] = str(global_checkpoint)
             global_checkpoint.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -378,17 +505,125 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         result["segment_breakdowns"] = segment_breakdowns
         return result
 
+    def _record_model_run(
+        self,
+        *,
+        task_id: str,
+        purpose: str,
+        chunk_id: str = "",
+        input_uri: str = "",
+        output_uri: str = "",
+        status: str = "done",
+        latency_ms: int = 0,
+        error_message: str = "",
+        usage: dict[str, Any] | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        if not task_id:
+            return
+        usage = usage or {}
+        try:
+            run_meta = self._model_run_meta_from_usage(usage)
+            record_ai_model_run(
+                task_id=task_id,
+                chunk_id=chunk_id,
+                provider=provider or active_ai_provider(self.provider) or self.provider,
+                model=model or self.gemini_model,
+                purpose=purpose,
+                prompt_version=os.getenv("AI_VIDEO_PROMPT_VERSION", "default"),
+                input_uri=input_uri,
+                output_uri=output_uri,
+                status=status,
+                latency_ms=latency_ms,
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                error_message=error_message,
+                meta=run_meta,
+            )
+        except Exception:
+            pass
+
+    def _model_run_meta_from_usage(self, usage: dict[str, Any]) -> dict[str, Any]:
+        allowed_keys = (
+            "action",
+            "fallback_from",
+            "fallback_error",
+            "fallback_provider",
+            "latency_ms",
+        )
+        return {key: usage.get(key) for key in allowed_keys if usage.get(key) not in (None, "")}
+
+    def _consume_last_model_usage(self) -> dict[str, Any]:
+        usage = getattr(self, "_last_model_usage", {}) or {}
+        self._last_model_usage = {}
+        return usage
+
+    def _last_model_provider(self, fallback: str = "") -> str:
+        return str(getattr(self, "_last_model_provider_value", "") or fallback)
+
+    def _last_model_name(self, fallback: str = "") -> str:
+        return str(getattr(self, "_last_model_name_value", "") or fallback)
+
+    def _normalize_genre(self, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        lowered = raw.lower()
+        return GENRE_ALIASES.get(lowered) or GENRE_ALIASES.get(raw) or lowered
+
+    def _infer_genre(self, video: dict[str, Any], evidence: dict[str, Any] | None = None) -> str:
+        evidence = evidence or {}
+        metadata = evidence.get("metadata") if isinstance(evidence.get("metadata"), dict) else {}
+        target_context = video.get("douyin_target_context") if isinstance(video.get("douyin_target_context"), dict) else {}
+        content_identity = video.get("content_identity") if isinstance(video.get("content_identity"), dict) else {}
+        candidates = [
+            video.get("genre"),
+            metadata.get("genre"),
+            target_context.get("genre"),
+            content_identity.get("track"),
+            video.get("category"),
+            video.get("desc"),
+            video.get("title"),
+        ]
+        for value in candidates:
+            genre = self._normalize_genre(value)
+            if genre in GENRE_PROFILES and genre != "generic":
+                return genre
+        combined = " ".join(str(item or "") for item in candidates if item).lower()
+        for alias, canonical in GENRE_ALIASES.items():
+            if alias.lower() in combined:
+                return canonical
+        return self._normalize_genre(candidates[0]) if candidates and candidates[0] else "generic"
+
+    def _genre_profile(self, genre: str) -> dict[str, str]:
+        normalized = self._normalize_genre(genre) or "generic"
+        profile = GENRE_PROFILES.get(normalized) or GENRE_PROFILES["generic"]
+        return {"key": normalized, **profile}
+
+    def _prompt_context(self, video: dict[str, Any], evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+        genre = self._infer_genre(video, evidence)
+        return {
+            "genre": genre,
+            "genre_profile": self._genre_profile(genre),
+        }
+
     def _segment_breakdown_prompt(self, video: dict[str, Any], segment: dict[str, Any]) -> str:
         desc = video.get("desc") or video.get("title") or ""
+        context = self._prompt_context(video)
+        profile = context["genre_profile"]
         keyframes = [
             {"time": frame.get("time_label"), "image_path": frame.get("image_path")}
             for frame in (segment.get("keyframes") or [])
         ]
         grid = (segment.get("keyframe_grid") or {}).get("image_path") if isinstance(segment.get("keyframe_grid"), dict) else ""
         return f"""
-你是短视频爆款拆解师。请只返回合法 JSON，不要返回 Markdown。
+你是通用短视频视听语言解构专家。请只返回合法 JSON，不要返回 Markdown。
 
 视频标题：{desc}
+视频赛道类型：{profile["label"]} ({context["genre"]})
+赛道典型节奏：{profile["timeline"]}
+本赛道重点观察维度：{profile["dimensions"]}
 当前片段：{segment.get("time_range")}
 片段转写：
 {str(segment.get("transcript") or "")[:7000]}
@@ -403,11 +638,15 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
 {{
   "segment_id": "{segment.get("segment_id")}",
   "time_range": "{segment.get("time_range")}",
-  "segment_role": "开头钩子/冲突建立/信息铺垫/证明演示/情绪爆点/带货转化/结尾收口/其他",
+  "genre": "{context["genre"]}",
+  "segment_role": "开头钩子/冲突建立/信息铺垫/证明演示/情绪爆点/转化推动/结尾收口/其他",
+  "visual_style": "画面视觉手法，如双机位切换、近景大头、B面素材、绿幕、混剪、特写、对比图；无法确认则写无法确认",
+  "audio_pacing": "声音特征，如语速突变、BGM卡点、音效、停顿、字幕密度",
+  "narrative_technique": "本段叙事技巧，如提出疑问、展示痛点、给出反转、硬核科普、视觉爽点、卖点展现",
+  "retention_mechanism": "本段靠什么留住用户，如视觉冲击、好奇心、情绪共鸣、利益诱导、争议站队",
   "hook": "这一段如何抓注意力",
   "conflict_or_value": "这一段制造的冲突、价值或信息差",
   "emotion": "情绪触发",
-  "visual_signal": "从关键帧可判断的视觉信号；无法确认则写无法确认",
   "copywriting_pattern": "可复用文案句式",
   "commerce_signal": "产品、购买、收藏、私信、信任背书等转化信号",
   "comment_trigger": "评论诱因",
@@ -427,16 +666,28 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
     ) -> str:
         desc = video.get("desc") or video.get("title") or ""
         metadata = evidence.get("metadata") or {}
+        context = self._prompt_context(video, evidence)
+        profile = context["genre_profile"]
         payload = {
             "metadata": metadata,
+            "genre_context": context,
+            "douyin_target": evidence.get("douyin_target") or video.get("douyin_target_context") or {},
             "segment_breakdowns": segment_breakdowns,
             "transcript_excerpt": str((evidence.get("transcript") or {}).get("full_text") or "")[:12000],
         }
+        base_prompt = self._clean_prompt(self.analysis_prompt)
+        base_prompt = (
+            base_prompt
+            .replace("{desc}", desc)
+            .replace("{author}", str(metadata.get("author") or "未知"))
+            .replace("{genre}", profile["label"])
+        )
         return "\n\n".join(
             [
-                self._clean_prompt(self.analysis_prompt).replace("{desc}", desc).replace("{author}", str(metadata.get("author") or "未知")),
+                base_prompt,
+                f"赛道上下文：{json.dumps(context, ensure_ascii=False)}",
                 VIRAL_BREAKDOWN_GUIDE,
-                "下面是已由音频转写和分段分析得到的证据包，请基于证据汇总全局爆款公式，不要编造证据中不存在的事实：",
+                "下面是已由音频转写、评论数据和分段多模态分析得到的证据包。请基于证据汇总全局爆款公式，不要编造证据中不存在的事实。请重点输出爆款公式、文本心理学、视觉节奏模板和脱敏后的 standard_remake_template：",
                 json.dumps(payload, ensure_ascii=False),
                 JSON_RESPONSE_CONTRACT,
             ]
@@ -450,9 +701,19 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         return []
 
     def _generate_text_json(self, prompt: str, *, action: str, image_paths: list[str] | None = None) -> str:
+        self._last_model_provider_value = active_ai_provider(self.provider) or self.provider
+        self._last_model_name_value = self.gemini_model
+        if self._uses_openai_compatible_relay():
+            return self._generate_text_with_openai_compatible_relay(
+                prompt=prompt,
+                model=self.gemini_model,
+                action=action,
+                image_paths=image_paths,
+            )
         if self._uses_gemini_relay_provider(active_ai_provider("")) or (self.gemini_access_mode or "").lower() == "relay":
             return self._generate_text_with_relay(prompt=prompt, model=self.gemini_model, action=action, image_paths=image_paths)
 
+        raise RuntimeError("Gemini official/native access is disabled. Configure Yunwu or another relay provider.")
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("AI_NATIVE_API_KEY")
         if not api_key:
             raise RuntimeError("Set GEMINI_API_KEY in .env before using Gemini text analysis.")
@@ -482,27 +743,82 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         )
         return response.text
 
-    def _generate_text_with_relay(self, *, prompt: str, model: str, action: str, image_paths: list[str] | None = None) -> str:
-        base_url = self._relay_base_url()
-        token = self._relay_token()
-        if not token:
-            raise RuntimeError("Set GEMINI_RELAY_API_KEY or AI_RELAY_API_KEY before using Gemini relay.")
-        url = f"{base_url}/v1beta/models/{model}:generateContent?key="
-        parts: list[dict[str, Any]] = [{"text": prompt}]
-        for image_path in image_paths or []:
-            path = Path(image_path)
-            if not path.exists():
-                continue
-            mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-            image_data = base64.b64encode(path.read_bytes()).decode("ascii")
-            parts.append({"inline_data": {"mime_type": mime_type, "data": image_data}})
-        payload = {
-            "systemInstruction": {"parts": [{"text": "你是短视频爆款拆解助手。必须只返回合法 JSON。"}]},
-            "contents": [{"parts": parts}],
-            "generationConfig": {"responseMimeType": "application/json"},
+    def _generate_global_summary_json(self, prompt: str, *, action: str) -> str:
+        if self.summary_provider == "deepseek":
+            try:
+                return self._generate_text_with_deepseek(prompt=prompt, action=action)
+            except Exception as exc:
+                if self.summary_fallback_provider not in {"vision", "gemini", "relay"}:
+                    raise
+                fallback_text = self._generate_text_json(prompt, action=f"{action} (fallback)")
+                self._last_model_usage["fallback_from"] = "deepseek"
+                self._last_model_usage["fallback_error"] = f"{type(exc).__name__}: {exc}"
+                self._last_model_usage["fallback_provider"] = self._last_model_provider("global_breakdown")
+                return fallback_text
+        return self._generate_text_json(prompt, action=action)
+
+    def _generate_text_with_openai_compatible_relay(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        action: str,
+        image_paths: list[str] | None = None,
+    ) -> str:
+        client = OpenAICompatibleRelayClient(model=model)
+        started = time.perf_counter()
+        response = client.generate_text(
+            prompt=prompt,
+            image_paths=image_paths or [],
+            model=model,
+            system_prompt="You are a short-video commercial analysis assistant. Return valid JSON only.",
+        )
+        self._last_model_usage = {
+            "input_tokens": int(response.usage.get("prompt_tokens") or response.usage.get("input_tokens") or 0),
+            "output_tokens": int(response.usage.get("completion_tokens") or response.usage.get("output_tokens") or 0),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "action": action,
         }
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        return self._relay_post_with_retry(url=url, payload=payload, headers=headers, progress=None, action=action)
+        self._last_model_provider_value = "openai_compatible_relay"
+        self._last_model_name_value = model
+        return response.text
+
+    def _generate_text_with_deepseek(self, *, prompt: str, action: str) -> str:
+        client = DeepSeekChatClient(model=self.summary_model)
+        started = time.perf_counter()
+        response = client.generate_summary(prompt=prompt, model=self.summary_model)
+        self._last_model_usage = {
+            "input_tokens": int(response.usage.get("prompt_tokens") or response.usage.get("input_tokens") or 0),
+            "output_tokens": int(response.usage.get("completion_tokens") or response.usage.get("output_tokens") or 0),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "action": action,
+        }
+        self._last_model_provider_value = "deepseek"
+        self._last_model_name_value = self.summary_model
+        return response.text
+
+    def _generate_text_with_relay(self, *, prompt: str, model: str, action: str, image_paths: list[str] | None = None) -> str:
+        client = GeminiGenerateContentRelayClient(
+            base_url=self._relay_base_url(),
+            api_key=self._relay_token(),
+            model=model,
+        )
+        started = time.perf_counter()
+        response = client.generate_text(
+            prompt=prompt,
+            image_paths=image_paths or [],
+            model=model,
+            system_instruction="You are a short-video commercial analysis assistant. Return valid JSON only.",
+        )
+        self._last_model_usage = {
+            "input_tokens": int(response.usage.get("promptTokenCount") or response.usage.get("prompt_tokens") or response.usage.get("input_tokens") or 0),
+            "output_tokens": int(response.usage.get("candidatesTokenCount") or response.usage.get("completion_tokens") or response.usage.get("output_tokens") or 0),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "action": action,
+        }
+        self._last_model_provider_value = "gemini_generate_content_relay"
+        self._last_model_name_value = model
+        return response.text
 
     def _parse_segment_json(self, text: str, segment: dict[str, Any]) -> dict[str, Any]:
         cleaned = text.strip()
@@ -516,6 +832,15 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             data = {"summary": cleaned}
         data.setdefault("segment_id", segment.get("segment_id"))
         data.setdefault("time_range", segment.get("time_range"))
+        data.setdefault("genre", segment.get("genre") or "")
+        if "visual_style" not in data:
+            data["visual_style"] = data.get("visual_signal") or ""
+        if "audio_pacing" not in data:
+            data["audio_pacing"] = data.get("audio_rhythm") or data.get("audio_signal") or ""
+        if "narrative_technique" not in data:
+            data["narrative_technique"] = data.get("copywriting_pattern") or data.get("segment_role") or ""
+        if "retention_mechanism" not in data:
+            data["retention_mechanism"] = data.get("hook") or data.get("comment_trigger") or data.get("replicable_point") or ""
         return data
 
     def _extract_highlight_screenshots(
@@ -612,10 +937,16 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         prompt: str | None = None,
     ) -> dict[str, Any]:
         prompt = prompt or self._analysis_prompt(video)
-        access_mode = (os.getenv("GEMINI_ACCESS_MODE") or os.getenv("AI_ACCESS_MODE") or self.gemini_access_mode).lower()
+        access_mode = "relay"
+        if self._uses_openai_compatible_relay():
+            raise RuntimeError(
+                "OpenAI-compatible relay does not support direct full-video upload in this adapter. "
+                "Use AI_VIDEO_PIPELINE_MODE=evidence so the system sends transcript chunks plus keyframe grids."
+            )
         if access_mode == "relay" or self._uses_gemini_relay_provider(active_ai_provider("")):
             return self._gemini_relay_result(video, progress=progress, prompt=prompt)
 
+        raise RuntimeError("Gemini official/native access is disabled. Configure Yunwu or another relay provider.")
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("AI_NATIVE_API_KEY")
         if not api_key:
             raise RuntimeError("Set GEMINI_API_KEY in .env before using Gemini video analysis.")
@@ -690,42 +1021,46 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         action: str,
         system_instruction: str | None = None,
     ) -> str:
-        base_url = self._relay_base_url()
-        token = self._relay_token()
-        mime_type = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
-        video_data = base64.b64encode(video_path.read_bytes()).decode("ascii")
-        url = f"{base_url}/v1beta/models/{model}:generateContent?key="
-        payload = {
-            "systemInstruction": {
-                "parts": [
-                    {
-                        "text": system_instruction
-                        or "你是短视频商业拆解助手。必须严格按用户要求分析视频，并只返回合法 JSON。"
-                    }
-                ]
-            },
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {"inline_data": {"mime_type": mime_type, "data": video_data}},
-                    ]
-                }
-            ],
-            "generationConfig": {"responseMimeType": "application/json"},
+        client = GeminiGenerateContentRelayClient(
+            base_url=self._relay_base_url(),
+            api_key=self._relay_token(),
+            model=model,
+        )
+        started = time.perf_counter()
+        response = client.generate_text(
+            prompt=prompt,
+            video_path=video_path,
+            model=model,
+            system_instruction=system_instruction
+            or "You are a short-video commercial analysis assistant. Analyze the video and return valid JSON only.",
+        )
+        self._last_model_usage = {
+            "input_tokens": int(response.usage.get("promptTokenCount") or response.usage.get("prompt_tokens") or response.usage.get("input_tokens") or 0),
+            "output_tokens": int(response.usage.get("candidatesTokenCount") or response.usage.get("completion_tokens") or response.usage.get("output_tokens") or 0),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "action": action,
         }
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-        return self._relay_post_with_retry(url=url, payload=payload, headers=headers, progress=progress, action=action)
+        self._last_model_provider_value = "gemini_generate_content_relay"
+        self._last_model_name_value = model
+        return response.text
 
     def _uses_gemini_relay_provider(self, provider: str) -> bool:
         if provider == "simple_relay":
             return os.getenv("SIMPLE_RELAY_API_FORMAT", "gemini_generate_content") == "gemini_generate_content"
         if provider == "yunwu":
-            return os.getenv("YUNWU_API_FORMAT", "gemini_generate_content") == "gemini_generate_content"
+            api_format = (os.getenv("AI_VIDEO_RELAY_API_FORMAT") or os.getenv("YUNWU_API_FORMAT", "gemini_generate_content")).lower()
+            return api_format in {"gemini_generate_content", "generate_content"}
         return False
+
+    def _uses_openai_compatible_relay(self, provider: str | None = None) -> bool:
+        api_format = (
+            os.getenv("AI_VIDEO_RELAY_API_FORMAT")
+            or os.getenv("YUNWU_API_FORMAT")
+            or os.getenv("SIMPLE_RELAY_API_FORMAT")
+            or ""
+        ).lower()
+        selected_provider = provider or os.getenv("AI_VIDEO_VISION_PROVIDER") or active_ai_provider("")
+        return api_format in {"openai_chat_completions", "chat_completions"} or selected_provider == "yunwu_openai"
 
     def _relay_base_url(self) -> str:
         if active_ai_provider("") == "yunwu":
@@ -738,8 +1073,8 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         if active_ai_provider("") == "yunwu":
             return os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY") or ""
         if self._uses_gemini_relay_provider(active_ai_provider("")):
-            return os.getenv("SIMPLE_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY") or ""
-        return os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY") or ""
+            return os.getenv("SIMPLE_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY") or ""
+        return os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY") or ""
 
     def _relay_post_with_retry(
         self,
@@ -846,12 +1181,21 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         desc = video.get("desc") or video.get("title") or ""
         author = video.get("author") or {}
         author_name = author.get("nickname") if isinstance(author, dict) else author
+        context = self._prompt_context(video)
+        profile = context["genre_profile"]
         prompt = self._clean_prompt(self.analysis_prompt)
-        prompt = prompt.replace("{desc}", desc).replace("{author}", author_name or "未知")
+        prompt = (
+            prompt
+            .replace("{desc}", desc)
+            .replace("{author}", author_name or "未知")
+            .replace("{genre}", profile["label"])
+        )
         metadata = {
             "video_title": desc,
             "author": author_name or "未知",
             "aweme_id": video.get("aweme_id") or video.get("id") or "",
+            "genre": context["genre"],
+            "genre_profile": profile,
         }
         return "\n\n".join(
             [
@@ -883,6 +1227,7 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         return self._normalize_analysis_result(data, raw_text=cleaned)
 
     def _normalize_analysis_result(self, data: dict[str, Any], raw_text: str = "") -> dict[str, Any]:
+        genre = self._first_text(data, ["genre", "赛道", "内容赛道"])
         summary = self._first_text(data, ["summary", "摘要", "视频摘要", "一句话摘要"])
         content_identity = self._first_dict(data, ["content_identity", "内容定位", "赛道判断"])
         core_hook = self._first_dict(data, ["core_hook", "核心钩子", "核心勾子"])
@@ -896,6 +1241,7 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         viral_scores = self._first_dict(data, ["viral_scores", "爆款评分", "评分"])
 
         return {
+            "genre": genre or self._first_text(content_identity, ["track", "内容赛道", "赛道"]),
             "summary": summary,
             "content_identity": {
                 "track": self._first_text(content_identity, ["track", "内容赛道", "赛道"]),
@@ -943,12 +1289,14 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             "replication_plan": {
                 "pattern_name": self._first_text(replication_plan, ["pattern_name", "公式名", "模式名"]),
                 "reusable_formula": self._first_text(replication_plan, ["reusable_formula", "可复刻公式", "复用公式"]),
+                "cross_genre_variants": self._first_list_text(replication_plan, ["cross_genre_variants", "跨赛道改写", "跨赛道变体"]),
                 "mysticism_variant": self._first_text(replication_plan, ["mysticism_variant", "玄学方向", "玄学改编"]),
                 "ai_pet_variant": self._first_text(replication_plan, ["ai_pet_variant", "AI小动物方向", "小动物改编"]),
                 "ai_commerce_variant": self._first_text(replication_plan, ["ai_commerce_variant", "AI带货方向", "带货改编"]),
                 "difficulty": self._first_text(replication_plan, ["difficulty", "制作难度", "难度"]),
                 "priority": self._first_text(replication_plan, ["priority", "优先级", "模仿优先级"]),
             },
+            "standard_remake_template": self._first_text(data, ["standard_remake_template", "通用复刻脚本模板", "复刻脚本模板", "脱敏脚本模板"]),
             "risk_control": {
                 "risk_level": self._first_text(risk_control, ["risk_level", "风险等级"]),
                 "platform_risks": self._first_list_text(risk_control, ["platform_risks", "平台风险", "风险点"]),
@@ -1018,11 +1366,14 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         desc = video.get("desc") or video.get("title") or "未命名视频"
         author = video.get("author") or {}
         author_name = author.get("nickname") if isinstance(author, dict) else author
+        context = self._prompt_context(video)
+        profile = context["genre_profile"]
         return {
-            "summary": f"待接入真实模型。当前已接收视频《{desc}》，作者：{author_name or '未知'}；真实模型会输出爆款公式、三赛道改编和风险控制。",
+            "genre": context["genre"],
+            "summary": f"待接入真实模型。当前已接收视频《{desc}》，作者：{author_name or '未知'}；真实模型会按{profile['label']}赛道输出爆款公式、跨赛道改编和风险控制。",
             "content_identity": {
-                "track": "待模型识别：玄学/AI小动物/AI带货/泛娱乐/种草/其他。",
-                "niche_fit": "判断该视频是否适合迁移到玄学、AI小动物、AI带货，并说明迁移原因。",
+                "track": profile["label"],
+                "niche_fit": "判断该结构适合迁移到哪些赛道，并说明可替换变量。",
                 "account_persona": "提炼账号人设、叙事视角或可复制角色。",
             },
             "core_hook": {
@@ -1043,7 +1394,7 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
                 "product_role": "判断产品是主角、解决方案、剧情道具、仪式感载体、陪伴物还是隐形植入。",
             },
             "visual_structure": {
-                "shot_structure": "按痛点切入 -> 解决方案 -> 效果展示 -> 信任背书 -> 行动号召拆解镜头流。",
+                "shot_structure": f"按赛道典型节奏拆解：{profile['timeline']}。",
                 "reusable_elements": "提取可复刻的转场、BGM、花字、特效、拍摄角度和节奏。",
                 "timeline_beats": "00:00-00:03：钩子；00:03-00:08：冲突/铺垫；00:08-00:15：反转/证明。",
                 "audio_rhythm": "拆出口播速度、BGM情绪、音效点、停顿和字幕密度。",
@@ -1062,12 +1413,14 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             "replication_plan": {
                 "pattern_name": "为该爆款结构命名，方便归档到公式库。",
                 "reusable_formula": "总结成：谁在什么场景遇到什么冲突，如何反转并转化。",
+                "cross_genre_variants": "输出至少 3 个跨赛道改写方向，例如美妆、知识科普、剧情、探店、好物推荐。",
                 "mysticism_variant": "迁移到玄学方向，但避免绝对化财富、情感、疗效承诺。",
                 "ai_pet_variant": "迁移到 AI 小动物方向，设计动物角色、连续剧情和反差冲突。",
                 "ai_commerce_variant": "迁移到 AI 带货方向，匹配产品、植入场景、证明方式和转化口令。",
                 "difficulty": "低/中/高，说明制作难点。",
                 "priority": "低/中/高，说明是否值得优先模仿。",
             },
+            "standard_remake_template": "【开头】[人群] 在 [场景] 遇到 [痛点/冲突]；【推进】用 [证据/对比/反转] 建立可信度；【收束】给出 [解决路径/情绪释放/利益点]；【CTA】引导 [评论/收藏/求链接/到店/下单]。",
             "risk_control": {
                 "risk_level": "待模型判断。",
                 "platform_risks": "识别 AIGC 标识、版权、虚假宣传、迷信承诺、疗效承诺等风险。",

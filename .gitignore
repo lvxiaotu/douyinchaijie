@@ -8,5 +8,7 @@ __pycache__/
 .DS_Store
 ffmpeg-*-essentials_build/
 data/runtime/
+_ref_*/
+tikhub_sample.json
 integrations/*/vendor/*
 !integrations/*/vendor/.gitkeep

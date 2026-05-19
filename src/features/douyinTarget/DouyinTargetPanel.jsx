@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge } from "../../components/common/index";
 import {
   createDouyinTargetSet,
+  collectDouyinTargetInteractions,
   collectDouyinTargetVideos,
   deleteDouyinTargetSet,
+  deleteDouyinTargetVideoAnalysis,
   enqueueDouyinTargetAnalysis,
   fetchDouyinTargetSet,
   fetchDouyinTargetSets,
@@ -49,17 +51,50 @@ function analysisStatusLabel(status) {
   return labels[status || "none"] || status;
 }
 
+function commentStatusLabel(video) {
+  const status = video.comment_snapshot_status || "none";
+  const comments = Number(video.comment_saved_count || 0);
+  const replies = Number(video.reply_saved_count || 0);
+  if (status === "done") return `评论已保存 ${comments} 条 / 回复 ${replies} 条`;
+  if (status === "failed") return "评论采集失败";
+  if (status === "running") return "评论采集中";
+  return "评论未采集";
+}
+
+function commentStatusTone(video) {
+  const status = video.comment_snapshot_status || "none";
+  if (status === "done") return "done";
+  if (status === "failed") return "error";
+  if (status === "running") return "running";
+  return "draft";
+}
+
+function analysisStatusTone(status) {
+  if (status === "done") return "done";
+  if (status === "failed") return "error";
+  if (status === "pending" || status === "running") return "running";
+  return "draft";
+}
+
+function hasAnalysisRecord(video) {
+  const status = video.analysis_status || "none";
+  return status !== "none" || Boolean(video.analysis_task_id);
+}
+
 function busyLabel(busy) {
   const labels = {
-    search: "正在搜索账号，TikHub 可能需要几十秒，请稍等...",
+    search: "正在持续搜索账号，直到达到目标数量或没有更多结果...",
     "search-more": "正在加载下一页账号...",
     collect: "正在逐个账号采集作品，账号较多时会比较久，请保持页面打开...",
+    interactions: "正在补全评论、回复和互动洞察，视频较多时会比较久...",
+    "interaction-one": "正在补全单条视频互动数据...",
     enqueue: "正在加入 AI 拆解任务池...",
     sync: "正在同步拆解结果...",
     save: "正在保存选中账号...",
     "create-set": "正在创建合集...",
     "update-set": "正在保存合集修改...",
     "delete-set": "正在删除合集...",
+    "delete-analysis": "正在删除拆解记录...",
   };
   return labels[busy] || "";
 }
@@ -93,6 +128,7 @@ function createSetDraft(keyword) {
 
 const InitialKeyword = "可爱";
 const SearchPageSize = 20;
+const MaxContinuousSearchPages = 25;
 
 function mergeUniqueUsers(current, incoming) {
   const seen = new Set(current.map(userId).filter(Boolean));
@@ -115,8 +151,14 @@ function appendSelectedUserIds(current, items) {
   return next;
 }
 
+function targetAccountCount(filters) {
+  const count = Number(filters.targetAccountCount || 0);
+  if (!Number.isFinite(count)) return SearchPageSize;
+  return Math.max(1, Math.min(Math.floor(count), 500));
+}
+
 function hasMoreSearchResults(result, items) {
-  const hasMore = result?.pagination?.has_more ?? result?.normalized?.has_more;
+  const hasMore = result?.has_more ?? result?.pagination?.has_more ?? result?.normalized?.has_more;
   if (hasMore === false || hasMore === 0) return false;
   if (hasMore === true || hasMore === 1) return true;
   return items.length > 0;
@@ -137,6 +179,11 @@ const FollowerRanges = [
   ["10-20w", "10-20W粉丝"],
   ["20-50w", "20-50W粉丝"],
   ["50w+", "50W以上粉丝"],
+];
+
+const FollowerThresholds = [
+  ["below_1w", "1万以下"],
+  ["above_1w", "1万以上（全部）"],
 ];
 
 const VideoRanges = [
@@ -161,22 +208,29 @@ function buildSearchPayload(filters) {
     minLikes: filters.minLikes,
     sortBy: filters.sortBy,
   };
+  const followerThreshold = filters.followerThreshold || "above_1w";
   const followerRange = filters.followerRange || "";
   const videoRange = filters.videoRange || "";
   const updateRange = filters.updateRange || "";
-  if (followerRange === "1-5w") {
+  if (followerThreshold === "above_1w") {
+    payload.minFollowers = 10000;
+  } else if (followerThreshold === "below_1w") {
+    payload.maxFollowers = 9999;
+  }
+
+  if (followerThreshold !== "below_1w" && followerRange === "1-5w") {
     payload.minFollowers = 10000;
     payload.maxFollowers = 50000;
-  } else if (followerRange === "5-10w") {
+  } else if (followerThreshold !== "below_1w" && followerRange === "5-10w") {
     payload.minFollowers = 50000;
     payload.maxFollowers = 100000;
-  } else if (followerRange === "10-20w") {
+  } else if (followerThreshold !== "below_1w" && followerRange === "10-20w") {
     payload.minFollowers = 100000;
     payload.maxFollowers = 200000;
-  } else if (followerRange === "20-50w") {
+  } else if (followerThreshold !== "below_1w" && followerRange === "20-50w") {
     payload.minFollowers = 200000;
     payload.maxFollowers = 500000;
-  } else if (followerRange === "50w+") {
+  } else if (followerThreshold !== "below_1w" && followerRange === "50w+") {
     payload.minFollowers = 500000;
   }
 
@@ -234,6 +288,8 @@ function normalizeUserForSave(user, keyword) {
 export function DouyinTargetPanel() {
   const [keyword, setKeyword] = useState(InitialKeyword);
   const [filters, setFilters] = useState({
+    targetAccountCount: 50,
+    followerThreshold: "above_1w",
     followerRange: "",
     minLikes: "",
     videoRange: "",
@@ -255,6 +311,7 @@ export function DouyinTargetPanel() {
     fetchCount: 20,
     sortMetric: "digg_count",
   });
+  const [autoCollectInteractions, setAutoCollectInteractions] = useState(true);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -352,12 +409,42 @@ export function DouyinTargetPanel() {
   async function handleSearch(event) {
     event.preventDefault();
     const request = { keyword, ...searchPayload };
-    const result = await run("search", () => searchDouyinTargets({ ...request, page: 1, count: SearchPageSize }));
+    const targetCount = targetAccountCount(filters);
+    const result = await run("search", async () => {
+      let page = 1;
+      let lastResult = null;
+      let mergedItems = [];
+      let hasMore = true;
+      let loadedPages = 0;
+
+      while (mergedItems.length < targetCount && hasMore && page <= MaxContinuousSearchPages) {
+        const pageResult = await searchDouyinTargets({ ...request, page, count: SearchPageSize });
+        const pageItems = pageResult.items || [];
+        mergedItems = mergeUniqueUsers(mergedItems, pageItems).slice(0, targetCount);
+        lastResult = pageResult;
+        loadedPages = page;
+        hasMore = hasMoreSearchResults(pageResult, pageItems);
+        if (!hasMore) break;
+        page += 1;
+      }
+
+      if (!lastResult) return null;
+      return {
+        ...lastResult,
+        items: mergedItems,
+        count: mergedItems.length,
+        loaded_count: mergedItems.length,
+        loaded_pages: loadedPages,
+        requested_count: targetCount,
+        reached_target: mergedItems.length >= targetCount,
+        has_more: hasMore,
+      };
+    });
     if (result) {
       const nextItems = result.items || [];
       setSearchResult(result);
       setSearchRequest(request);
-      setSearchPage(1);
+      setSearchPage(result.loaded_pages || 1);
       setSearchHasMore(hasMoreSearchResults(result, nextItems));
       setSelectedUsers(new Set(nextItems.map(userId).filter(Boolean)));
       if (!activeSetId) {
@@ -368,7 +455,11 @@ export function DouyinTargetPanel() {
           status: current.status || "draft",
         }));
       }
-      setMessage(`已加载第 1 页，当前展示 ${nextItems.length} 个候选账号`);
+      setMessage(
+        result.reached_target
+          ? `已持续搜索 ${result.loaded_pages || 1} 页，达到目标 ${nextItems.length}/${targetCount} 个候选账号`
+          : `已搜索到 ${nextItems.length}/${targetCount} 个候选账号，暂无更多满足条件的账号`,
+      );
     }
   }
 
@@ -483,12 +574,63 @@ export function DouyinTargetPanel() {
     }
   }
 
+  async function handleCollectInteractions(videoId = "") {
+    if (!activeSetId && !videoId) {
+      setError("请先选择一个对标集合。");
+      return;
+    }
+    const result = await run(videoId ? "interaction-one" : "interactions", () =>
+      collectDouyinTargetInteractions({
+        setId: activeSetId,
+        videoIds: videoId ? [videoId] : [],
+        adaptiveByRatio: true,
+        maxComments: 160,
+        minComments: 30,
+        includeReplies: true,
+        repliesPerComment: 3,
+      }),
+    );
+    if (result) {
+      setMessage(`已补全 ${result.count} 条视频互动数据${result.errors?.length ? `，失败 ${result.errors.length} 条` : ""}`);
+      if (result.errors?.length) {
+        setError(`部分互动数据补全失败：${result.errors.slice(0, 3).map((item) => item.error).join("；")}`);
+      }
+      await loadSets(activeSetId);
+    }
+  }
+
+  async function handleDeleteVideoAnalysis(video) {
+    if (!video?.id) return;
+    if ((video.analysis_status || "") === "running") {
+      setError("该视频拆解仍在运行中，请先在 AI 视频队列中取消或等待结束后再删除。");
+      return;
+    }
+    const title = video.desc || video.aweme_id || video.id;
+    if (
+      !window.confirm(
+        `确认删除「${title}」的拆解记录吗？\n\n只会删除拆解任务、队列记录和拆解结果，不会删除视频指标、评论、回复和互动洞察。删除后可以重新补全互动数据并再次加入 AI 拆解。`,
+      )
+    ) {
+      return;
+    }
+    const result = await run("delete-analysis", () => deleteDouyinTargetVideoAnalysis(video.id));
+    if (result) {
+      setMessage("已删除该视频的拆解记录，评论和指标已保留，可重新加入 AI 拆解。");
+      await loadSets(activeSetId);
+    }
+  }
+
   async function handleEnqueue() {
     if (!activeSetId) {
       setError("请先选择一个对标集合。");
       return;
     }
-    const result = await run("enqueue", () => enqueueDouyinTargetAnalysis({ setId: activeSetId }));
+    const result = await run("enqueue", () =>
+      enqueueDouyinTargetAnalysis({
+        setId: activeSetId,
+        collectComments: autoCollectInteractions,
+      }),
+    );
     if (result) {
       setMessage(`已加入 ${result.count} 个拆解任务，跳过 ${result.skipped?.length || 0} 个已有任务`);
       await loadSets(activeSetId);
@@ -521,8 +663,32 @@ export function DouyinTargetPanel() {
             <input value={keyword} onChange={handleKeywordChange} placeholder="可爱、宠物、穿搭..." required />
           </label>
           <label>
-            粉丝量
-            <select value={filters.followerRange} onChange={(event) => setFilters((current) => ({ ...current, followerRange: event.target.value }))}>
+            目标账号数
+            <input
+              type="number"
+              min="1"
+              max="500"
+              value={filters.targetAccountCount}
+              onChange={(event) => setFilters((current) => ({ ...current, targetAccountCount: event.target.value }))}
+            />
+          </label>
+          <label>
+            粉丝阈值
+            <select value={filters.followerThreshold} onChange={(event) => setFilters((current) => ({ ...current, followerThreshold: event.target.value }))}>
+              {FollowerThresholds.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            粉丝范围
+            <select
+              value={filters.followerRange}
+              onChange={(event) => setFilters((current) => ({ ...current, followerRange: event.target.value }))}
+              disabled={filters.followerThreshold === "below_1w"}
+            >
               {FollowerRanges.map(([value, label]) => (
                 <option key={value || "all"} value={value}>
                   {label}
@@ -704,6 +870,17 @@ export function DouyinTargetPanel() {
               <button className="text-button" type="button" onClick={handleCollectVideos} disabled={!activeSetId || busy === "collect"}>
                 {busy === "collect" ? "采集中..." : "采集并选择视频"}
               </button>
+              <button className="text-button" type="button" onClick={() => handleCollectInteractions()} disabled={!activeVideos.length || busy === "interactions"}>
+                {busy === "interactions" ? "补全中..." : "补全互动数据"}
+              </button>
+              <label className="target-auto-enrich-toggle">
+                <input
+                  type="checkbox"
+                  checked={autoCollectInteractions}
+                  onChange={(event) => setAutoCollectInteractions(event.target.checked)}
+                />
+                拆解前自动补全互动数据
+              </label>
               <button className="primary-button" type="button" onClick={handleEnqueue} disabled={!activeVideos.length || busy === "enqueue"}>
                 加入 AI 拆解
               </button>
@@ -739,10 +916,29 @@ export function DouyinTargetPanel() {
                       <div>
                         <strong>{item.desc || item.aweme_id}</strong>
                         <span>点赞 {optionalCompactNumber(item.digg_count)} / 日期 {optionalDate(item.create_time)}</span>
+                        <span>{commentStatusLabel(item)}</span>
                       </div>
-                      <Badge status={item.analysis_status === "done" ? "done" : item.analysis_status === "failed" ? "error" : "running"}>
-                        {analysisStatusLabel(item.analysis_status)}
-                      </Badge>
+                      <div className="target-video-actions">
+                        <Badge status={commentStatusTone(item)}>
+                          {item.comment_snapshot_status === "done" ? "互动已补全" : "互动待补全"}
+                        </Badge>
+                        <Badge status={analysisStatusTone(item.analysis_status)}>
+                          {analysisStatusLabel(item.analysis_status)}
+                        </Badge>
+                        <button className="text-button compact-target-action" type="button" onClick={() => handleCollectInteractions(item.id)} disabled={busy === "interaction-one" || busy === "interactions"}>
+                          补全
+                        </button>
+                        {hasAnalysisRecord(item) && (
+                          <button
+                            className="text-button compact-target-action danger-target-action"
+                            type="button"
+                            onClick={() => handleDeleteVideoAnalysis(item)}
+                            disabled={busy === "delete-analysis" || item.analysis_status === "running"}
+                          >
+                            删除拆解
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                   {!activeVideos.length && <div className="empty-result">采集视频后会出现在这里。</div>}

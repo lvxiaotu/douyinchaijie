@@ -163,8 +163,11 @@ def create_prompt_reverse_job(payload: PromptReverseRequest, background_tasks: B
 
 
 @router.get("/archives")
-def archives(limit: int = 100) -> list[dict[str, Any]]:
-    return list_prompt_reverse_archives(limit=limit)
+def archives(
+    limit: int = 100,
+    include_result: bool = False,
+) -> list[dict[str, Any]]:
+    return list_prompt_reverse_archives(limit=limit, include_result=include_result)
 
 
 @router.get("/archives/{archive_id}")

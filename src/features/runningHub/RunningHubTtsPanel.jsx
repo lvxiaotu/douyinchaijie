@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { createRunningHubTtsJob, deleteTask, fetchRunningHubTtsConfig, fetchRunningHubTtsStatus, fetchTasks, saveRunningHubTtsConfig, syncRunningHubTtsTasks, uploadRunningHubTtsAudio } from "../../services/api";
+import { createRunningHubTtsJob, deleteTask, fetchRunningHubTtsConfig, fetchRunningHubTtsStatus, fetchTask, fetchTasks, saveRunningHubTtsConfig, syncRunningHubTtsTasks, uploadRunningHubTtsAudio } from "../../services/api";
 import { Badge } from "../../components/common/index";
 import { runningHubEmotionFields } from "../../constants/appConfig";
 import { TaskRecordModal, TaskStatusRow } from "../tasks/TaskPanels";
@@ -67,6 +67,25 @@ export function RunningHubTtsPanel() {
     }
   }
 
+  async function openTaskRecord(taskItem) {
+    const summaryTask = normalizeRunningHubTtsTask(taskItem);
+    setSelectedTaskRecord({
+      type: "runninghub_tts",
+      title: "RunningHub TTS",
+      task: summaryTask,
+    });
+    try {
+      const fullTask = await fetchTask(taskItem.id);
+      setSelectedTaskRecord({
+        type: "runninghub_tts",
+        title: "RunningHub TTS",
+        task: normalizeRunningHubTtsTask(fullTask),
+      });
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
   useEffect(() => {
     Promise.all([fetchRunningHubTtsConfig(), fetchRunningHubTtsStatus()])
       .then(([config, ttsStatus]) => {
@@ -87,7 +106,7 @@ export function RunningHubTtsPanel() {
     if (!hasActiveTasks && !submitting) return undefined;
     const timer = window.setInterval(async () => {
       await refreshRunningHubTtsTasks({ sync: true });
-    }, 3000);
+    }, 10000);
     return () => window.clearInterval(timer);
   }, [hasActiveTasks, submitting]);
 
@@ -378,13 +397,7 @@ export function RunningHubTtsPanel() {
         groups={groupedTasks}
         activeStatus={activeTaskStatus}
         onChangeStatus={setActiveTaskStatus}
-        onOpenTask={(taskItem) =>
-          setSelectedTaskRecord({
-            type: "runninghub_tts",
-            title: "RunningHub TTS",
-            task: taskItem,
-          })
-        }
+        onOpenTask={openTaskRecord}
       />
       <TaskRecordModal
         record={selectedTaskRecord}

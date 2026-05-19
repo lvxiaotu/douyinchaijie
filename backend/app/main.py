@@ -1,4 +1,5 @@
-﻿from pathlib import Path
+﻿import os
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -21,9 +22,13 @@ from .routes.tasks import router as tasks_router
 from .routes.text_to_assets import router as text_to_assets_router
 from .routes.video_script import router as video_script_router
 from .task_store import init_db
+from .video_analysis_queue import init_ai_video_queue_db
+from .video_analysis_worker import coordinator as ai_video_coordinator
+from integrations.ai_video_analysis.audio_publication import configured_public_dir
 
 app = FastAPI(title="Personal Ops Workbench API")
 init_db()
+init_ai_video_queue_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,6 +49,16 @@ def workbench():
     return get_workbench()
 
 
+@app.on_event("startup")
+def start_workers() -> None:
+    ai_video_coordinator.start()
+
+
+@app.on_event("shutdown")
+def stop_workers() -> None:
+    ai_video_coordinator.stop()
+
+
 app.include_router(douyin_router)
 app.include_router(ai_provider_router)
 app.include_router(ai_video_analysis_router)
@@ -58,6 +73,14 @@ app.include_router(runninghub_tts_router)
 app.include_router(studio_router)
 app.include_router(tikhub_douyin_router)
 app.include_router(douyin_target_router)
+
+ASR_PUBLIC_DIR = Path(os.getenv("AI_VIDEO_ASR_PUBLIC_DIR") or configured_public_dir())
+ASR_PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount(
+    "/api/tools/ai-video-analysis/public",
+    StaticFiles(directory=ASR_PUBLIC_DIR),
+    name="ai_video_analysis_public",
+)
 
 
 DIST_DIR = Path(__file__).resolve().parents[2] / "dist"

@@ -139,11 +139,8 @@ class AiPromptReverseAdapter(IntegrationAdapter):
         cfg = {**self.config, **(config or {})}
         provider = cfg.get("provider") or active_ai_provider(self.provider)
         if provider == "gemini":
-            access_mode = os.getenv("GEMINI_ACCESS_MODE") or os.getenv("AI_ACCESS_MODE", "official")
-            if access_mode == "relay" and not (os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
+            if not (os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
                 return ["Missing GEMINI_RELAY_API_KEY"]
-            if access_mode != "relay" and not (os.getenv("GEMINI_API_KEY") or os.getenv("AI_NATIVE_API_KEY")):
-                return ["Missing GEMINI_API_KEY"]
         return []
 
     def run(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -393,7 +390,7 @@ class AiPromptReverseAdapter(IntegrationAdapter):
             progress(20, "定位或下载视频文件")
         video_path = helper._resolve_video_file(video)
 
-        access_mode = (os.getenv("GEMINI_ACCESS_MODE") or os.getenv("AI_ACCESS_MODE") or "official").lower()
+        access_mode = "relay"
         if access_mode == "relay" or self._uses_gemini_relay_provider(active_ai_provider("")):
             if progress:
                 progress(45, "准备 Gemini 中转站视频数据")
@@ -409,6 +406,7 @@ class AiPromptReverseAdapter(IntegrationAdapter):
                 progress(90, "解析提示词反推结果")
             return self._parse_json(text)
 
+        raise RuntimeError("Gemini official/native access is disabled. Configure Yunwu or another relay provider.")
         try:
             from google import genai
             from google.genai import types

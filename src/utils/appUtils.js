@@ -241,6 +241,21 @@ export function firstNumber(source, keys) {
   return 0;
 }
 
+export function firstArray(source, keys) {
+  if (!source || typeof source !== "object") return [];
+  for (const key of keys) {
+    const value = source[key];
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string" && value.trim()) {
+      return value
+        .split(/\n|；|;|、/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}
+
 export function normalizeCommercialAnalysisResult(source) {
   const nested = source?.result && typeof source.result === "object" ? source.result : source;
   const summaryJson = parseJsonString(nested?.summary);
@@ -255,8 +270,16 @@ export function normalizeCommercialAnalysisResult(source) {
   const replicationPlan = firstObject(raw, ["replication_plan", "复刻计划", "模仿计划"]);
   const riskControl = firstObject(raw, ["risk_control", "风险控制", "合规风险"]);
   const viralScores = firstObject(raw, ["viral_scores", "爆款评分", "评分"]);
+  const douyinTarget = firstObject(raw, ["douyin_target", "douyin_target_context", "抖音数据"]);
+  const interactionSnapshot = firstObject(douyinTarget, ["interaction_snapshot", "interaction", "互动快照"]);
+  const targetMetrics = firstObject(douyinTarget, ["metrics", "指标"]);
+  const rawSegments = Array.isArray(raw?.segment_breakdowns) ? raw.segment_breakdowns : [];
 
   return {
+    analysis_mode: firstText(raw, ["analysis_mode"]),
+    pipeline_error: firstText(raw, ["pipeline_error"]),
+    evidence: raw?.evidence && typeof raw.evidence === "object" && !Array.isArray(raw.evidence) ? raw.evidence : {},
+    genre: firstText(raw, ["genre", "赛道", "内容赛道"]) || firstText(contentIdentity, ["track", "内容赛道", "赛道"]),
     summary: firstText(raw, ["summary", "摘要", "视频摘要", "一句话摘要"]),
     content_identity: {
       track: firstText(contentIdentity, ["track", "内容赛道", "赛道"]),
@@ -300,12 +323,14 @@ export function normalizeCommercialAnalysisResult(source) {
     replication_plan: {
       pattern_name: firstText(replicationPlan, ["pattern_name", "公式名", "模式名"]),
       reusable_formula: firstText(replicationPlan, ["reusable_formula", "可复刻公式", "复用公式"]),
+      cross_genre_variants: firstText(replicationPlan, ["cross_genre_variants", "跨赛道改写", "跨赛道变体"]),
       mysticism_variant: firstText(replicationPlan, ["mysticism_variant", "玄学方向", "玄学改编"]),
       ai_pet_variant: firstText(replicationPlan, ["ai_pet_variant", "AI小动物方向", "小动物改编"]),
       ai_commerce_variant: firstText(replicationPlan, ["ai_commerce_variant", "AI带货方向", "带货改编"]),
       difficulty: firstText(replicationPlan, ["difficulty", "制作难度", "难度"]),
       priority: firstText(replicationPlan, ["priority", "优先级", "模仿优先级"]),
     },
+    standard_remake_template: firstText(raw, ["standard_remake_template", "通用复刻脚本模板", "复刻脚本模板", "脱敏脚本模板"]),
     risk_control: {
       risk_level: firstText(riskControl, ["risk_level", "风险等级"]),
       platform_risks: firstText(riskControl, ["platform_risks", "平台风险", "风险点"]),
@@ -318,13 +343,91 @@ export function normalizeCommercialAnalysisResult(source) {
       comment_potential: firstNumber(viralScores, ["comment_potential", "评论潜力"]),
       overall: firstNumber(viralScores, ["overall", "综合评分"]),
     },
+    douyin_target: {
+      metrics: targetMetrics,
+      interaction_snapshot: interactionSnapshot,
+      keyword_counts: firstObject(interactionSnapshot, ["keyword_counts", "关键词"]),
+      symbol_counts: firstObject(interactionSnapshot, ["symbol_counts", "符号"]),
+      emotion_profile: firstObject(interactionSnapshot, ["emotion_profile", "评论情绪"]),
+      creator_reply_tactics: firstObject(interactionSnapshot, ["creator_reply_tactics", "作者回复策略"]),
+      top_comments: firstArray(interactionSnapshot, ["top_comments", "热门评论"]),
+      pinned_comments: firstArray(interactionSnapshot, ["pinned_comments", "置顶评论"]),
+      author_replies: firstArray(interactionSnapshot, ["author_replies", "作者回复"]),
+    },
+    segment_breakdowns: rawSegments.map((segment, index) => ({
+      ...segment,
+      id: segment?.segment_id || `segment-${index + 1}`,
+      segment_id: segment?.segment_id || `seg_${index + 1}`,
+      time_range: firstText(segment, ["time_range", "时间范围"]) || `${segment?.start ?? ""}-${segment?.end ?? ""}`,
+      segment_role: firstText(segment, ["segment_role", "片段角色"]),
+      visual_style: firstText(segment, ["visual_style", "visual_signal", "画面视觉特征"]),
+      audio_pacing: firstText(segment, ["audio_pacing", "audio_rhythm", "声音特征"]),
+      narrative_technique: firstText(segment, ["narrative_technique", "copywriting_pattern", "叙事技巧"]),
+      retention_mechanism: firstText(segment, ["retention_mechanism", "hook", "replicable_point", "留存机制"]),
+    })),
+    model_runs: Array.isArray(raw?.model_runs) ? raw.model_runs : [],
     raw_model_json: raw?.raw_model_json || raw,
   };
+}
+
+export function formatModelRunPurpose(value) {
+  const labels = {
+    segment_breakdown: "分段视觉拆解",
+    global_breakdown: "全局爆款汇总",
+  };
+  return labels[value] || value || "模型调用";
+}
+
+export function formatModelRunStatus(value) {
+  if (value === "done") return "完成";
+  if (value === "failed") return "失败";
+  if (value === "pending") return "等待";
+  return value || "-";
+}
+
+export function formatModelRunTime(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  return new Date(timestamp * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+export function formatLatency(value) {
+  const latency = Number(value || 0);
+  if (!Number.isFinite(latency) || latency <= 0) return "-";
+  if (latency >= 1000) return `${(latency / 1000).toFixed(1)}s`;
+  return `${Math.round(latency)}ms`;
+}
+
+export function normalizeModelRuns(...sources) {
+  const source = sources.find((items) => Array.isArray(items) && items.length) || [];
+  return source.map((run, index) => {
+    const meta = run?.meta && typeof run.meta === "object" ? run.meta : {};
+    return {
+      ...run,
+      id: run?.id || `${run?.purpose || "model"}-${index}`,
+      provider: run?.provider || "-",
+      model: run?.model || "-",
+      purpose: run?.purpose || "",
+      purposeLabel: formatModelRunPurpose(run?.purpose),
+      status: run?.status || "",
+      statusLabel: formatModelRunStatus(run?.status),
+      statusClass: run?.status === "failed" ? "error" : run?.status === "done" ? "done" : "running",
+      chunkLabel: run?.chunk_id ? `片段 ${run.chunk_id}` : "全局",
+      latencyLabel: formatLatency(run?.latency_ms || meta.latency_ms),
+      tokenLabel: `${Number(run?.input_tokens || 0)} / ${Number(run?.output_tokens || 0)}`,
+      timeLabel: formatModelRunTime(run?.created_at),
+      fallbackLabel: meta.fallback_from ? `${meta.fallback_from} -> ${meta.fallback_provider || run?.provider || "-"}` : "",
+      fallbackError: meta.fallback_error || "",
+      errorMessage: run?.error_message || "",
+      action: meta.action || "",
+    };
+  });
 }
 
 export function normalizeAnalysisTask(task, normalizeResult = normalizeCommercialAnalysisResult) {
   const updated = task.updated_at ? new Date(task.updated_at * 1000) : new Date();
   const result = normalizeResult(task.result?.result || task.result || {});
+  const modelRuns = normalizeModelRuns(task.model_runs, task.result?.model_runs, result.model_runs);
   const events = Array.isArray(task.events)
     ? task.events.map((event) => ({
         ...event,
@@ -343,6 +446,7 @@ export function normalizeAnalysisTask(task, normalizeResult = normalizeCommercia
     updated: updated.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
     video: task.payload?.video,
     result,
+    modelRuns,
     error: task.error,
     events,
   };

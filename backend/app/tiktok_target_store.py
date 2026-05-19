@@ -3,12 +3,262 @@
 import json
 import sqlite3
 import time
+import re
+from collections import Counter
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = ROOT / "data" / "runtime" / "tiktok_targeting.sqlite3"
+CHINA_TZ = timezone(timedelta(hours=8))
+
+GENRE_ALIASES = {
+    "tarot": "mysticism",
+    "mystic": "mysticism",
+    "mysticism": "mysticism",
+    "astrology": "mysticism",
+    "\u7384\u5b66": "mysticism",
+    "\u5854\u7f57": "mysticism",
+    "\u5360\u535c": "mysticism",
+    "\u661f\u5ea7": "mysticism",
+}
+
+GENERIC_INTERACTION_KEYWORDS = (
+    "\u592a\u771f\u5b9e",
+    "\u8fd9\u5c31\u662f\u6211",
+    "\u5171\u9e23",
+    "\u7834\u9632",
+    "\u540c\u611f",
+    "\u8bf4\u5230\u5fc3\u91cc",
+    "\u771f\u7684\u5047\u7684",
+    "\u6211\u4e0d\u4fe1",
+    "\u6709\u4f9d\u636e\u5417",
+    "\u79bb\u8c31",
+    "\u667a\u5546\u7a0e",
+    "\u54ea\u91cc\u4e70",
+    "\u600e\u4e48\u4e70",
+    "\u6c42\u94fe\u63a5",
+    "\u94fe\u63a5",
+    "\u591a\u5c11\u94b1",
+    "\u600e\u4e48\u6536\u8d39",
+    "\u540c\u6b3e",
+    "\u56e2\u8d2d",
+    "\u6253\u5361",
+    "\u7559\u540d",
+    "\u8e72",
+    "\u63d2\u773c",
+    "\u6c42\u6559\u7a0b",
+    "\u6559\u7a0b",
+    "\u6c42\u65b9\u6cd5",
+    "\u600e\u4e48\u505a",
+    "\u600e\u4e48\u529e",
+    "\u600e\u4e48\u9009",
+    "\u63a8\u8350",
+    "\u907f\u5751",
+    "\u8c22\u8c22",
+    "\u611f\u8c22",
+    "\u5b66\u5230\u4e86",
+    "\u6709\u7528",
+    "\u6536\u85cf",
+    "\u7801\u4f4f",
+    "\u5e72\u8d27",
+)
+
+GENRE_INTERACTION_KEYWORDS = {
+    "mysticism": (
+        "\u9886\u53d6\u597d\u8fd0",
+        "\u63a5\u597d\u8fd0",
+        "\u663e\u5316",
+        "\u63a5",
+        "\u7cbe\u51c6",
+        "\u597d\u8fd0",
+        "\u8bb8\u613f",
+        "\u8fd8\u613f",
+        "\u611f\u6069",
+        "\u592a\u51c6",
+        "\u51c6",
+        "\u5012\u9709",
+        "\u5931\u604b",
+        "\u5206\u624b",
+        "\u7126\u8651",
+        "\u96be\u53d7",
+        "\u590d\u5408",
+        "\u6b63\u7f18",
+        "\u6843\u82b1",
+        "\u4e0a\u5cb8",
+        "\u4e8b\u4e1a",
+        "\u8d22\u8fd0",
+        "\u66b4\u5bcc",
+    ),
+}
+
+INTERACTION_KEYWORDS = GENERIC_INTERACTION_KEYWORDS
+
+MOTIVATION_BUCKETS = {
+    "resonance": (
+        "\u592a\u771f\u5b9e",
+        "\u8fd9\u5c31\u662f\u6211",
+        "\u5171\u9e23",
+        "\u7834\u9632",
+        "\u540c\u611f",
+        "\u8bf4\u5230\u5fc3\u91cc",
+        "\u61c2\u6211",
+        "\u771f\u5b9e",
+    ),
+    "doubt_or_controversy": (
+        "\u771f\u7684\u5047\u7684",
+        "\u6211\u4e0d\u4fe1",
+        "\u6709\u4f9d\u636e\u5417",
+        "\u79bb\u8c31",
+        "\u4e0d\u53ef\u80fd",
+        "\u9a97\u4eba",
+        "\u667a\u5546\u7a0e",
+        "\u4e0d\u662f\u5427",
+    ),
+    "purchase_or_link": (
+        "\u54ea\u91cc\u4e70",
+        "\u600e\u4e48\u4e70",
+        "\u6c42\u94fe\u63a5",
+        "\u94fe\u63a5",
+        "\u591a\u5c11\u94b1",
+        "\u4ef7\u683c",
+        "\u540c\u6b3e",
+        "\u56e2\u8d2d",
+        "\u4e0b\u5355",
+        "\u5e97\u540d",
+        "\u5730\u5740",
+        "\u600e\u4e48\u6536\u8d39",
+    ),
+    "checkin_or_ritual": (
+        "\u6253\u5361",
+        "\u7559\u540d",
+        "\u8e72",
+        "\u63d2\u773c",
+        "\u575a\u6301",
+        "\u8bb0\u5f55",
+    ),
+    "advice_or_question": (
+        "\u600e\u4e48\u505a",
+        "\u600e\u4e48\u529e",
+        "\u6c42\u6559\u7a0b",
+        "\u6559\u7a0b",
+        "\u6c42\u65b9\u6cd5",
+        "\u600e\u4e48\u5f04",
+        "\u600e\u4e48\u9009",
+        "\u63a8\u8350",
+        "\u6c42\u63a8\u8350",
+        "\u907f\u5751",
+    ),
+    "thanks_or_validation": (
+        "\u8c22\u8c22",
+        "\u611f\u8c22",
+        "\u5b66\u5230\u4e86",
+        "\u6709\u7528",
+        "\u6536\u85cf\u4e86",
+        "\u5df2\u6536\u85cf",
+        "\u7801\u4f4f",
+        "\u9a6c\u514b",
+        "\u5e72\u8d27",
+        "\u9760\u8c31",
+    ),
+}
+
+GENRE_MOTIVATION_BUCKETS = {
+    "mysticism": {
+        "mysticism_manifest": (
+            "\u63a5",
+            "\u9886\u53d6",
+            "\u663e\u5316",
+            "\u597d\u8fd0",
+            "\u8bb8\u613f",
+            "\u8e72",
+            "\u6c42",
+        ),
+        "mysticism_distress": (
+            "\u5012\u9709",
+            "\u5931\u604b",
+            "\u5206\u624b",
+            "\u7126\u8651",
+            "\u96be\u53d7",
+            "\u5d29\u6e83",
+            "\u4f4e\u8c37",
+            "\u4e0d\u987a",
+            "\u600e\u4e48\u529e",
+        ),
+        "mysticism_thanks_validation": (
+            "\u8fd8\u613f",
+            "\u611f\u6069",
+            "\u8c22\u8c22",
+            "\u51c6",
+            "\u7075",
+            "\u5b9e\u73b0",
+        ),
+        "mysticism_relationship": (
+            "\u590d\u5408",
+            "\u6b63\u7f18",
+            "\u6843\u82b1",
+            "\u524d\u4efb",
+            "\u8131\u5355",
+        ),
+        "mysticism_money_career": (
+            "\u8d22\u8fd0",
+            "\u4e0a\u5cb8",
+            "\u4e8b\u4e1a",
+            "\u5de5\u4f5c",
+            "\u66b4\u5bcc",
+            "offer",
+        ),
+    },
+}
+
+EMOTION_BUCKETS = MOTIVATION_BUCKETS
+
+RETENTION_TACTIC_KEYWORDS = {
+    "ask_for_comment": ("\u8bc4\u8bba", "\u7559\u8a00", "\u544a\u8bc9\u6211", "\u8bc4\u8bba\u533a", "\u4f60\u600e\u4e48\u770b"),
+    "private_conversion": ("\u79c1\u4fe1", "\u4e3b\u9875", "\u7c89\u4e1d\u7fa4", "\u52a0\u7fa4", "\u54a8\u8be2"),
+    "pin_or_thread": ("\u7f6e\u9876", "\u76d6\u697c", "\u8e72", "\u63d2\u773c", "\u697c\u4e2d\u697c"),
+    "next_content": ("\u4e0b\u4e00\u6761", "\u660e\u5929", "\u540e\u7eed", "\u7b49\u6211", "\u4e0b\u671f", "\u5408\u96c6"),
+    "purchase_conversion": ("\u94fe\u63a5", "\u6a71\u7a97", "\u56e2\u8d2d", "\u4f18\u60e0", "\u4e0b\u5355", "\u540c\u6b3e"),
+    "save_or_share_prompt": ("\u6536\u85cf", "\u8f6c\u53d1", "\u5206\u4eab", "\u5b58\u4e0b", "\u7801\u4f4f"),
+}
+
+GENRE_RETENTION_TACTIC_KEYWORDS = {
+    "mysticism": {
+        "mysticism_claim_or_manifest": ("\u63a5", "\u9886\u53d6", "\u663e\u5316", "\u8bb8\u613f", "\u8fd8\u613f"),
+    },
+}
+
+LEGACY_MYSTICISM_INTERACTION_KEYWORDS = (
+    "\u9886\u53d6\u597d\u8fd0",
+    "\u63a5\u597d\u8fd0",
+    "\u663e\u5316",
+    "\u63a5",
+    "\u7cbe\u51c6",
+    "\u597d\u8fd0",
+    "\u8bb8\u613f",
+    "\u8fd8\u613f",
+    "\u611f\u6069",
+    "\u8c22\u8c22",
+    "\u592a\u51c6",
+    "\u51c6",
+    "\u5012\u9709",
+    "\u5931\u604b",
+    "\u5206\u624b",
+    "\u7126\u8651",
+    "\u96be\u53d7",
+    "\u590d\u5408",
+    "\u6b63\u7f18",
+    "\u6843\u82b1",
+    "\u4e0a\u5cb8",
+    "\u4e8b\u4e1a",
+    "\u8d22\u8fd0",
+    "\u66b4\u5bcc",
+    "\u79c1\u4fe1",
+    "\u7f6e\u9876",
+    "\u8e72",
+)
 
 TARGET_USER_COLUMNS = {
     "avatar_url": "avatar_url TEXT NOT NULL DEFAULT ''",
@@ -29,11 +279,26 @@ TARGET_SET_COLUMNS = {
 TARGET_VIDEO_COLUMNS = {
     "set_id": "set_id TEXT NOT NULL DEFAULT ''",
     "create_time": "create_time INTEGER",
+    "publish_hour": "publish_hour INTEGER",
+    "publish_weekday": "publish_weekday INTEGER",
+    "publish_date": "publish_date TEXT NOT NULL DEFAULT ''",
+    "publish_hour_bucket": "publish_hour_bucket TEXT NOT NULL DEFAULT ''",
     "digg_count": "digg_count INTEGER",
     "comment_count": "comment_count INTEGER",
     "share_count": "share_count INTEGER",
     "collect_count": "collect_count INTEGER",
     "play_count": "play_count INTEGER",
+    "like_collect_ratio": "like_collect_ratio REAL",
+    "collect_like_ratio": "collect_like_ratio REAL",
+    "comment_like_ratio": "comment_like_ratio REAL",
+    "share_like_ratio": "share_like_ratio REAL",
+    "engagement_score": "engagement_score REAL",
+    "engagement_rate": "engagement_rate REAL",
+    "metrics_json": "metrics_json TEXT NOT NULL DEFAULT '{}'",
+    "comment_snapshot_status": "comment_snapshot_status TEXT NOT NULL DEFAULT 'none'",
+    "comment_snapshot_at": "comment_snapshot_at INTEGER",
+    "comment_saved_count": "comment_saved_count INTEGER NOT NULL DEFAULT 0",
+    "reply_saved_count": "reply_saved_count INTEGER NOT NULL DEFAULT 0",
     "is_top": "is_top INTEGER NOT NULL DEFAULT 0",
     "selection_strategy": "selection_strategy TEXT NOT NULL DEFAULT ''",
     "analysis_status": "analysis_status TEXT NOT NULL DEFAULT 'none'",
@@ -146,6 +411,55 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tiktok_target_video_comments (
+                id TEXT PRIMARY KEY,
+                video_id TEXT NOT NULL,
+                aweme_id TEXT NOT NULL DEFAULT '',
+                comment_id TEXT NOT NULL DEFAULT '',
+                parent_comment_id TEXT NOT NULL DEFAULT '',
+                reply_to_comment_id TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                sec_uid TEXT NOT NULL DEFAULT '',
+                unique_id TEXT NOT NULL DEFAULT '',
+                nickname TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                digg_count INTEGER,
+                reply_count INTEGER,
+                create_time INTEGER,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                is_author INTEGER NOT NULL DEFAULT 0,
+                rank_index INTEGER NOT NULL DEFAULT 0,
+                level INTEGER NOT NULL DEFAULT 1,
+                source_json TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(video_id, comment_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tiktok_target_video_interaction_insights (
+                video_id TEXT PRIMARY KEY,
+                aweme_id TEXT NOT NULL DEFAULT '',
+                comment_count_saved INTEGER NOT NULL DEFAULT 0,
+                reply_count_saved INTEGER NOT NULL DEFAULT 0,
+                keyword_counts_json TEXT NOT NULL DEFAULT '{}',
+                symbol_counts_json TEXT NOT NULL DEFAULT '{}',
+                emotion_profile_json TEXT NOT NULL DEFAULT '{}',
+                creator_reply_tactics_json TEXT NOT NULL DEFAULT '{}',
+                top_comments_json TEXT NOT NULL DEFAULT '[]',
+                pinned_comments_json TEXT NOT NULL DEFAULT '[]',
+                author_replies_json TEXT NOT NULL DEFAULT '[]',
+                raw_ai_json TEXT NOT NULL DEFAULT '{}',
+                analyzed_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
         ensure_columns(connection, "tiktok_target_users", TARGET_USER_COLUMNS)
         ensure_columns(connection, "tiktok_target_sets", TARGET_SET_COLUMNS)
         ensure_columns(connection, "tiktok_target_videos", TARGET_VIDEO_COLUMNS)
@@ -153,8 +467,11 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_users_keyword ON tiktok_target_users(keyword, status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_user ON tiktok_target_videos(user_id, selected)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_set ON tiktok_target_videos(set_id, selected)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_metrics ON tiktok_target_videos(set_id, engagement_score DESC, digg_count DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_tasks_status ON tiktok_target_tasks(status, created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_tasks_video ON tiktok_target_tasks(video_id, status)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_comments_video ON tiktok_target_video_comments(video_id, level, rank_index)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_comments_parent ON tiktok_target_video_comments(video_id, parent_comment_id)")
 
 
 def now() -> int:
@@ -170,6 +487,121 @@ def load_json(value: Any, fallback: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError, json.JSONDecodeError):
         return fallback
+
+
+def to_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_genre(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    return GENRE_ALIASES.get(lowered) or GENRE_ALIASES.get(raw) or lowered
+
+
+def infer_interaction_genre(video: dict[str, Any] | None = None, *, comments: list[dict[str, Any]] | None = None) -> str:
+    video = video or {}
+    source = video.get("source_json") if isinstance(video.get("source_json"), dict) else {}
+    metrics = video.get("metrics") if isinstance(video.get("metrics"), dict) else {}
+    candidates = [
+        video.get("genre"),
+        source.get("genre"),
+        source.get("category"),
+        metrics.get("genre"),
+        video.get("selection_strategy"),
+        video.get("desc"),
+    ]
+    for value in candidates:
+        genre = normalize_genre(value)
+        if genre in GENRE_MOTIVATION_BUCKETS or genre in GENRE_INTERACTION_KEYWORDS:
+            return genre
+    text_parts = [str(value or "") for value in candidates if value]
+    if comments:
+        text_parts.extend(str(comment.get("text") or "") for comment in comments[:30])
+    combined = re.sub(r"\s+", "", " ".join(text_parts)).lower()
+    for alias, canonical in GENRE_ALIASES.items():
+        if alias.lower() in combined:
+            return canonical
+    return normalize_genre(candidates[0]) if candidates and candidates[0] else ""
+
+
+def to_float_ratio(numerator: Any, denominator: Any) -> float | None:
+    num = to_int(numerator)
+    den = to_int(denominator)
+    if num is None or den in (None, 0):
+        return None
+    return round(num / den, 6)
+
+
+def publish_bucket(hour: int | None) -> str:
+    if hour is None:
+        return ""
+    if 0 <= hour <= 5:
+        return "late_night"
+    if 6 <= hour <= 10:
+        return "morning"
+    if 11 <= hour <= 13:
+        return "noon"
+    if 14 <= hour <= 17:
+        return "afternoon"
+    if 18 <= hour <= 21:
+        return "evening"
+    return "night"
+
+
+def derive_video_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+    create_time = to_int(payload.get("create_time"))
+    digg_count = to_int(payload.get("digg_count")) or 0
+    comment_count = to_int(payload.get("comment_count")) or 0
+    share_count = to_int(payload.get("share_count")) or 0
+    collect_count = to_int(payload.get("collect_count")) or 0
+    play_count = to_int(payload.get("play_count")) or 0
+    published = datetime.fromtimestamp(create_time, CHINA_TZ) if create_time else None
+    engagement_score = digg_count + comment_count * 3 + share_count * 5 + collect_count * 4
+    engagement_rate = round(engagement_score / play_count, 6) if play_count else None
+    metrics = {
+        "publish_hour": published.hour if published else None,
+        "publish_weekday": published.weekday() if published else None,
+        "publish_date": published.strftime("%Y-%m-%d") if published else "",
+        "publish_hour_bucket": publish_bucket(published.hour if published else None),
+        "digg_count": digg_count,
+        "comment_count": comment_count,
+        "share_count": share_count,
+        "collect_count": collect_count,
+        "play_count": play_count,
+        "like_collect_ratio": to_float_ratio(digg_count, collect_count),
+        "collect_like_ratio": to_float_ratio(collect_count, digg_count),
+        "comment_like_ratio": to_float_ratio(comment_count, digg_count),
+        "share_like_ratio": to_float_ratio(share_count, digg_count),
+        "engagement_score": engagement_score,
+        "engagement_rate": engagement_rate,
+    }
+    metrics["metrics_json"] = {
+        "ratios": {
+            "like_collect_ratio": metrics["like_collect_ratio"],
+            "collect_like_ratio": metrics["collect_like_ratio"],
+            "comment_like_ratio": metrics["comment_like_ratio"],
+            "share_like_ratio": metrics["share_like_ratio"],
+        },
+        "weights": {
+            "engagement_score": "digg + comment*3 + share*5 + collect*4",
+        },
+        "publish": {
+            "hour": metrics["publish_hour"],
+            "weekday": metrics["publish_weekday"],
+            "date": metrics["publish_date"],
+            "bucket": metrics["publish_hour_bucket"],
+            "timezone": "Asia/Shanghai",
+        },
+    }
+    return metrics
 
 
 def row_to_target_user(row: sqlite3.Row) -> dict[str, Any]:
@@ -192,6 +624,7 @@ def row_to_target_video(row: sqlite3.Row) -> dict[str, Any]:
     video["selected"] = bool(video.get("selected"))
     video["is_top"] = bool(video.get("is_top"))
     video["source_json"] = load_json(video.get("source_json"), {})
+    video["metrics"] = load_json(video.pop("metrics_json", "{}"), {})
     video["analysis_result"] = load_json(video.pop("analysis_result_json", "{}"), {})
     return video
 
@@ -200,6 +633,239 @@ def row_to_target_task(row: sqlite3.Row) -> dict[str, Any]:
     task = dict(row)
     task["result"] = load_json(task.pop("result_json", "{}"), {})
     return task
+
+
+def row_to_target_comment(row: sqlite3.Row) -> dict[str, Any]:
+    comment = dict(row)
+    comment["is_pinned"] = bool(comment.get("is_pinned"))
+    comment["is_author"] = bool(comment.get("is_author"))
+    comment["source_json"] = load_json(comment.get("source_json"), {})
+    return comment
+
+
+def row_to_interaction_insights(row: sqlite3.Row) -> dict[str, Any]:
+    insights = dict(row)
+    for key, fallback in {
+        "keyword_counts_json": {},
+        "symbol_counts_json": {},
+        "emotion_profile_json": {},
+        "creator_reply_tactics_json": {},
+        "top_comments_json": [],
+        "pinned_comments_json": [],
+        "author_replies_json": [],
+        "raw_ai_json": {},
+    }.items():
+        public_key = key.removesuffix("_json")
+        insights[public_key] = load_json(insights.pop(key, "{}"), fallback)
+    emotion_profile = insights.get("emotion_profile") if isinstance(insights.get("emotion_profile"), dict) else {}
+    insights["genre"] = str(emotion_profile.get("genre") or "")
+    return insights
+
+
+def _comment_user(comment: dict[str, Any]) -> dict[str, Any]:
+    user = comment.get("user") if isinstance(comment.get("user"), dict) else {}
+    return {
+        "user_id": str(user.get("uid") or user.get("id") or user.get("user_id") or comment.get("user_id") or ""),
+        "sec_uid": str(user.get("sec_uid") or user.get("secUid") or comment.get("sec_uid") or ""),
+        "unique_id": str(user.get("unique_id") or user.get("short_id") or comment.get("unique_id") or ""),
+        "nickname": str(user.get("nickname") or comment.get("nickname") or ""),
+    }
+
+
+def normalize_comment(
+    video_id: str,
+    aweme_id: str,
+    comment: dict[str, Any],
+    *,
+    rank_index: int = 0,
+    parent_comment_id: str = "",
+    level: int = 1,
+    author_user_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    user = _comment_user(comment)
+    comment_id = str(
+        comment.get("cid")
+        or comment.get("comment_id")
+        or comment.get("id")
+        or comment.get("reply_id")
+        or f"{video_id}:{parent_comment_id or 'root'}:{rank_index}"
+    )
+    resolved_parent_comment_id = str(
+        parent_comment_id
+        or comment.get("parent_comment_id")
+        or comment.get("reply_to_reply_id")
+        or comment.get("reply_comment_id")
+        or ""
+    )
+    resolved_level = int(comment.get("level") or level or (2 if resolved_parent_comment_id else 1))
+    text = str(comment.get("text") or comment.get("content") or comment.get("reply_comment") or "")
+    sticky = comment.get("stick_position") or comment.get("is_pinned") or comment.get("is_top")
+    author_ids = author_user_ids or set()
+    is_author = bool(
+        comment.get("is_author")
+        or comment.get("is_creator")
+        or (user["user_id"] and user["user_id"] in author_ids)
+        or (user["sec_uid"] and user["sec_uid"] in author_ids)
+    )
+    return {
+        "id": f"{video_id}:{comment_id}",
+        "video_id": video_id,
+        "aweme_id": str(comment.get("aweme_id") or aweme_id or ""),
+        "comment_id": comment_id,
+        "parent_comment_id": resolved_parent_comment_id,
+        "reply_to_comment_id": str(comment.get("reply_to_reply_id") or comment.get("reply_comment_id") or resolved_parent_comment_id or ""),
+        "user_id": user["user_id"],
+        "sec_uid": user["sec_uid"],
+        "unique_id": user["unique_id"],
+        "nickname": user["nickname"],
+        "text": text,
+        "digg_count": to_int(comment.get("digg_count") or comment.get("like_count")),
+        "reply_count": to_int(comment.get("reply_comment_total") or comment.get("reply_count")),
+        "create_time": to_int(comment.get("create_time")),
+        "is_pinned": bool(sticky not in (None, "", 0, "0", False)),
+        "is_author": is_author,
+        "rank_index": rank_index,
+        "level": resolved_level,
+        "source_json": comment,
+    }
+
+
+def _compact_comment(comment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "comment_id": comment.get("comment_id"),
+        "parent_comment_id": comment.get("parent_comment_id"),
+        "nickname": comment.get("nickname"),
+        "text": comment.get("text"),
+        "digg_count": comment.get("digg_count"),
+        "reply_count": comment.get("reply_count"),
+        "create_time": comment.get("create_time"),
+        "is_pinned": bool(comment.get("is_pinned")),
+        "is_author": bool(comment.get("is_author")),
+        "rank_index": comment.get("rank_index"),
+        "level": comment.get("level"),
+    }
+
+
+def _genre_keyword_set(genre: str = "") -> tuple[str, ...]:
+    normalized_genre = normalize_genre(genre)
+    genre_keywords = GENRE_INTERACTION_KEYWORDS.get(normalized_genre, ())
+    return tuple(dict.fromkeys((*GENERIC_INTERACTION_KEYWORDS, *genre_keywords)))
+
+
+def _genre_motivation_buckets(genre: str = "") -> dict[str, tuple[str, ...]]:
+    normalized_genre = normalize_genre(genre)
+    buckets = {name: tuple(keywords) for name, keywords in MOTIVATION_BUCKETS.items()}
+    buckets.update(GENRE_MOTIVATION_BUCKETS.get(normalized_genre, {}))
+    return buckets
+
+
+def _genre_retention_tactics(genre: str = "") -> dict[str, tuple[str, ...]]:
+    normalized_genre = normalize_genre(genre)
+    tactics = {name: tuple(keywords) for name, keywords in RETENTION_TACTIC_KEYWORDS.items()}
+    tactics.update(GENRE_RETENTION_TACTIC_KEYWORDS.get(normalized_genre, {}))
+    return tactics
+
+
+def _count_keywords(texts: list[str], *, genre: str = "") -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    keywords = _genre_keyword_set(genre)
+    for text in texts:
+        compact = re.sub(r"\s+", "", text)
+        for keyword in keywords:
+            count = compact.count(keyword)
+            if count:
+                counts[keyword] += count
+    return dict(counts.most_common(40))
+
+
+def _count_symbols(texts: list[str]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for text in texts:
+        for symbol in re.findall(r"[#@\uFF01!\uFF1F?\u2764\u2665\U0001F495\U0001F496\u2728\U0001F64F]+", text):
+            counts[symbol] += 1
+    return dict(counts.most_common(30))
+
+
+def _emotion_profile(texts: list[str], *, genre: str = "") -> dict[str, Any]:
+    bucket_counts: dict[str, int] = {}
+    total_hits = 0
+    normalized_genre = normalize_genre(genre)
+    buckets = _genre_motivation_buckets(normalized_genre)
+    for name, keywords in buckets.items():
+        count = 0
+        for text in texts:
+            compact = re.sub(r"\s+", "", text)
+            if any(keyword in compact for keyword in keywords):
+                count += 1
+        bucket_counts[name] = count
+        total_hits += count
+    dominant = max(bucket_counts, key=bucket_counts.get) if bucket_counts else ""
+    generic_counts = {key: bucket_counts.get(key, 0) for key in MOTIVATION_BUCKETS}
+    genre_counts = {key: value for key, value in bucket_counts.items() if key not in MOTIVATION_BUCKETS}
+    return {
+        "buckets": bucket_counts,
+        "dominant": dominant if bucket_counts.get(dominant, 0) else "",
+        "motivation_buckets": generic_counts,
+        "dominant_motivation": max(generic_counts, key=generic_counts.get) if generic_counts and max(generic_counts.values()) else "",
+        "genre": normalized_genre,
+        "genre_plugin_buckets": genre_counts,
+        "total_labeled_comments": total_hits,
+    }
+
+
+def _creator_reply_tactics(comments: list[dict[str, Any]], *, genre: str = "") -> dict[str, Any]:
+    author_replies = [comment for comment in comments if comment.get("is_author")]
+    tactic_counts: dict[str, int] = {}
+    examples: list[dict[str, Any]] = []
+    tactics = _genre_retention_tactics(genre)
+    for comment in author_replies:
+        text = re.sub(r"\s+", "", str(comment.get("text") or ""))
+        matched = []
+        for tactic, keywords in tactics.items():
+            if any(keyword in text for keyword in keywords):
+                tactic_counts[tactic] = tactic_counts.get(tactic, 0) + 1
+                matched.append(tactic)
+        if matched and len(examples) < 12:
+            examples.append({**_compact_comment(comment), "matched_tactics": matched})
+    return {
+        "counts": tactic_counts,
+        "examples": examples,
+        "author_reply_count": len(author_replies),
+    }
+
+
+def build_interaction_insights(
+    video_id: str,
+    aweme_id: str,
+    comments: list[dict[str, Any]],
+    raw_ai: dict[str, Any] | None = None,
+    genre: str = "",
+) -> dict[str, Any]:
+    fan_comments = [comment for comment in comments if not comment.get("is_author")]
+    texts = [str(comment.get("text") or "") for comment in fan_comments if comment.get("text")]
+    normalized_genre = normalize_genre(genre)
+    top_comments = sorted(
+        [comment for comment in comments if int(comment.get("level") or 1) == 1],
+        key=lambda item: (to_int(item.get("digg_count")) or 0, to_int(item.get("reply_count")) or 0),
+        reverse=True,
+    )[:20]
+    pinned_comments = [comment for comment in comments if comment.get("is_pinned")][:20]
+    author_replies = [comment for comment in comments if comment.get("is_author")][:30]
+    return {
+        "video_id": video_id,
+        "aweme_id": aweme_id,
+        "genre": normalized_genre,
+        "comment_count_saved": len([comment for comment in comments if int(comment.get("level") or 1) == 1]),
+        "reply_count_saved": len([comment for comment in comments if int(comment.get("level") or 1) > 1]),
+        "keyword_counts": _count_keywords(texts, genre=normalized_genre),
+        "symbol_counts": _count_symbols(texts),
+        "emotion_profile": _emotion_profile(texts, genre=normalized_genre),
+        "creator_reply_tactics": _creator_reply_tactics(comments, genre=normalized_genre),
+        "top_comments": [_compact_comment(comment) for comment in top_comments],
+        "pinned_comments": [_compact_comment(comment) for comment in pinned_comments],
+        "author_replies": [_compact_comment(comment) for comment in author_replies],
+        "raw_ai": raw_ai or {},
+    }
 
 
 def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -381,6 +1047,11 @@ def update_target_set(
 def delete_target_set(set_id: str) -> bool:
     init_db()
     with connect() as connection:
+        video_rows = connection.execute("SELECT id FROM tiktok_target_videos WHERE set_id = ?", (set_id,)).fetchall()
+        video_ids = [row["id"] for row in video_rows]
+        for video_id in video_ids:
+            connection.execute("DELETE FROM tiktok_target_video_comments WHERE video_id = ?", (video_id,))
+            connection.execute("DELETE FROM tiktok_target_video_interaction_insights WHERE video_id = ?", (video_id,))
         connection.execute("DELETE FROM tiktok_target_set_users WHERE set_id = ?", (set_id,))
         connection.execute("DELETE FROM tiktok_target_tasks WHERE set_id = ?", (set_id,))
         connection.execute("DELETE FROM tiktok_target_videos WHERE set_id = ?", (set_id,))
@@ -444,15 +1115,18 @@ def remove_user_from_target_set(set_id: str, user_id: str) -> bool:
 def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     init_db()
     current = now()
+    metrics = derive_video_metrics(payload)
     with connect() as connection:
         connection.execute(
             """
             INSERT INTO tiktok_target_videos (
                 id, user_id, aweme_id, desc, cover_url, play_url, download_url, source_json,
                 selected, created_at, updated_at, set_id, create_time, digg_count, comment_count,
-                share_count, collect_count, play_count, is_top, selection_strategy, analysis_status,
-                analysis_task_id, analysis_result_json, analyzed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                share_count, collect_count, play_count, publish_hour, publish_weekday, publish_date,
+                publish_hour_bucket, like_collect_ratio, collect_like_ratio, comment_like_ratio,
+                share_like_ratio, engagement_score, engagement_rate, metrics_json, is_top,
+                selection_strategy, analysis_status, analysis_task_id, analysis_result_json, analyzed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 user_id = excluded.user_id,
                 aweme_id = excluded.aweme_id,
@@ -470,6 +1144,17 @@ def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) ->
                 share_count = excluded.share_count,
                 collect_count = excluded.collect_count,
                 play_count = excluded.play_count,
+                publish_hour = excluded.publish_hour,
+                publish_weekday = excluded.publish_weekday,
+                publish_date = excluded.publish_date,
+                publish_hour_bucket = excluded.publish_hour_bucket,
+                like_collect_ratio = excluded.like_collect_ratio,
+                collect_like_ratio = excluded.collect_like_ratio,
+                comment_like_ratio = excluded.comment_like_ratio,
+                share_like_ratio = excluded.share_like_ratio,
+                engagement_score = excluded.engagement_score,
+                engagement_rate = excluded.engagement_rate,
+                metrics_json = excluded.metrics_json,
                 is_top = excluded.is_top,
                 selection_strategy = excluded.selection_strategy
             """,
@@ -487,11 +1172,22 @@ def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) ->
                 current,
                 payload.get('set_id', ''),
                 payload.get('create_time'),
-                payload.get('digg_count'),
-                payload.get('comment_count'),
-                payload.get('share_count'),
-                payload.get('collect_count'),
-                payload.get('play_count'),
+                metrics["digg_count"],
+                metrics["comment_count"],
+                metrics["share_count"],
+                metrics["collect_count"],
+                metrics["play_count"],
+                metrics["publish_hour"],
+                metrics["publish_weekday"],
+                metrics["publish_date"],
+                metrics["publish_hour_bucket"],
+                metrics["like_collect_ratio"],
+                metrics["collect_like_ratio"],
+                metrics["comment_like_ratio"],
+                metrics["share_like_ratio"],
+                metrics["engagement_score"],
+                metrics["engagement_rate"],
+                json.dumps(metrics["metrics_json"], ensure_ascii=False),
                 1 if payload.get('is_top') else 0,
                 payload.get('selection_strategy', ''),
                 payload.get('analysis_status', 'none'),
@@ -543,6 +1239,209 @@ def list_target_videos(
     return [row_to_target_video(row) for row in rows]
 
 
+def replace_target_video_comments(
+    video_id: str,
+    comments: list[dict[str, Any]],
+    *,
+    status: str = "done",
+    raw_ai: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    init_db()
+    current = now()
+    video = get_target_video(video_id)
+    if not video:
+        raise ValueError(f"Target video not found: {video_id}")
+    aweme_id = str(video.get("aweme_id") or video_id)
+    normalized = []
+    for index, comment in enumerate(comments):
+        if not isinstance(comment, dict):
+            continue
+        if "comment_id" in comment and "video_id" in comment:
+            item = {**comment}
+        else:
+            item = normalize_comment(video_id, aweme_id, comment, rank_index=index)
+        item["video_id"] = video_id
+        item["aweme_id"] = str(item.get("aweme_id") or aweme_id)
+        item["rank_index"] = int(item.get("rank_index") or index)
+        item["level"] = int(item.get("level") or (2 if item.get("parent_comment_id") else 1))
+        item["id"] = str(item.get("id") or f"{video_id}:{item.get('comment_id') or index}")
+        normalized.append(item)
+
+    genre = infer_interaction_genre(video, comments=normalized)
+    insights = build_interaction_insights(video_id, aweme_id, normalized, raw_ai=raw_ai, genre=genre)
+    with connect() as connection:
+        connection.execute("DELETE FROM tiktok_target_video_comments WHERE video_id = ?", (video_id,))
+        for item in normalized:
+            connection.execute(
+                """
+                INSERT INTO tiktok_target_video_comments (
+                    id, video_id, aweme_id, comment_id, parent_comment_id, reply_to_comment_id,
+                    user_id, sec_uid, unique_id, nickname, text, digg_count, reply_count,
+                    create_time, is_pinned, is_author, rank_index, level, source_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(video_id, comment_id) DO UPDATE SET
+                    aweme_id = excluded.aweme_id,
+                    parent_comment_id = excluded.parent_comment_id,
+                    reply_to_comment_id = excluded.reply_to_comment_id,
+                    user_id = excluded.user_id,
+                    sec_uid = excluded.sec_uid,
+                    unique_id = excluded.unique_id,
+                    nickname = excluded.nickname,
+                    text = excluded.text,
+                    digg_count = excluded.digg_count,
+                    reply_count = excluded.reply_count,
+                    create_time = excluded.create_time,
+                    is_pinned = excluded.is_pinned,
+                    is_author = excluded.is_author,
+                    rank_index = excluded.rank_index,
+                    level = excluded.level,
+                    source_json = excluded.source_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    item["id"],
+                    video_id,
+                    item.get("aweme_id") or aweme_id,
+                    item.get("comment_id") or "",
+                    item.get("parent_comment_id") or "",
+                    item.get("reply_to_comment_id") or "",
+                    item.get("user_id") or "",
+                    item.get("sec_uid") or "",
+                    item.get("unique_id") or "",
+                    item.get("nickname") or "",
+                    item.get("text") or "",
+                    to_int(item.get("digg_count")),
+                    to_int(item.get("reply_count")),
+                    to_int(item.get("create_time")),
+                    1 if item.get("is_pinned") else 0,
+                    1 if item.get("is_author") else 0,
+                    int(item.get("rank_index") or 0),
+                    int(item.get("level") or 1),
+                    json.dumps(item.get("source_json") or item, ensure_ascii=False),
+                    current,
+                    current,
+                ),
+            )
+        connection.execute(
+            """
+            INSERT INTO tiktok_target_video_interaction_insights (
+                video_id, aweme_id, comment_count_saved, reply_count_saved,
+                keyword_counts_json, symbol_counts_json, emotion_profile_json,
+                creator_reply_tactics_json, top_comments_json, pinned_comments_json,
+                author_replies_json, raw_ai_json, analyzed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(video_id) DO UPDATE SET
+                aweme_id = excluded.aweme_id,
+                comment_count_saved = excluded.comment_count_saved,
+                reply_count_saved = excluded.reply_count_saved,
+                keyword_counts_json = excluded.keyword_counts_json,
+                symbol_counts_json = excluded.symbol_counts_json,
+                emotion_profile_json = excluded.emotion_profile_json,
+                creator_reply_tactics_json = excluded.creator_reply_tactics_json,
+                top_comments_json = excluded.top_comments_json,
+                pinned_comments_json = excluded.pinned_comments_json,
+                author_replies_json = excluded.author_replies_json,
+                raw_ai_json = excluded.raw_ai_json,
+                analyzed_at = excluded.analyzed_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                video_id,
+                aweme_id,
+                insights["comment_count_saved"],
+                insights["reply_count_saved"],
+                json.dumps(insights["keyword_counts"], ensure_ascii=False),
+                json.dumps(insights["symbol_counts"], ensure_ascii=False),
+                json.dumps(insights["emotion_profile"], ensure_ascii=False),
+                json.dumps(insights["creator_reply_tactics"], ensure_ascii=False),
+                json.dumps(insights["top_comments"], ensure_ascii=False),
+                json.dumps(insights["pinned_comments"], ensure_ascii=False),
+                json.dumps(insights["author_replies"], ensure_ascii=False),
+                json.dumps(insights["raw_ai"], ensure_ascii=False),
+                current,
+                current,
+                current,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE tiktok_target_videos
+            SET comment_snapshot_status = ?,
+                comment_snapshot_at = ?,
+                comment_saved_count = ?,
+                reply_saved_count = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                current,
+                insights["comment_count_saved"],
+                insights["reply_count_saved"],
+                current,
+                video_id,
+            ),
+        )
+    return get_target_video_interaction_dataset(video_id)
+
+
+def get_target_video_comments(video_id: str, *, include_replies: bool = True, limit: int = 500) -> list[dict[str, Any]]:
+    init_db()
+    query = "SELECT * FROM tiktok_target_video_comments WHERE video_id = ?"
+    values: list[Any] = [video_id]
+    if not include_replies:
+        query += " AND level = 1"
+    query += " ORDER BY level ASC, rank_index ASC, digg_count DESC LIMIT ?"
+    values.append(limit)
+    with connect() as connection:
+        rows = connection.execute(query, values).fetchall()
+    return [row_to_target_comment(row) for row in rows]
+
+
+def get_target_video_interaction_insights(video_id: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM tiktok_target_video_interaction_insights WHERE video_id = ?",
+            (video_id,),
+        ).fetchone()
+    return row_to_interaction_insights(row) if row else None
+
+
+def get_target_video_interaction_dataset(video_id: str) -> dict[str, Any]:
+    video = get_target_video(video_id)
+    comments = get_target_video_comments(video_id, include_replies=True, limit=1000)
+    insights = get_target_video_interaction_insights(video_id)
+    return {
+        "video": video,
+        "comments": comments,
+        "insights": insights,
+        "comment_count": len([item for item in comments if int(item.get("level") or 1) == 1]),
+        "reply_count": len([item for item in comments if int(item.get("level") or 1) > 1]),
+    }
+
+
+def mark_target_video_comment_snapshot(video_id: str, status: str, error: str = "") -> dict[str, Any] | None:
+    init_db()
+    current = now()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE tiktok_target_videos
+            SET comment_snapshot_status = ?,
+                comment_snapshot_at = ?,
+                metrics_json = json_set(COALESCE(NULLIF(metrics_json, ''), '{}'), '$.comment_snapshot_error', ?),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (status, current, error, current, video_id),
+        )
+    if cursor.rowcount == 0:
+        return None
+    return get_target_video(video_id)
+
+
 def update_target_video_analysis(
     video_id: str,
     *,
@@ -577,6 +1476,32 @@ def update_target_video_analysis(
     if cursor.rowcount == 0:
         return None
     return get_target_video(video_id)
+
+
+def clear_target_video_analysis(video_id: str) -> dict[str, Any] | None:
+    init_db()
+    current = now()
+    with connect() as connection:
+        task_cursor = connection.execute("DELETE FROM tiktok_target_tasks WHERE video_id = ?", (video_id,))
+        cursor = connection.execute(
+            """
+            UPDATE tiktok_target_videos
+            SET analysis_status = 'none',
+                analysis_task_id = '',
+                analysis_result_json = '{}',
+                analyzed_at = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (current, video_id),
+        )
+        deleted_target_task_count = task_cursor.rowcount
+    if cursor.rowcount == 0:
+        return None
+    video = get_target_video(video_id)
+    if video is not None:
+        video["deleted_target_task_count"] = deleted_target_task_count
+    return video
 
 
 def create_target_task(
@@ -633,6 +1558,16 @@ def find_target_task_for_video(video_id: str, statuses: set[str] | None = None) 
     query += " ORDER BY created_at DESC LIMIT 1"
     with connect() as connection:
         row = connection.execute(query, values).fetchone()
+    return row_to_target_task(row) if row else None
+
+
+def find_target_task_for_ai_task(ai_task_id: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM tiktok_target_tasks WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+            (ai_task_id,),
+        ).fetchone()
     return row_to_target_task(row) if row else None
 
 
@@ -704,3 +1639,10 @@ def update_target_task_from_ai_task(target_task_id: str, ai_task: dict[str, Any]
         error=error,
     )
     return target_task
+
+
+def update_target_task_by_ai_task_id(ai_task: dict[str, Any]) -> dict[str, Any] | None:
+    target_task = find_target_task_for_ai_task(str(ai_task.get("id") or ""))
+    if not target_task:
+        return None
+    return update_target_task_from_ai_task(target_task["id"], ai_task)

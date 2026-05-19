@@ -130,9 +130,9 @@ export function AiProviderSettingsPanel() {
   const [configs, setConfigs] = useState({
     gemini: {
       provider: "gemini",
-      accessMode: "official",
+      accessMode: "relay",
       nativeApiKey: "",
-      relayBaseUrl: "https://jeniya.top",
+      relayBaseUrl: "https://yunwu.ai",
       relayApiKey: "",
       model: "gemini-2.5-flash",
       models: ["gemini-2.5-flash", "gemini-2.0-flash"],
@@ -141,13 +141,13 @@ export function AiProviderSettingsPanel() {
     },
     openai: {
       provider: "openai",
-      accessMode: "official",
+      accessMode: "relay",
       nativeApiKey: "",
-      relayBaseUrl: "",
+      relayBaseUrl: "https://yunwu.ai/v1",
       relayApiKey: "",
       model: "gpt-4.1-mini",
       models: ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"],
-      apiFormat: "responses",
+      apiFormat: "chat_completions",
       localEndpoint: "",
     },
     simple_relay: {
@@ -178,8 +178,8 @@ export function AiProviderSettingsPanel() {
       nativeApiKey: "",
       relayBaseUrl: "https://api.deepseek.com",
       relayApiKey: "",
-      model: "deepseek-chat",
-      models: ["deepseek-chat", "deepseek-reasoner"],
+      model: "deepseek-v4-flash",
+      models: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
       apiFormat: "chat_completions",
       localEndpoint: "",
     },
@@ -281,8 +281,8 @@ export function AiProviderSettingsPanel() {
     ["local", "本地或其他 API"],
   ];
   const providerMeta = {
-    gemini: ["Gemini API", "支持 Google 原生 Gemini 和 Gemini 原生格式中转站。"],
-    openai: ["OpenAI API", "原生路线使用 Responses API；中转站可切换 Responses 或 Chat Completions 兼容格式。"],
+    gemini: ["Gemini API", "海外模型只走中转，默认使用云雾 Gemini generateContent 兼容接口。"],
+    openai: ["OpenAI API", "海外模型只走中转，默认使用云雾 OpenAI-compatible Chat Completions。"],
     simple_relay: ["简单中转站", "推荐用于视频工具：选择 Gemini 原生 generateContent，可绕开官方账号额度。"],
     yunwu: ["云雾 API", "根据云雾文档接入：支持 Gemini 原生 generateContent 和 OpenAI-compatible Chat Completions。"],
     deepseek: ["DeepSeek API", "DeepSeek 使用 OpenAI-compatible Chat Completions 格式。"],
@@ -400,10 +400,11 @@ export function AiProviderConfigCard({ title, description, config, providerId, b
   const isOpenAI = providerId === "openai";
   const isSimpleRelay = providerId === "simple_relay" || providerId === "yunwu";
   const isFixedOpenAICompatible = providerId === "deepseek" || providerId === "volcano";
-  const showAccessMode = !isLocal && !isSimpleRelay && !isFixedOpenAICompatible;
-  const showApiFormat = isOpenAI || isSimpleRelay;
-  const showNativeKey = !isLocal && !isSimpleRelay;
-  const showRelayFields = !isLocal && (config.accessMode === "relay" || isSimpleRelay || isFixedOpenAICompatible);
+  const isOverseasRelayOnly = providerId === "gemini" || providerId === "openai";
+  const showAccessMode = !isLocal && !isSimpleRelay && !isFixedOpenAICompatible && !isOverseasRelayOnly;
+  const showApiFormat = (isOpenAI && !isOverseasRelayOnly) || isSimpleRelay;
+  const showNativeKey = !isLocal && !isSimpleRelay && !isOverseasRelayOnly;
+  const showRelayFields = !isLocal && (isOverseasRelayOnly || config.accessMode === "relay" || isSimpleRelay || isFixedOpenAICompatible);
   const modelsText = (config.models || []).join("\n");
   return (
     <div className="settings-subpanel">
@@ -446,7 +447,7 @@ export function AiProviderConfigCard({ title, description, config, providerId, b
             <input value={config.relayBaseUrl} onChange={(event) => onChange(providerId, "relayBaseUrl", event.target.value)} placeholder="https://..." />
           </label>
         )}
-        {(isOpenAI && config.accessMode === "relay") || isSimpleRelay ? (
+        {(isOverseasRelayOnly || (isOpenAI && config.accessMode === "relay") || isSimpleRelay) ? (
           <label>
             {isSimpleRelay ? "API Key" : "中转站 API Key"}
             <input value={config.relayApiKey} onChange={(event) => onChange(providerId, "relayApiKey", event.target.value)} />

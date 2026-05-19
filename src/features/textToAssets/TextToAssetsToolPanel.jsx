@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "../../components/common/index";
 import { statusText } from "../../constants/appConfig";
-import { createTextToAssetsJob, deleteTask, fetchTasks } from "../../services/api";
+import { createTextToAssetsJob, deleteTask, fetchTask, fetchTasks } from "../../services/api";
 import { groupTasksByStatus, normalizeTextToAssetsTask } from "../../utils/appUtils";
 import { TaskRecordModal } from "../tasks/TaskRecordModal";
 import { TaskStatusRow } from "../tasks/TaskStatusRow";
@@ -36,6 +36,25 @@ export function TextToAssetsPanel() {
     }
   }
 
+  async function openTaskRecord(taskItem) {
+    const summaryTask = normalizeTextToAssetsTask(taskItem);
+    setSelectedTaskRecord({
+      type: "text_to_assets",
+      title: "一句话转素材",
+      task: summaryTask,
+    });
+    try {
+      const fullTask = await fetchTask(taskItem.id);
+      setSelectedTaskRecord({
+        type: "text_to_assets",
+        title: "一句话转素材",
+        task: normalizeTextToAssetsTask(fullTask),
+      });
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  }
+
   useEffect(() => {
     refreshTextToAssetsTasks();
   }, []);
@@ -44,7 +63,7 @@ export function TextToAssetsPanel() {
     if (!hasActiveTasks && !submitting) return undefined;
     const timer = window.setInterval(async () => {
       await refreshTextToAssetsTasks();
-    }, 3000);
+    }, 10000);
     return () => window.clearInterval(timer);
   }, [hasActiveTasks, submitting]);
 
@@ -123,13 +142,7 @@ export function TextToAssetsPanel() {
         groups={groupedTasks}
         activeStatus={activeTaskStatus}
         onChangeStatus={setActiveTaskStatus}
-        onOpenTask={(taskItem) =>
-          setSelectedTaskRecord({
-            type: "text_to_assets",
-            title: "一句话转素材",
-            task: taskItem,
-          })
-        }
+        onOpenTask={openTaskRecord}
       />
       <TaskRecordModal
         record={selectedTaskRecord}

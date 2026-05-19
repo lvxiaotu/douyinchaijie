@@ -72,7 +72,7 @@ data/runtime/ai_video_analysis/evidence/{task_id}/analysis_evidence.json
   "summary": "一句话概括视频的爆款套路和可复用价值",
   "content_identity": {
     "track": "内容赛道",
-    "niche_fit": "玄学、AI小动物、AI带货迁移判断",
+    "niche_fit": "跨赛道迁移判断",
     "account_persona": "账号人设或叙事视角"
   },
   "core_hook": {
@@ -112,12 +112,14 @@ data/runtime/ai_video_analysis/evidence/{task_id}/analysis_evidence.json
   "replication_plan": {
     "pattern_name": "公式名",
     "reusable_formula": "可复刻公式",
+    "cross_genre_variants": "跨赛道改写方向",
     "mysticism_variant": "玄学改编",
     "ai_pet_variant": "AI小动物改编",
     "ai_commerce_variant": "AI带货改编",
     "difficulty": "制作难度",
     "priority": "模仿优先级"
   },
+  "standard_remake_template": "脱敏后的通用复刻脚本模板",
   "risk_control": {
     "risk_level": "低/中/高",
     "platform_risks": ["AIGC标识、版权、虚假宣传、迷信承诺等风险"],

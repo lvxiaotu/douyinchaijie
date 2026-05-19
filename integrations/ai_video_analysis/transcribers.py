@@ -119,6 +119,10 @@ class OpenAIWhisperTranscriber:
 
 def resolve_transcriber(provider: str) -> Transcriber:
     selected = (provider or "auto").lower()
+    if selected in {"doubao", "doubao_file_asr", "volcengine", "volcengine_asr"}:
+        from integrations.ai_video_analysis.doubao_asr import DoubaoFileAsrTranscriber
+
+        return DoubaoFileAsrTranscriber()
     if selected in {"auto", "faster_whisper"}:
         try:
             import faster_whisper  # noqa: F401

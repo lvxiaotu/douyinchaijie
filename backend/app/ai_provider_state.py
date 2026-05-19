@@ -32,17 +32,16 @@ def active_api_format(default: str = "chat_completions") -> str:
 def openai_compatible_credentials(provider: str | None = None) -> dict[str, str]:
     selected = provider or active_ai_provider()
     if selected == "openai":
-        access_mode = os.getenv("OPENAI_ACCESS_MODE") or os.getenv("AI_ACCESS_MODE") or "official"
-        if access_mode == "relay":
-            return {
-                "api_key": os.getenv("OPENAI_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY") or "",
-                "base_url": os.getenv("OPENAI_RELAY_BASE_URL") or os.getenv("AI_RELAY_BASE_URL") or "",
-                "access_mode": access_mode,
-            }
         return {
-            "api_key": os.getenv("OPENAI_API_KEY") or os.getenv("AI_NATIVE_API_KEY") or "",
-            "base_url": "https://api.openai.com",
-            "access_mode": access_mode,
+            "api_key": os.getenv("OPENAI_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or "",
+            "base_url": (
+                os.getenv("OPENAI_RELAY_BASE_URL")
+                or os.getenv("AI_RELAY_BASE_URL")
+                or os.getenv("AI_VIDEO_RELAY_BASE_URL")
+                or os.getenv("YUNWU_BASE_URL")
+                or "https://yunwu.ai/v1"
+            ),
+            "access_mode": "relay",
         }
     if selected == "simple_relay":
         return {

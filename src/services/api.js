@@ -281,13 +281,60 @@ export function collectDouyinTargetVideos(payload) {
   });
 }
 
+export function collectDouyinTargetInteractions(payload) {
+  return postJson("/api/tools/douyin-target/comments/collect", {
+    set_id: payload.setId || "",
+    video_ids: payload.videoIds || [],
+    adaptive_by_ratio: payload.adaptiveByRatio !== false,
+    max_comments: Number(payload.maxComments || 160),
+    min_comments: Number(payload.minComments ?? 30),
+    page_size: Number(payload.pageSize || 20),
+    include_replies: payload.includeReplies !== false,
+    replies_per_comment: Number(payload.repliesPerComment ?? 3),
+  });
+}
+
+export async function deleteDouyinTargetVideoAnalysis(videoId) {
+  const response = await fetch(`${API_BASE}/api/tools/douyin-target/videos/${encodeURIComponent(videoId)}/analysis`, {
+    method: "DELETE",
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    const message =
+      data?.detail?.message ||
+      data?.detail?.error ||
+      data?.detail ||
+      `Request failed: ${response.status}`;
+    if (typeof message === "string") {
+      throw new Error(message);
+    }
+    throw new Error(JSON.stringify(message, null, 2));
+  }
+  return data;
+}
+
 export function enqueueDouyinTargetAnalysis(payload) {
   return postJson("/api/tools/douyin-target/analysis/enqueue", {
     set_id: payload.setId || "",
     video_ids: payload.videoIds || [],
     force: Boolean(payload.force),
     provider: payload.provider || undefined,
+    collect_comments: payload.collectComments !== false,
+    adaptive_comments: payload.adaptiveComments !== false,
+    max_comments: Number(payload.maxComments || 160),
+    min_comments: Number(payload.minComments ?? 30),
+    replies_per_comment: Number(payload.repliesPerComment ?? 3),
   });
+}
+
+export async function fetchDouyinTargetVideoInteractions(videoId) {
+  const response = await fetch(`${API_BASE}/api/tools/douyin-target/videos/${encodeURIComponent(videoId)}/interactions`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
 }
 
 export function syncDouyinTargetAnalysis(setId) {
@@ -407,8 +454,13 @@ export function createTextToAssetsJob(payload) {
   });
 }
 
-export async function fetchTasks(taskType) {
-  const query = taskType ? `?task_type=${encodeURIComponent(taskType)}` : "";
+export async function fetchTasks(taskType, options = {}) {
+  const params = new URLSearchParams();
+  if (taskType) params.set("task_type", taskType);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.includeResult) params.set("include_result", "true");
+  if (options.includeEvents) params.set("include_events", "true");
+  const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`${API_BASE}/api/tasks${query}`);
   const data = await response.json();
   if (!response.ok) {
@@ -459,6 +511,13 @@ export function saveAiVideoConfig(config) {
     transcribe_language: config.transcribeLanguage,
     transcribe_device: config.transcribeDevice,
     transcribe_compute_type: config.transcribeComputeType,
+    asr_upload_mode: config.asrUploadMode,
+    asr_publisher: config.asrPublisher,
+    asr_public_base_url: config.asrPublicBaseUrl,
+    asr_public_dir: config.asrPublicDir,
+    summary_provider: config.summaryProvider,
+    summary_model: config.summaryModel,
+    summary_fallback_provider: config.summaryFallbackProvider,
     segment_seconds: Number(config.segmentSeconds),
     silent_segment_seconds: Number(config.silentSegmentSeconds || 6),
     keyframe_interval_seconds: Number(config.keyframeIntervalSeconds),
@@ -473,6 +532,97 @@ export function saveAiVideoConfig(config) {
     ffmpeg_binary: config.ffmpegBinary,
     ffprobe_binary: config.ffprobeBinary,
     analysis_prompt: config.analysisPrompt,
+  });
+}
+
+export async function fetchAiVideoQueueStatus(taskId, backlogLimit = 20) {
+  const params = new URLSearchParams();
+  if (taskId) {
+    params.set("task_id", taskId);
+  }
+  if (backlogLimit) {
+    params.set("backlog_limit", String(backlogLimit));
+  }
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/queue/status${query}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function cancelAiVideoQueueJob(taskId) {
+  const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/jobs/${encodeURIComponent(taskId)}/cancel`, {
+    method: "POST",
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function retryAiVideoQueueJob(taskId) {
+  const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/jobs/${encodeURIComponent(taskId)}/retry`, {
+    method: "POST",
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function deleteAiVideoQueueJob(taskId) {
+  const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/jobs/${encodeURIComponent(taskId)}`, {
+    method: "DELETE",
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export function saveAiVideoRemakeExport(payload) {
+  return postJson("/api/tools/ai-video-analysis/remake-exports", {
+    run_id: payload.runId || "",
+    task_id: payload.taskId || "",
+    title: payload.title || "",
+    genre: payload.genre || "",
+    target_genre: payload.targetGenre || "",
+    markdown: payload.markdown || "",
+    result: payload.result || {},
+    rewritten: payload.rewritten || {},
+    export_type: payload.exportType || "remake_package",
+  });
+}
+
+export function rewriteAiVideoRemake(payload) {
+  return postJson("/api/tools/ai-video-analysis/remake-exports/rewrite", {
+    run_id: payload.runId || "",
+    task_id: payload.taskId || "",
+    title: payload.title || "",
+    source_genre: payload.sourceGenre || "",
+    target_genre: payload.targetGenre || "",
+    markdown: payload.markdown || "",
+    result: payload.result || {},
+  });
+}
+
+export function sendAiVideoRemakeToScript(payload) {
+  return postJson("/api/tools/ai-video-analysis/remake-exports/send-to-script", {
+    run_id: payload.runId || "",
+    task_id: payload.taskId || "",
+    title: payload.title || "",
+    source_genre: payload.sourceGenre || "",
+    target_genre: payload.targetGenre || "",
+    markdown: payload.markdown || "",
+    result: payload.result || {},
+    duration_seconds: Number(payload.durationSeconds || 60),
+    scene_count: Number(payload.sceneCount || 6),
+    provider: payload.provider || null,
   });
 }
 
@@ -530,8 +680,12 @@ export function saveAiProductionReverseConfig(config) {
   });
 }
 
-export async function fetchAiVideoArchives() {
-  const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/archives`);
+export async function fetchAiVideoArchives(options = {}) {
+  const params = new URLSearchParams();
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.includeResult) params.set("include_result", "true");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/archives${query}`);
   const data = await response.json();
   if (!response.ok) {
     throw new Error(JSON.stringify(data?.detail || data, null, 2));
@@ -539,8 +693,12 @@ export async function fetchAiVideoArchives() {
   return data;
 }
 
-export async function fetchAiPromptReverseArchives() {
-  const response = await fetch(`${API_BASE}/api/tools/ai-prompt-reverse/archives`);
+export async function fetchAiPromptReverseArchives(options = {}) {
+  const params = new URLSearchParams();
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.includeResult) params.set("include_result", "true");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${API_BASE}/api/tools/ai-prompt-reverse/archives${query}`);
   const data = await response.json();
   if (!response.ok) {
     throw new Error(JSON.stringify(data?.detail || data, null, 2));
@@ -548,8 +706,39 @@ export async function fetchAiPromptReverseArchives() {
   return data;
 }
 
-export async function fetchAiProductionReverseArchives() {
-  const response = await fetch(`${API_BASE}/api/tools/ai-production-reverse/archives`);
+export async function fetchAiProductionReverseArchives(options = {}) {
+  const params = new URLSearchParams();
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.includeResult) params.set("include_result", "true");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${API_BASE}/api/tools/ai-production-reverse/archives${query}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchAiVideoArchive(archiveId) {
+  const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/archives/${encodeURIComponent(archiveId)}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchAiPromptReverseArchive(archiveId) {
+  const response = await fetch(`${API_BASE}/api/tools/ai-prompt-reverse/archives/${encodeURIComponent(archiveId)}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchAiProductionReverseArchive(archiveId) {
+  const response = await fetch(`${API_BASE}/api/tools/ai-production-reverse/archives/${encodeURIComponent(archiveId)}`);
   const data = await response.json();
   if (!response.ok) {
     throw new Error(JSON.stringify(data?.detail || data, null, 2));

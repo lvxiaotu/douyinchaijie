@@ -47,6 +47,21 @@ class FavoriteItemsRequest(BaseModel):
     max_cursor: int = Field(default=0, ge=0)
 
 
+class VideoCommentsRequest(BaseModel):
+    aweme_id: str
+    max_items: int = Field(default=100, ge=1, le=500)
+    page_size: int = Field(default=20, ge=1, le=50)
+    cursor: int = Field(default=0, ge=0)
+
+
+class VideoCommentRepliesRequest(BaseModel):
+    item_id: str
+    comment_id: str
+    max_items: int = Field(default=20, ge=1, le=200)
+    page_size: int = Field(default=20, ge=1, le=50)
+    cursor: int = Field(default=0, ge=0)
+
+
 class DouyinConfigPayload(BaseModel):
     api_base: str = Field(default="http://127.0.0.1:8123")
     output_dir: str = Field(default="./data/runtime/douyin/downloads")
@@ -211,6 +226,33 @@ def favorite_items(payload: FavoriteItemsRequest) -> dict[str, Any]:
         return adapter().get_favorite_videos(
             max_items=payload.max_items,
             page_size=payload.page_size,
+        )
+    except Exception as exc:
+        raise integration_error(exc) from exc
+
+
+@router.post("/video-comments")
+def video_comments(payload: VideoCommentsRequest) -> dict[str, Any]:
+    try:
+        return adapter().get_video_comments(
+            aweme_id=payload.aweme_id,
+            max_items=payload.max_items,
+            page_size=payload.page_size,
+            cursor=payload.cursor,
+        )
+    except Exception as exc:
+        raise integration_error(exc) from exc
+
+
+@router.post("/video-comment-replies")
+def video_comment_replies(payload: VideoCommentRepliesRequest) -> dict[str, Any]:
+    try:
+        return adapter().get_video_comment_replies(
+            item_id=payload.item_id,
+            comment_id=payload.comment_id,
+            max_items=payload.max_items,
+            page_size=payload.page_size,
+            cursor=payload.cursor,
         )
     except Exception as exc:
         raise integration_error(exc) from exc

@@ -562,11 +562,11 @@ class VideoScriptGenerator:
         return self._call_openai_compatible(provider, prompt)
 
     def _call_gemini(self, prompt: str) -> str:
-        access_mode = os.getenv("GEMINI_ACCESS_MODE") or os.getenv("AI_ACCESS_MODE") or "official"
+        access_mode = "relay"
         model = os.getenv("GEMINI_MODEL") or active_model("gemini-2.5-flash")
         if access_mode == "relay":
-            api_key = os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY") or ""
-            base_url = (os.getenv("GEMINI_RELAY_BASE_URL") or os.getenv("AI_RELAY_BASE_URL") or "https://jeniya.top").rstrip("/")
+            api_key = os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY") or ""
+            base_url = (os.getenv("GEMINI_RELAY_BASE_URL") or os.getenv("YUNWU_BASE_URL") or os.getenv("AI_RELAY_BASE_URL") or "https://yunwu.ai").rstrip("/")
             if not api_key:
                 raise RuntimeError("Missing GEMINI_RELAY_API_KEY")
             response = requests.post(
@@ -584,6 +584,7 @@ class VideoScriptGenerator:
             parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
             return "\n".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
 
+        raise RuntimeError("Gemini official/native access is disabled. Configure Yunwu or another relay provider.")
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("AI_NATIVE_API_KEY") or ""
         if not api_key:
             raise RuntimeError("Missing GEMINI_API_KEY")

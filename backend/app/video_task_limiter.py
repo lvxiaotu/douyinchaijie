@@ -9,9 +9,9 @@ _task_semaphore_limit = 0
 
 def video_task_concurrency_limit() -> int:
     try:
-        return max(1, min(4, int(os.getenv("AI_VIDEO_MAX_CONCURRENT_TASKS", "1") or 1)))
+        return max(1, min(3, int(os.getenv("AI_VIDEO_MAX_CONCURRENT_TASKS", "3") or 3)))
     except ValueError:
-        return 1
+        return 3
 
 
 def video_task_semaphore() -> threading.BoundedSemaphore:

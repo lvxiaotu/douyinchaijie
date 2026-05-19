@@ -10,11 +10,18 @@ export function AiVideoSettingsPanel() {
   const [transcribeLanguage, setTranscribeLanguage] = useState("zh");
   const [transcribeDevice, setTranscribeDevice] = useState("cpu");
   const [transcribeComputeType, setTranscribeComputeType] = useState("int8");
+  const [asrUploadMode, setAsrUploadMode] = useState("url");
+  const [asrPublisher, setAsrPublisher] = useState("local");
+  const [asrPublicBaseUrl, setAsrPublicBaseUrl] = useState("");
+  const [asrPublicDir, setAsrPublicDir] = useState("");
+  const [summaryProvider, setSummaryProvider] = useState("");
+  const [summaryModel, setSummaryModel] = useState("deepseek-v4-flash");
+  const [summaryFallbackProvider, setSummaryFallbackProvider] = useState("vision");
   const [segmentSeconds, setSegmentSeconds] = useState(90);
   const [silentSegmentSeconds, setSilentSegmentSeconds] = useState(6);
   const [keyframeIntervalSeconds, setKeyframeIntervalSeconds] = useState(30);
   const [maxSegments, setMaxSegments] = useState(18);
-  const [maxConcurrentTasks, setMaxConcurrentTasks] = useState(1);
+  const [maxConcurrentTasks, setMaxConcurrentTasks] = useState(3);
   const [resumeEnabled, setResumeEnabled] = useState(true);
   const [highlightScreenshots, setHighlightScreenshots] = useState(true);
   const [gridColumns, setGridColumns] = useState(3);
@@ -38,11 +45,18 @@ export function AiVideoSettingsPanel() {
         setTranscribeLanguage(config.transcribe_language || "zh");
         setTranscribeDevice(config.transcribe_device || "cpu");
         setTranscribeComputeType(config.transcribe_compute_type || "int8");
+        setAsrUploadMode(config.asr_upload_mode || "url");
+        setAsrPublisher(config.asr_publisher || "local");
+        setAsrPublicBaseUrl(config.asr_public_base_url || "");
+        setAsrPublicDir(config.asr_public_dir || "");
+        setSummaryProvider(config.summary_provider || "");
+        setSummaryModel(config.summary_model || "deepseek-v4-flash");
+        setSummaryFallbackProvider(config.summary_fallback_provider || "vision");
         setSegmentSeconds(config.segment_seconds || 90);
         setSilentSegmentSeconds(config.silent_segment_seconds || 6);
         setKeyframeIntervalSeconds(config.keyframe_interval_seconds || 30);
         setMaxSegments(config.max_segments || 18);
-        setMaxConcurrentTasks(config.max_concurrent_tasks || 1);
+        setMaxConcurrentTasks(config.max_concurrent_tasks || 3);
         setResumeEnabled(Boolean(config.resume_enabled));
         setHighlightScreenshots(Boolean(config.highlight_screenshots));
         setGridColumns(config.grid_columns || 3);
@@ -70,6 +84,13 @@ export function AiVideoSettingsPanel() {
         transcribeLanguage,
         transcribeDevice,
         transcribeComputeType,
+        asrUploadMode,
+        asrPublisher,
+        asrPublicBaseUrl,
+        asrPublicDir,
+        summaryProvider,
+        summaryModel,
+        summaryFallbackProvider,
         segmentSeconds,
         silentSegmentSeconds,
         keyframeIntervalSeconds,
@@ -121,6 +142,7 @@ export function AiVideoSettingsPanel() {
             <option value="auto">自动选择</option>
             <option value="faster_whisper">faster-whisper</option>
             <option value="openai_whisper">openai-whisper</option>
+            <option value="doubao_file_asr">Doubao file ASR 2.0</option>
           </select>
         </label>
         <label>
@@ -148,6 +170,61 @@ export function AiVideoSettingsPanel() {
           </select>
         </label>
         <label>
+          Doubao ASR upload mode
+          <select value={asrUploadMode} onChange={(event) => setAsrUploadMode(event.target.value)}>
+            <option value="url">url: publish audio, then let Volcengine pull it</option>
+            <option value="base64">base64: direct audio payload</option>
+          </select>
+          <span className="field-hint">Recording-file ASR 2.0 should use url for normal 10-minute videos. Use base64 only with a direct-upload endpoint and small audio.</span>
+        </label>
+        <label>
+          ASR audio publisher
+          <select value={asrPublisher} onChange={(event) => setAsrPublisher(event.target.value)}>
+            <option value="local">local: public backend directory</option>
+            <option value="tos">tos: Volcengine TOS pre-signed URL</option>
+          </select>
+          <span className="field-hint">TOS bucket, endpoint, region, AK and SK are read from backend environment variables only.</span>
+        </label>
+        <label>
+          Local ASR public URL
+          <input
+            value={asrPublicBaseUrl}
+            onChange={(event) => setAsrPublicBaseUrl(event.target.value)}
+            placeholder="https://your-domain/api/tools/ai-video-analysis/public"
+          />
+        </label>
+        <label>
+          Local ASR public directory
+          <input
+            value={asrPublicDir}
+            onChange={(event) => setAsrPublicDir(event.target.value)}
+            placeholder="./data/runtime/ai_video_analysis/public_asr_audio"
+          />
+        </label>
+        <label>
+          Global summary provider
+          <select value={summaryProvider} onChange={(event) => setSummaryProvider(event.target.value)}>
+            <option value="">same as segment model</option>
+            <option value="deepseek">DeepSeek</option>
+          </select>
+          <span className="field-hint">Segment vision analysis still uses Gemini/Yunwu. This only controls the final global summary.</span>
+        </label>
+        <label>
+          Global summary model
+          <input
+            value={summaryModel}
+            onChange={(event) => setSummaryModel(event.target.value)}
+            placeholder="deepseek-v4-flash"
+          />
+        </label>
+        <label>
+          Summary fallback
+          <select value={summaryFallbackProvider} onChange={(event) => setSummaryFallbackProvider(event.target.value)}>
+            <option value="vision">fallback to segment model</option>
+            <option value="none">fail if summary provider fails</option>
+          </select>
+        </label>
+        <label>
           分段秒数
           <input type="number" min="30" max="600" value={segmentSeconds} onChange={(event) => setSegmentSeconds(event.target.value)} />
         </label>
@@ -166,7 +243,7 @@ export function AiVideoSettingsPanel() {
         </label>
         <label>
           最大并发任务数
-          <input type="number" min="1" max="4" value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} />
+          <input type="number" min="1" max="3" value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} />
           <span className="field-hint">普通 CPU 建议保持 1。多任务会同时占用 Whisper、FFmpeg 和 API 调用，可能导致机器明显卡顿。</span>
         </label>
         <label>

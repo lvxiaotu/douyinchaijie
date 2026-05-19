@@ -85,6 +85,21 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
                 page_size=int(payload.get("page_size", 18)),
                 max_cursor=int(payload.get("max_cursor") or 0),
             )
+        if action == "video_comments":
+            return self.get_video_comments(
+                aweme_id=payload["aweme_id"],
+                max_items=payload.get("max_items"),
+                page_size=int(payload.get("page_size", 20)),
+                cursor=int(payload.get("cursor") or 0),
+            )
+        if action == "video_comment_replies":
+            return self.get_video_comment_replies(
+                item_id=payload["item_id"],
+                comment_id=payload["comment_id"],
+                max_items=payload.get("max_items"),
+                page_size=int(payload.get("page_size", 20)),
+                cursor=int(payload.get("cursor") or 0),
+            )
         raise ValueError(f"Unsupported Douyin action: {action}")
 
     def get_user_profile(self, user_url: str) -> dict[str, Any]:
@@ -250,6 +265,108 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
             "raw_pages": pages,
         }
 
+    def get_video_comments(
+        self,
+        aweme_id: str,
+        max_items: int | str | None = 100,
+        page_size: int = 20,
+        cursor: int = 0,
+        all_pages: bool = True,
+    ) -> dict[str, Any]:
+        limit = None if max_items in [None, "", 0, "0", "all"] else int(max_items)
+        items = []
+        pages = []
+        current_cursor = int(cursor or 0)
+
+        while True:
+            remaining = page_size if limit is None else max(1, min(page_size, limit - len(items)))
+            page = self._get_json(
+                "/api/douyin/web/fetch_video_comments",
+                {"aweme_id": aweme_id, "cursor": current_cursor, "count": remaining},
+            )
+            pages.append(page)
+            comments = self._extract_comments(page)
+            if not comments:
+                break
+            for item in comments:
+                if limit is not None and len(items) >= limit:
+                    break
+                items.append(item)
+
+            next_cursor = self._extract_comment_cursor(page)
+            has_more = self._extract_has_more(page)
+            if (
+                not all_pages
+                or (limit is not None and len(items) >= limit)
+                or not has_more
+                or next_cursor == current_cursor
+            ):
+                break
+            current_cursor = next_cursor
+
+        return {
+            "status": "ok",
+            "source": self.manifest.id,
+            "aweme_id": aweme_id,
+            "items": items,
+            "count": len(items),
+            "next_cursor": self._extract_comment_cursor(pages[-1]) if pages else current_cursor,
+            "has_more": self._extract_has_more(pages[-1]) if pages else False,
+            "raw_pages": pages,
+        }
+
+    def get_video_comment_replies(
+        self,
+        item_id: str,
+        comment_id: str,
+        max_items: int | str | None = 20,
+        page_size: int = 20,
+        cursor: int = 0,
+        all_pages: bool = True,
+    ) -> dict[str, Any]:
+        limit = None if max_items in [None, "", 0, "0", "all"] else int(max_items)
+        items = []
+        pages = []
+        current_cursor = int(cursor or 0)
+
+        while True:
+            remaining = page_size if limit is None else max(1, min(page_size, limit - len(items)))
+            page = self._get_json(
+                "/api/douyin/web/fetch_video_comment_replies",
+                {"item_id": item_id, "comment_id": comment_id, "cursor": current_cursor, "count": remaining},
+            )
+            pages.append(page)
+            replies = self._extract_comments(page)
+            if not replies:
+                break
+            for item in replies:
+                if limit is not None and len(items) >= limit:
+                    break
+                items.append(item)
+
+            next_cursor = self._extract_comment_cursor(page)
+            has_more = self._extract_has_more(page)
+            if (
+                not all_pages
+                or (limit is not None and len(items) >= limit)
+                or not has_more
+                or next_cursor == current_cursor
+            ):
+                break
+            current_cursor = next_cursor
+
+        return {
+            "status": "ok",
+            "source": self.manifest.id,
+            "item_id": item_id,
+            "comment_id": comment_id,
+            "items": items,
+            "count": len(items),
+            "next_cursor": self._extract_comment_cursor(pages[-1]) if pages else current_cursor,
+            "has_more": self._extract_has_more(pages[-1]) if pages else False,
+            "raw_pages": pages,
+        }
+
     def get_sec_user_id(self, user_url: str) -> str:
         data = self._get_json("/api/douyin/web/get_sec_user_id", {"url": user_url})
         return self._extract_value(data, ["sec_user_id", "data", "sec_uid", "secUid"])
@@ -340,9 +457,21 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
         items = data.get("aweme_list") or data.get("videos") or data.get("list") or []
         return items if isinstance(items, list) else []
 
+    def _extract_comments(self, page: dict[str, Any]) -> list[dict[str, Any]]:
+        data = page.get("data") if isinstance(page.get("data"), dict) else page
+        for key in ("comments", "comment_list", "reply_comments", "replies", "list", "items"):
+            items = data.get(key) if isinstance(data, dict) else None
+            if isinstance(items, list):
+                return items
+        return data if isinstance(data, list) else []
+
     def _extract_next_cursor(self, page: dict[str, Any]) -> int:
         data = page.get("data") if isinstance(page.get("data"), dict) else page
         return int(data.get("max_cursor") or data.get("cursor") or 0)
+
+    def _extract_comment_cursor(self, page: dict[str, Any]) -> int:
+        data = page.get("data") if isinstance(page.get("data"), dict) else page
+        return int(data.get("cursor") or data.get("next_cursor") or data.get("max_cursor") or 0)
 
     def _extract_has_more(self, page: dict[str, Any]) -> bool:
         data = page.get("data") if isinstance(page.get("data"), dict) else page

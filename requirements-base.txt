@@ -4,6 +4,7 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.8.0
 python-dotenv>=1.0.1
 requests>=2.32.0
+tos>=2.8.0
 beautifulsoup4>=4.12.0
 loguru>=0.7.0
 retry>=0.9.2

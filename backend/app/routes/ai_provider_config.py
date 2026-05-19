@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/ai-provider", tags=["ai-provider"])
 
 class AiProviderConfigPayload(BaseModel):
     provider: str = Field(default="gemini")
-    access_mode: str = Field(default="official")
+    access_mode: str = Field(default="relay")
     native_api_key: str = Field(default="")
     relay_base_url: str = Field(default="https://jeniya.top")
     relay_api_key: str = Field(default="")
@@ -28,10 +28,10 @@ def get_config() -> dict[str, Any]:
     env = read_env_map()
     gemini = {
         "provider": "gemini",
-        "access_mode": env.get("GEMINI_ACCESS_MODE") or env.get("AI_ACCESS_MODE", "official"),
-        "native_api_key": env.get("GEMINI_API_KEY") or env.get("AI_NATIVE_API_KEY", ""),
-        "relay_base_url": env.get("GEMINI_RELAY_BASE_URL") or env.get("AI_RELAY_BASE_URL", "https://jeniya.top"),
-        "relay_api_key": env.get("GEMINI_RELAY_API_KEY") or env.get("AI_RELAY_API_KEY", ""),
+        "access_mode": "relay",
+        "native_api_key": "",
+        "relay_base_url": env.get("GEMINI_RELAY_BASE_URL") or env.get("YUNWU_BASE_URL") or env.get("AI_RELAY_BASE_URL", "https://yunwu.ai"),
+        "relay_api_key": env.get("GEMINI_RELAY_API_KEY") or env.get("YUNWU_API_KEY") or env.get("AI_RELAY_API_KEY", ""),
         "model": env.get("GEMINI_MODEL") or env.get("AI_MODEL", "gemini-2.5-flash"),
         "models": env_list(env, "GEMINI_MODELS", ["gemini-2.5-flash", "gemini-2.0-flash"]),
         "api_format": "generate_content",
@@ -39,13 +39,13 @@ def get_config() -> dict[str, Any]:
     }
     openai = {
         "provider": "openai",
-        "access_mode": env.get("OPENAI_ACCESS_MODE", "official"),
-        "native_api_key": env.get("OPENAI_API_KEY", ""),
-        "relay_base_url": env.get("OPENAI_RELAY_BASE_URL", ""),
-        "relay_api_key": env.get("OPENAI_RELAY_API_KEY", ""),
+        "access_mode": "relay",
+        "native_api_key": "",
+        "relay_base_url": env.get("OPENAI_RELAY_BASE_URL") or env.get("AI_RELAY_BASE_URL") or env.get("YUNWU_BASE_URL", "https://yunwu.ai/v1"),
+        "relay_api_key": env.get("OPENAI_RELAY_API_KEY") or env.get("AI_RELAY_API_KEY") or env.get("YUNWU_API_KEY", ""),
         "model": env.get("OPENAI_MODEL", "gpt-4.1-mini"),
         "models": env_list(env, "OPENAI_MODELS", ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"]),
-        "api_format": env.get("OPENAI_API_FORMAT", "responses"),
+        "api_format": env.get("OPENAI_API_FORMAT", "chat_completions"),
         "local_endpoint": "",
     }
     local = {
@@ -87,8 +87,12 @@ def get_config() -> dict[str, Any]:
         "native_api_key": env.get("DEEPSEEK_API_KEY", ""),
         "relay_base_url": env.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         "relay_api_key": env.get("DEEPSEEK_API_KEY", ""),
-        "model": env.get("DEEPSEEK_MODEL", "deepseek-chat"),
-        "models": env_list(env, "DEEPSEEK_MODELS", ["deepseek-chat", "deepseek-reasoner"]),
+        "model": env.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        "models": env_list(
+            env,
+            "DEEPSEEK_MODELS",
+            ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+        ),
         "api_format": "chat_completions",
         "local_endpoint": "",
     }
@@ -145,13 +149,13 @@ def save_config(payload: AiProviderConfigPayload) -> dict[str, Any]:
         if payload.provider == "gemini":
             updates.update(
                 {
-                    "AI_ACCESS_MODE": payload.access_mode,
-                    "AI_NATIVE_API_KEY": payload.native_api_key,
+                    "AI_ACCESS_MODE": "relay",
+                    "AI_NATIVE_API_KEY": "",
                     "AI_RELAY_BASE_URL": payload.relay_base_url,
                     "AI_RELAY_API_KEY": payload.relay_api_key,
                     "AI_MODEL": model,
-                    "GEMINI_ACCESS_MODE": payload.access_mode,
-                    "GEMINI_API_KEY": payload.native_api_key,
+                    "GEMINI_ACCESS_MODE": "relay",
+                    "GEMINI_API_KEY": "",
                     "GEMINI_RELAY_BASE_URL": payload.relay_base_url,
                     "GEMINI_RELAY_API_KEY": payload.relay_api_key,
                     "GEMINI_MODEL": model,
@@ -161,13 +165,13 @@ def save_config(payload: AiProviderConfigPayload) -> dict[str, Any]:
         if payload.provider == "openai":
             updates.update(
                 {
-                    "AI_ACCESS_MODE": payload.access_mode,
-                    "AI_NATIVE_API_KEY": payload.native_api_key,
+                    "AI_ACCESS_MODE": "relay",
+                    "AI_NATIVE_API_KEY": "",
                     "AI_RELAY_BASE_URL": payload.relay_base_url,
                     "AI_RELAY_API_KEY": payload.relay_api_key,
                     "AI_MODEL": model,
-                    "OPENAI_ACCESS_MODE": payload.access_mode,
-                    "OPENAI_API_KEY": payload.native_api_key,
+                    "OPENAI_ACCESS_MODE": "relay",
+                    "OPENAI_API_KEY": "",
                     "OPENAI_RELAY_BASE_URL": payload.relay_base_url,
                     "OPENAI_RELAY_API_KEY": payload.relay_api_key,
                     "OPENAI_MODEL": model,
@@ -270,8 +274,12 @@ def test_config(payload: AiProviderConfigPayload) -> dict[str, Any]:
         if not payload.model:
             payload.model = first_model(payload.models)
         if payload.provider == "gemini":
+            payload.access_mode = "relay"
             return test_gemini(payload)
         if payload.provider == "openai":
+            payload.access_mode = "relay"
+            if payload.api_format == "responses":
+                payload.api_format = "chat_completions"
             return test_openai_compatible(payload)
         if payload.provider in {"simple_relay", "yunwu"} and payload.api_format == "gemini_generate_content":
             return test_gemini_relay(payload)
@@ -291,12 +299,11 @@ def test_config(payload: AiProviderConfigPayload) -> dict[str, Any]:
 
 
 def test_gemini(payload: AiProviderConfigPayload) -> dict[str, Any]:
-    if payload.access_mode == "relay":
-        return test_gemini_relay(payload)
-    return test_gemini_official(payload)
+    return test_gemini_relay(payload)
 
 
 def test_gemini_official(payload: AiProviderConfigPayload) -> dict[str, Any]:
+    raise RuntimeError("Gemini official/native access is disabled. Use relay/Yunwu.")
     if not payload.native_api_key:
         raise ValueError("Missing native API key.")
     try:
@@ -365,11 +372,10 @@ def test_openai_compatible(payload: AiProviderConfigPayload) -> dict[str, Any]:
 
 
 def resolve_openai_compatible_base_url(payload: AiProviderConfigPayload) -> str:
-    if payload.provider == "openai" and payload.access_mode != "relay":
-        return "https://api.openai.com"
     if payload.relay_base_url:
         return payload.relay_base_url
     defaults = {
+        "openai": "https://yunwu.ai/v1",
         "deepseek": "https://api.deepseek.com",
         "volcano": "https://ark.cn-beijing.volces.com/api/v3",
     }
@@ -377,6 +383,8 @@ def resolve_openai_compatible_base_url(payload: AiProviderConfigPayload) -> str:
 
 
 def test_openai_responses(payload: AiProviderConfigPayload, api_key: str, base_url: str) -> dict[str, Any]:
+    if payload.provider == "openai":
+        raise RuntimeError("OpenAI native Responses API is disabled. Use relay chat_completions.")
     url = f"{base_url}/v1/responses"
     response = requests.post(
         url,
@@ -406,7 +414,7 @@ def test_openai_responses(payload: AiProviderConfigPayload, api_key: str, base_u
 
 
 def test_openai_chat_completions(payload: AiProviderConfigPayload, api_key: str, base_url: str) -> dict[str, Any]:
-    url = f"{base_url}/v1/chat/completions"
+    url = f"{base_url.rstrip('/')}/chat/completions" if base_url.rstrip("/").endswith("/v1") else f"{base_url}/v1/chat/completions"
     response = requests.post(
         url,
         headers={

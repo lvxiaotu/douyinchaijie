@@ -162,8 +162,11 @@ def create_production_reverse_job(payload: ProductionReverseRequest, background_
 
 
 @router.get("/archives")
-def archives(limit: int = 100) -> list[dict[str, Any]]:
-    return list_production_reverse_archives(limit=limit)
+def archives(
+    limit: int = 100,
+    include_result: bool = False,
+) -> list[dict[str, Any]]:
+    return list_production_reverse_archives(limit=limit, include_result=include_result)
 
 
 @router.get("/archives/{archive_id}")

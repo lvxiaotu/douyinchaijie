@@ -3,18 +3,35 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = ROOT / "data" / "runtime" / "tasks.sqlite3"
 
 
-def connect() -> sqlite3.Connection:
+@contextmanager
+def connect() -> Iterator[sqlite3.Connection]:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
-    return connection
+    try:
+        yield connection
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def load_json(value: Any, fallback: Any) -> Any:
+    if value is None or value == "":
+        return fallback
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback
 
 
 def init_db() -> None:
@@ -154,10 +171,45 @@ def init_db() -> None:
 
 def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
     task = dict(row)
-    task["payload"] = json.loads(task.pop("payload_json") or "{}")
+    task["payload"] = load_json(task.pop("payload_json"), {})
     result_json = task.pop("result_json")
-    task["result"] = json.loads(result_json) if result_json else None
+    task["result"] = load_json(result_json, None) if result_json else None
     task["events"] = list_task_events(task["id"], limit=200)
+    return task
+
+
+def compact_text(value: Any, limit: int = 180) -> str:
+    text = str(value or "").strip()
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def compact_task_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    video = payload.get("video")
+    if isinstance(video, dict):
+        return {
+            "video": {
+                "id": video.get("id") or video.get("aweme_id") or "",
+                "aweme_id": video.get("aweme_id") or video.get("id") or "",
+                "desc": compact_text(video.get("desc") or video.get("title") or "", 120),
+                "title": compact_text(video.get("title") or video.get("desc") or "", 120),
+                "cover_url": video.get("cover_url") or "",
+            }
+        }
+    compact: dict[str, Any] = {}
+    for key in ("idea", "title", "text", "workflow_id", "workflow_key"):
+        if key in payload:
+            compact[key] = compact_text(payload.get(key), 160)
+    return compact
+
+
+def row_to_task_summary(row: sqlite3.Row) -> dict[str, Any]:
+    task = dict(row)
+    task["payload"] = compact_task_payload(load_json(task.pop("payload_json"), {}))
+    task.pop("result_json", None)
+    task["result"] = None
+    task["events"] = []
     return task
 
 
@@ -278,7 +330,13 @@ def update_task(task_id: str, **updates: Any) -> dict[str, Any] | None:
     return get_task(task_id)
 
 
-def list_tasks(task_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+def list_tasks(
+    task_type: str | None = None,
+    limit: int = 100,
+    *,
+    include_result: bool = True,
+    include_events: bool = True,
+) -> list[dict[str, Any]]:
     init_db()
     with connect() as connection:
         if task_type:
@@ -291,7 +349,16 @@ def list_tasks(task_type: str | None = None, limit: int = 100) -> list[dict[str,
                 "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-    return [row_to_task(row) for row in rows]
+    if include_result or include_events:
+        tasks = [row_to_task(row) for row in rows]
+        if not include_events:
+            for task in tasks:
+                task["events"] = []
+        if not include_result:
+            for task in tasks:
+                task["result"] = None
+        return tasks
+    return [row_to_task_summary(row) for row in rows]
 
 
 def get_task(task_id: str) -> dict[str, Any] | None:
@@ -358,19 +425,51 @@ def save_analysis_archive(
 
 def row_to_archive(row: sqlite3.Row) -> dict[str, Any]:
     archive = dict(row)
-    archive["video"] = json.loads(archive.pop("video_json") or "{}")
-    archive["result"] = json.loads(archive.pop("result_json") or "{}")
+    archive["video"] = load_json(archive.pop("video_json"), {})
+    archive["result"] = load_json(archive.pop("result_json"), {})
     return archive
 
 
-def list_analysis_archives(limit: int = 100) -> list[dict[str, Any]]:
+def archive_result_summary(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    nested = result.get("result") if isinstance(result.get("result"), dict) else result
+    summary = nested.get("summary") if isinstance(nested, dict) else ""
+    if isinstance(summary, str) and summary.strip().startswith("{"):
+        parsed = load_json(summary, {})
+        if isinstance(parsed, dict):
+            nested = parsed
+            summary = nested.get("summary") or nested.get("摘要") or nested.get("视频摘要") or ""
+    compact = {"summary": compact_text(summary, 220)}
+    for key in (
+        "master_prompt",
+        "production_overview",
+        "content_identity",
+        "core_hook",
+        "market_positioning",
+        "viral_scores",
+    ):
+        value = nested.get(key) if isinstance(nested, dict) else None
+        if value is not None:
+            compact[key] = value
+    return compact
+
+
+def row_to_archive_summary(row: sqlite3.Row) -> dict[str, Any]:
+    archive = dict(row)
+    archive["video"] = compact_task_payload({"video": load_json(archive.pop("video_json"), {})}).get("video", {})
+    archive["result"] = archive_result_summary(load_json(archive.pop("result_json"), {}))
+    return archive
+
+
+def list_analysis_archives(limit: int = 100, *, include_result: bool = True) -> list[dict[str, Any]]:
     init_db()
     with connect() as connection:
         rows = connection.execute(
             "SELECT * FROM analysis_archives ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [row_to_archive(row) for row in rows]
+    return [row_to_archive(row) if include_result else row_to_archive_summary(row) for row in rows]
 
 
 def get_analysis_archive(archive_id: str) -> dict[str, Any] | None:
@@ -423,14 +522,14 @@ def save_prompt_reverse_archive(
     return get_prompt_reverse_archive(archive_id)
 
 
-def list_prompt_reverse_archives(limit: int = 100) -> list[dict[str, Any]]:
+def list_prompt_reverse_archives(limit: int = 100, *, include_result: bool = True) -> list[dict[str, Any]]:
     init_db()
     with connect() as connection:
         rows = connection.execute(
             "SELECT * FROM prompt_reverse_archives ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [row_to_archive(row) for row in rows]
+    return [row_to_archive(row) if include_result else row_to_archive_summary(row) for row in rows]
 
 
 def get_prompt_reverse_archive(archive_id: str) -> dict[str, Any] | None:
@@ -483,14 +582,14 @@ def save_production_reverse_archive(
     return get_production_reverse_archive(archive_id)
 
 
-def list_production_reverse_archives(limit: int = 100) -> list[dict[str, Any]]:
+def list_production_reverse_archives(limit: int = 100, *, include_result: bool = True) -> list[dict[str, Any]]:
     init_db()
     with connect() as connection:
         rows = connection.execute(
             "SELECT * FROM production_reverse_archives ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [row_to_archive(row) for row in rows]
+    return [row_to_archive(row) if include_result else row_to_archive_summary(row) for row in rows]
 
 
 def get_production_reverse_archive(archive_id: str) -> dict[str, Any] | None:
