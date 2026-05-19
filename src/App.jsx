@@ -1,7 +1,7 @@
 import React, { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchive, fetchAiProductionReverseArchives, fetchAiPromptReverseArchive, fetchAiPromptReverseArchives, fetchAiVideoArchive, fetchAiVideoArchives, fetchTask, fetchTasks, fetchWorkbench } from "./services/api";
 import { fallbackWorkbench } from "./workbenchSeed";
-import { Database, FolderCog, Layers3, Languages, MoonStar, RefreshCw, SunMedium } from "lucide-react";
+import { Database, FolderCog, Languages, MoonStar, RefreshCw, SunMedium } from "lucide-react";
 import { Badge, ToolCard } from "./components/common/index";
 import { THEME_STORAGE_KEY, UI_VERSION, jianyingEditorItems, navItems, sections, settingItems } from "./constants/appConfig";
 import { DouyinCollectorPanel } from "./features/douyin";
@@ -20,6 +20,7 @@ export function App() {
   const [activeSection, setActiveSection] = useState("dashboard");
   const [activeSetting, setActiveSetting] = useState("ai-provider");
   const [activeJianyingEditor, setActiveJianyingEditor] = useState("script");
+  const [activeDouyinWorkbench, setActiveDouyinWorkbench] = useState("collector");
   const [activeToolId, setActiveToolId] = useState("");
   const [activeAnalysisStatus, setActiveAnalysisStatus] = useState("running");
   const [activePromptStatus, setActivePromptStatus] = useState("running");
@@ -121,7 +122,7 @@ export function App() {
   }, [uiTheme]);
 
   useEffect(() => {
-    if (activeSection !== "dashboard" && !hasTrackedActiveTasks) return undefined;
+    if (activeSection !== "taskCenter" && !hasTrackedActiveTasks) return undefined;
     let mounted = true;
     let timer = 0;
 
@@ -148,7 +149,7 @@ export function App() {
   }, [activeSection, hasTrackedActiveTasks]);
 
   useEffect(() => {
-    if (activeSection !== "library" && activeSection !== "dashboard") return;
+    if (activeSection !== "library" && activeSection !== "taskCenter") return;
     if (archivesLoaded) return;
     let mounted = true;
 
@@ -489,7 +490,7 @@ export function App() {
   const [title] = sections[activeSection] || ["AI 视频队列"];
 
   useEffect(() => {
-    document.title = `${title} | 抖音解析`;
+    document.title = `${title} | 内容实验室`;
   }, [title]);
 
   const subnavItems =
@@ -514,25 +515,42 @@ export function App() {
               }),
           }))
         : [];
-  const headerNavItems =
-    navItems.some(([id]) => id === "aiVideoQueue")
-      ? navItems
-      : [
-          ...navItems.slice(0, 7),
-          ["aiVideoQueue", Layers3, "AI 视频队列"],
-          ...navItems.slice(7),
-        ];
+  const headerNavItems = navItems;
 
   let sectionContent = null;
 
   if (activeSection === "dashboard") {
     sectionContent = (
-      <section className="dashboard-stack">
-        <DouyinCollectorPanel
-          onBreakdown={handleCreateVideoBreakdown}
-          onPromptReverse={handleCreatePromptReverse}
-          onProductionReverse={handleCreateProductionReverse}
-        />
+      <section className="douyin-workbench">
+        <div className="section-subnav douyin-workbench-tabs" role="tablist" aria-label="抖音工作台">
+          {[
+            ["collector", "采集解析"],
+            ["target", "对标库"],
+          ].map(([id, label]) => (
+            <button
+              className={`section-subnav-item ${activeDouyinWorkbench === id ? "active" : ""}`}
+              key={id}
+              type="button"
+              onClick={() => setActiveDouyinWorkbench(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {activeDouyinWorkbench === "collector" ? (
+          <DouyinCollectorPanel
+            onBreakdown={handleCreateVideoBreakdown}
+            onPromptReverse={handleCreatePromptReverse}
+            onProductionReverse={handleCreateProductionReverse}
+          />
+        ) : (
+          <DouyinTargetPanel />
+        )}
+      </section>
+    );
+  } else if (activeSection === "taskCenter") {
+    sectionContent = (
+      <section className="dashboard-stack task-center-page">
         <section className="panel task-board-panel">
           <div className="panel-header">
             <div>
@@ -578,12 +596,6 @@ export function App() {
             />
           </div>
         </section>
-      </section>
-    );
-  } else if (activeSection === "douyinTarget") {
-    sectionContent = (
-      <section>
-        <DouyinTargetPanel />
       </section>
     );
   } else if (activeSection === "tools") {
@@ -790,7 +802,7 @@ export function App() {
                     {index < headerNavItems.length - 1 && <span className="api-type-text separator">/</span>}
                   </React.Fragment>
                 ))}
-                <span className="brand-text">抖音解析</span>
+                <span className="brand-text">内容实验室</span>
               </div>
             </div>
           </div>
