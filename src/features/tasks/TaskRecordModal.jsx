@@ -1,5 +1,6 @@
 import { Badge } from "../../components/common/index";
 import { statusText } from "../../constants/appConfig";
+import { commentCollectionLabel, commentCollectionTone } from "../../utils/appUtils";
 import { ModelRunSummary } from "../results/ModelRunSummary";
 import { Archive } from "lucide-react";
 
@@ -10,6 +11,7 @@ export function TaskRecordModal({
   onOpenResult,
   onArchiveTask,
   onDeleteTask,
+  onRetryComments,
 }) {
   if (!record?.task) return null;
 
@@ -28,6 +30,12 @@ export function TaskRecordModal({
   const updatedAt = task.updated_at
     ? new Date(task.updated_at * 1000).toLocaleString("zh-CN")
     : task.updated || "";
+  const commentCollection = task.commentCollection;
+  const canRetryComments =
+    type === "analysis" &&
+    commentCollection?.status === "failed" &&
+    task.status !== "running" &&
+    task.status !== "pending";
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
@@ -76,6 +84,12 @@ export function TaskRecordModal({
             <span>任务 ID</span>
             <p>{task.id}</p>
           </article>
+          {type === "analysis" && (
+            <article className="task-detail-meta-card">
+              <span>评论数据</span>
+              <p>{commentCollectionLabel(commentCollection)}</p>
+            </article>
+          )}
           {type === "runninghub_tts" && task.remoteTaskId && (
             <article className="task-detail-meta-card">
               <span>远端任务 ID</span>
@@ -167,6 +181,21 @@ export function TaskRecordModal({
         {task.error && <div className="error-box">{task.error}</div>}
 
         {type === "analysis" && <ModelRunSummary runs={task.modelRuns || task.result?.model_runs || task.model_runs} compact />}
+
+        {type === "analysis" && commentCollection && (
+          <section className="analysis-section task-detail-section">
+            <strong>AI 拆解评论数据步骤</strong>
+            <div className="task-detail-badges">
+              <Badge status={commentCollectionTone(commentCollection)}>{commentCollectionLabel(commentCollection)}</Badge>
+            </div>
+            {commentCollection.error && <p className="field-hint">评论数据获取失败，但拆解任务已继续执行：{commentCollection.error}</p>}
+            {canRetryComments && onRetryComments && (
+              <button className="text-button" type="button" onClick={() => onRetryComments(task)}>
+                再次获取评论数据
+              </button>
+            )}
+          </section>
+        )}
 
         <div className="task-detail-actions">
           {task.status === "done" && onArchiveTask && (

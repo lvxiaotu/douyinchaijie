@@ -20,6 +20,12 @@ from backend.app.task_store import (
     save_analysis_archive,
     update_task,
 )
+from backend.app.ai_video_comment_service import (
+    collect_comments_for_ai_task,
+    merge_comment_context_into_result,
+    merge_comment_state_into_payload,
+    merge_comment_state_into_task_result,
+)
 from backend.app.short_video_analysis_store import (
     get_analysis_dataset,
     list_remake_exports,
@@ -54,6 +60,7 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 class BreakdownRequest(BaseModel):
     video: dict[str, Any] = Field(..., description="Collected video item")
     provider: str | None = Field(default=None, description="mock | gemini | openai | local")
+    comment_collection: dict[str, Any] | None = Field(default=None, description="Comment collection options for AI breakdown")
 
 
 class AiVideoConfigPayload(BaseModel):
@@ -275,10 +282,32 @@ def run_breakdown_task(task_id: str, video: dict[str, Any], provider: str | None
         semaphore.acquire()
         acquired = True
         report(5, "后台任务已启动")
-        job = adapter().create_job(video=video, provider=provider, job_id=task_id, progress=report)
+        task = get_task(task_id) or {}
+        if task:
+            comment_state, patched_video = collect_comments_for_ai_task(task, progress=report)
+            payload = merge_comment_state_into_payload(task.get("payload") or {}, video=patched_video, comment_state=comment_state)
+            update_task(task_id, payload_json=payload)
+            video = patched_video or video
+            if comment_state.get("status") == "failed":
+                report(30, f"评论数据获取失败，继续拆解：{comment_state.get('error') or 'unknown'}")
+            elif comment_state.get("status") == "done":
+                report(
+                    30,
+                    f"评论数据已补全：评论 {comment_state.get('comment_saved_count') or 0} 条 / 回复 {comment_state.get('reply_saved_count') or 0} 条",
+                )
+            else:
+                report(30, "评论数据跳过，继续拆解")
+        else:
+            comment_state = {"status": "skipped", "reason": "task_not_found"}
+
+        def analysis_report(progress: int, message: str) -> None:
+            report(30 + int(max(0, min(100, progress)) * 0.7), message)
+
+        job = adapter().create_job(video=video, provider=provider, job_id=task_id, progress=analysis_report)
         if not get_task(task_id):
             return
         result = attach_model_runs(task_id, job.get("result") or {})
+        result = merge_comment_context_into_result(result, video=video, comment_state=comment_state)
         update_task(
             task_id,
             status="done" if job.get("status") == "done" else "running",
@@ -647,8 +676,11 @@ def create_breakdown_job(payload: BreakdownRequest) -> dict[str, Any]:
             task_type="ai_video_analysis",
             title=video_title(payload.video),
             provider=provider,
-            payload={"video": payload.video},
-            message="已加入 AI 视频拆解队列，等待后台 worker 执行",
+            payload={
+                "video": payload.video,
+                "comment_collection": payload.comment_collection or {"enabled": True},
+            },
+            message="已加入 AI 视频拆解队列，等待评论数据和后台 worker 执行",
         )
         enqueue_ai_video_job(task_id=task_id, video=payload.video, provider=provider)
         task["queue"] = queue_stats(task_id=task_id)
@@ -744,3 +776,56 @@ def retry_job(task_id: str) -> dict[str, Any]:
         )
     update_task(task_id, status="pending", progress=0, message="已重新加入 AI 视频拆解队列", error=None)
     return {"status": "ok", "job": job, "queue": queue_stats(task_id=task_id)}
+
+
+@router.post("/jobs/{task_id}/comments/retry")
+def retry_job_comments(task_id: str) -> dict[str, Any]:
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.get("type") != "ai_video_analysis":
+        raise HTTPException(status_code=400, detail="Only AI video analysis tasks can retry comments here")
+
+    job = get_ai_video_job(task_id)
+    if job and job.get("status") in {"running", "claimed"}:
+        raise HTTPException(status_code=409, detail="AI video task is still running. Wait for the current run to finish before retrying comments.")
+
+    def report(progress: int, message: str) -> None:
+        update_task(task_id, progress=max(int(task.get("progress") or 0), progress), message=message)
+
+    comment_state, patched_video = collect_comments_for_ai_task(task, force=True, progress=report)
+    payload = merge_comment_state_into_payload(task.get("payload") or {}, video=patched_video, comment_state=comment_state)
+    result = merge_comment_state_into_task_result(task.get("result") or {}, video=patched_video, comment_state=comment_state)
+    updated = update_task(
+        task_id,
+        status=task.get("status") or "done",
+        progress=task.get("progress") or 100,
+        payload_json=payload,
+        result_json=result,
+        message=(
+            f"评论数据重试完成：评论 {comment_state.get('comment_saved_count') or 0} 条 / 回复 {comment_state.get('reply_saved_count') or 0} 条"
+            if comment_state.get("status") == "done"
+            else f"评论数据重试失败：{comment_state.get('error') or comment_state.get('reason') or 'unknown'}"
+        ),
+        error=task.get("error"),
+    )
+
+    if task.get("status") == "done":
+        save_analysis_archive(
+            archive_id=task_id,
+            task_id=task_id,
+            title=task.get("title") or "AI 视频拆解",
+            provider=task.get("provider") or "",
+            video=patched_video,
+            result=result,
+        )
+        persist_analysis_result(
+            task_id=task_id,
+            video=patched_video,
+            result=result,
+            provider=task.get("provider") or "",
+            job_path=str(result.get("checkpoint_path") or ""),
+        )
+        update_target_task_by_ai_task_id({"id": task_id, "status": "done", "result": result, "error": task.get("error") or ""})
+
+    return {"status": "ok", "task": updated, "comment_collection": comment_state}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -9,6 +10,19 @@ from urllib.parse import unquote, urlparse
 import requests
 from dotenv import load_dotenv
 
+from backend.app.error_log_store import write_error_log
+from backend.app.tiktok_target_store import (
+    create_target_video,
+    get_target_user_by_identifiers,
+    get_target_user_search_page,
+    get_target_user_video_page,
+    get_target_video,
+    get_target_video_comment_page,
+    upsert_target_user,
+    upsert_target_user_search_page,
+    upsert_target_user_video_page,
+    upsert_target_video_comment_page,
+)
 from integrations.base import IntegrationAdapter, IntegrationManifest
 
 
@@ -44,6 +58,48 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
             or os.getenv("DOUYIN_OUTPUT_DIR")
             or DEFAULT_OUTPUT_DIR
         )
+
+    def _build_profile_user_payload(self, profile: dict[str, Any], raw: dict[str, Any], *, sec_user_id: str = "") -> dict[str, Any]:
+        payload = {
+            "keyword": "",
+            "sec_user_id": sec_user_id or str(profile.get("sec_uid") or profile.get("sec_user_id") or ""),
+            "unique_id": str(profile.get("unique_id") or profile.get("uniqueId") or profile.get("short_id") or ""),
+            "nickname": str(profile.get("nickname") or profile.get("nickname_display") or ""),
+            "avatar_url": str(profile.get("avatar") or profile.get("avatar_url") or ""),
+            "signature": str(profile.get("signature") or profile.get("desc") or ""),
+            "follower_count": profile.get("follower_count"),
+            "like_count": profile.get("total_favorited") or profile.get("like_count"),
+            "aweme_count": profile.get("aweme_count"),
+            "following_count": profile.get("following_count"),
+            "recent_update_at": profile.get("last_post_at") or profile.get("recent_update_at"),
+            "last_post_at": profile.get("last_post_at") or profile.get("recent_update_at"),
+            "verified": profile.get("verified"),
+            "is_private": profile.get("is_private"),
+            "status": "candidate",
+            "searched_at": int(time.time()),
+            "source_json": raw or profile,
+        }
+        return payload
+
+    def _build_video_payload(self, item: dict[str, Any], *, user_id: str = "", set_id: str = "") -> dict[str, Any]:
+        return {
+            "set_id": set_id,
+            "aweme_id": str(item.get("aweme_id") or item.get("id") or ""),
+            "desc": item.get("desc") or item.get("title") or "",
+            "cover_url": item.get("cover_url") or item.get("cover") or "",
+            "play_url": item.get("play_url") or item.get("share_url") or "",
+            "download_url": item.get("download_url") or item.get("source_video_url") or "",
+            "create_time": item.get("create_time"),
+            "digg_count": item.get("digg_count") or item.get("like_count"),
+            "comment_count": item.get("comment_count"),
+            "share_count": item.get("share_count"),
+            "collect_count": item.get("collect_count") or item.get("favorite_count"),
+            "play_count": item.get("play_count") or item.get("view_count"),
+            "is_top": item.get("is_top") or item.get("is_pinned"),
+            "selected": False,
+            "selection_strategy": "cache_refresh",
+            "source_json": {**item, "user_id": user_id},
+        }
 
     def validate_config(self, config: dict[str, Any] | None = None) -> list[str]:
         cfg = {**self.config, **(config or {})}
@@ -104,13 +160,26 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
 
     def get_user_profile(self, user_url: str) -> dict[str, Any]:
         sec_user_id = self.get_sec_user_id(user_url)
+        cached_user = get_target_user_by_identifiers(sec_user_id=sec_user_id)
+        if cached_user and cached_user.get("source_json"):
+            return {
+                "status": "ok",
+                "source": self.manifest.id,
+                "sec_user_id": sec_user_id,
+                "raw": cached_user.get("source_json") or {},
+                "profile": self._extract_profile(cached_user.get("source_json") or cached_user),
+                "cache": {"hit": True, "user_id": cached_user.get("id")},
+            }
         data = self._get_json("/api/douyin/web/handler_user_profile", {"sec_user_id": sec_user_id})
+        profile = self._extract_profile(data)
+        if profile:
+            upsert_target_user(sec_user_id or str(profile.get("sec_uid") or profile.get("uid") or ""), self._build_profile_user_payload(profile, data, sec_user_id=sec_user_id))
         return {
             "status": "ok",
             "source": self.manifest.id,
             "sec_user_id": sec_user_id,
             "raw": data,
-            "profile": self._extract_profile(data),
+            "profile": profile,
         }
 
     def get_user_videos(
@@ -124,6 +193,30 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
     ) -> dict[str, Any]:
         target_sec_user_id = sec_user_id or self.get_sec_user_id(user_url or "")
         limit = None if max_items in [None, "", 0, "0", "all"] else int(max_items)
+        cache_count = limit if limit is not None else page_size
+        cached = get_target_user_video_page(
+            source=self.manifest.id,
+            sec_user_id=target_sec_user_id,
+            unique_id="",
+            max_cursor=max_cursor,
+            count=cache_count,
+            sort_type=0,
+            filter_type=0,
+        )
+        if cached:
+            raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
+            pages = raw.get("raw_pages") if isinstance(raw.get("raw_pages"), list) else []
+            return {
+                "status": "ok",
+                "source": self.manifest.id,
+                "sec_user_id": target_sec_user_id,
+                "items": cached.get("items") or [],
+                "count": len(cached.get("items") or []),
+                "next_cursor": cached.get("next_cursor"),
+                "has_more": bool(cached.get("has_more")),
+                "raw_pages": pages or [raw] if raw else [],
+                "cache": {"hit": True, "cache_key": cached.get("cache_key")},
+            }
         items = []
         pages = []
         current_cursor = max_cursor
@@ -155,12 +248,39 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
                 break
             current_cursor = next_cursor
 
+        video_items = [item for item in items if isinstance(item, dict)]
+        for item in video_items:
+            aweme_id = str(item.get("aweme_id") or item.get("id") or "")
+            if not aweme_id:
+                continue
+            create_target_video(
+                aweme_id,
+                target_sec_user_id or aweme_id,
+                self._build_video_payload(item, user_id=target_sec_user_id),
+            )
+        upsert_target_user_video_page(
+            source=self.manifest.id,
+            sec_user_id=target_sec_user_id,
+            unique_id="",
+            max_cursor=max_cursor,
+            count=cache_count,
+            sort_type=0,
+            filter_type=0,
+            next_cursor=self._extract_next_cursor(pages[-1]) if pages else current_cursor,
+            has_more=self._extract_has_more(pages[-1]) if pages else False,
+            request={"sec_user_id": target_sec_user_id, "max_cursor": max_cursor, "count": page_size},
+            items=video_items[: limit] if limit is not None else video_items,
+            raw={"raw": pages[-1] if pages else {}, "raw_pages": pages},
+            pagination={"max_cursor": self._extract_next_cursor(pages[-1]) if pages else current_cursor, "has_more": self._extract_has_more(pages[-1]) if pages else False},
+            normalized={"max_cursor": self._extract_next_cursor(pages[-1]) if pages else current_cursor, "has_more": self._extract_has_more(pages[-1]) if pages else False},
+            fetched_at=int(time.time()),
+        )
         return {
             "status": "ok",
             "source": self.manifest.id,
             "sec_user_id": target_sec_user_id,
-            "items": items,
-            "count": len(items),
+            "items": video_items,
+            "count": len(video_items),
             "next_cursor": self._extract_next_cursor(pages[-1]) if pages else current_cursor,
             "has_more": self._extract_has_more(pages[-1]) if pages else False,
             "raw_pages": pages,
@@ -168,17 +288,42 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
 
     def get_work_detail(self, work_url: str) -> dict[str, Any]:
         aweme_id = None
+        cached_video = None
         try:
             data = self._get_json("/api/hybrid/video_data", {"url": work_url, "minimal": "false"})
         except RuntimeError:
             aweme_id = self.get_aweme_id(work_url)
+            cached_video = get_target_video(aweme_id)
+            if cached_video:
+                return {
+                    "status": "ok",
+                    "source": self.manifest.id,
+                    "aweme_id": aweme_id,
+                    "raw": cached_video.get("source_json") or {},
+                    "detail": cached_video,
+                    "cache": {"hit": True, "video_id": cached_video.get("id")},
+                }
             data = self._get_json("/api/douyin/web/fetch_one_video", {"aweme_id": aweme_id})
+        detail = self._extract_work(data)
+        aweme_id = aweme_id or detail.get("aweme_id") or ""
+        if detail.get("aweme_id"):
+            create_target_video(
+                str(detail.get("aweme_id") or aweme_id),
+                str((detail.get("author") or {}).get("uid") if isinstance(detail.get("author"), dict) else aweme_id),
+                self._build_video_payload(
+                    {
+                        **detail,
+                        "aweme_id": detail.get("aweme_id") or aweme_id,
+                    },
+                    user_id=str((detail.get("author") or {}).get("uid") if isinstance(detail.get("author"), dict) else ""),
+                ),
+            )
         return {
             "status": "ok",
             "source": self.manifest.id,
             "aweme_id": aweme_id or self._extract_work(data).get("aweme_id"),
             "raw": data,
-            "detail": self._extract_work(data),
+            "detail": detail,
         }
 
     def download_favorite_videos(self, max_items: int = 18, page_size: int = 18) -> dict[str, Any]:
@@ -274,6 +419,31 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
         all_pages: bool = True,
     ) -> dict[str, Any]:
         limit = None if max_items in [None, "", 0, "0", "all"] else int(max_items)
+        cache_count = limit if limit is not None else page_size
+        cached = get_target_video_comment_page(
+            source=self.manifest.id,
+            video_id=aweme_id,
+            aweme_id=aweme_id,
+            item_id="",
+            comment_id="",
+            page_kind="comments",
+            cursor=cursor,
+            count=cache_count,
+        )
+        if cached:
+            raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
+            pages = raw.get("raw_pages") if isinstance(raw.get("raw_pages"), list) else []
+            return {
+                "status": "ok",
+                "source": self.manifest.id,
+                "aweme_id": aweme_id,
+                "items": cached.get("items") or [],
+                "count": len(cached.get("items") or []),
+                "next_cursor": cached.get("pagination", {}).get("cursor") if isinstance(cached.get("pagination"), dict) else cursor,
+                "has_more": bool(cached.get("pagination", {}).get("has_more")) if isinstance(cached.get("pagination"), dict) else False,
+                "raw_pages": pages or [raw] if raw else [],
+                "cache": {"hit": True, "cache_key": cached.get("cache_key")},
+            }
         items = []
         pages = []
         current_cursor = int(cursor or 0)
@@ -304,12 +474,29 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
                 break
             current_cursor = next_cursor
 
+        normalized_items = [item for item in items if isinstance(item, dict)]
+        upsert_target_video_comment_page(
+            source=self.manifest.id,
+            video_id=aweme_id,
+            aweme_id=aweme_id,
+            item_id="",
+            comment_id="",
+            page_kind="comments",
+            cursor=cursor,
+            count=cache_count,
+            request={"aweme_id": aweme_id, "cursor": cursor, "count": page_size},
+            items=normalized_items[: limit] if limit is not None else normalized_items,
+            raw={"raw": pages[-1] if pages else {}, "raw_pages": pages},
+            pagination={"cursor": self._extract_comment_cursor(pages[-1]) if pages else current_cursor, "has_more": self._extract_has_more(pages[-1]) if pages else False},
+            normalized={"cursor": self._extract_comment_cursor(pages[-1]) if pages else current_cursor, "has_more": self._extract_has_more(pages[-1]) if pages else False},
+            fetched_at=int(time.time()),
+        )
         return {
             "status": "ok",
             "source": self.manifest.id,
             "aweme_id": aweme_id,
-            "items": items,
-            "count": len(items),
+            "items": normalized_items,
+            "count": len(normalized_items),
             "next_cursor": self._extract_comment_cursor(pages[-1]) if pages else current_cursor,
             "has_more": self._extract_has_more(pages[-1]) if pages else False,
             "raw_pages": pages,
@@ -325,6 +512,32 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
         all_pages: bool = True,
     ) -> dict[str, Any]:
         limit = None if max_items in [None, "", 0, "0", "all"] else int(max_items)
+        cache_count = limit if limit is not None else page_size
+        cached = get_target_video_comment_page(
+            source=self.manifest.id,
+            video_id=item_id,
+            aweme_id=item_id,
+            item_id=item_id,
+            comment_id=comment_id,
+            page_kind="replies",
+            cursor=cursor,
+            count=cache_count,
+        )
+        if cached:
+            raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
+            pages = raw.get("raw_pages") if isinstance(raw.get("raw_pages"), list) else []
+            return {
+                "status": "ok",
+                "source": self.manifest.id,
+                "item_id": item_id,
+                "comment_id": comment_id,
+                "items": cached.get("items") or [],
+                "count": len(cached.get("items") or []),
+                "next_cursor": cached.get("pagination", {}).get("cursor") if isinstance(cached.get("pagination"), dict) else cursor,
+                "has_more": bool(cached.get("pagination", {}).get("has_more")) if isinstance(cached.get("pagination"), dict) else False,
+                "raw_pages": pages or [raw] if raw else [],
+                "cache": {"hit": True, "cache_key": cached.get("cache_key")},
+            }
         items = []
         pages = []
         current_cursor = int(cursor or 0)
@@ -355,13 +568,30 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
                 break
             current_cursor = next_cursor
 
+        normalized_items = [item for item in items if isinstance(item, dict)]
+        upsert_target_video_comment_page(
+            source=self.manifest.id,
+            video_id=item_id,
+            aweme_id=item_id,
+            item_id=item_id,
+            comment_id=comment_id,
+            page_kind="replies",
+            cursor=cursor,
+            count=cache_count,
+            request={"item_id": item_id, "comment_id": comment_id, "cursor": cursor, "count": page_size},
+            items=normalized_items[: limit] if limit is not None else normalized_items,
+            raw={"raw": pages[-1] if pages else {}, "raw_pages": pages},
+            pagination={"cursor": self._extract_comment_cursor(pages[-1]) if pages else current_cursor, "has_more": self._extract_has_more(pages[-1]) if pages else False},
+            normalized={"cursor": self._extract_comment_cursor(pages[-1]) if pages else current_cursor, "has_more": self._extract_has_more(pages[-1]) if pages else False},
+            fetched_at=int(time.time()),
+        )
         return {
             "status": "ok",
             "source": self.manifest.id,
             "item_id": item_id,
             "comment_id": comment_id,
-            "items": items,
-            "count": len(items),
+            "items": normalized_items,
+            "count": len(normalized_items),
             "next_cursor": self._extract_comment_cursor(pages[-1]) if pages else current_cursor,
             "has_more": self._extract_has_more(pages[-1]) if pages else False,
             "raw_pages": pages,
@@ -376,22 +606,88 @@ class DouyinDownloadApiAdapter(IntegrationAdapter):
         return self._extract_value(data, ["aweme_id", "data", "id"])
 
     def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        response = requests.get(f"{self.api_base}{path}", params=params, timeout=60)
+        try:
+            response = requests.get(f"{self.api_base}{path}", params=params, timeout=60)
+        except requests.RequestException as exc:
+            write_error_log(
+                namespace="douyin-download-api",
+                path=path,
+                method="GET",
+                request={"params": params},
+                exc=exc,
+                api_base=self.api_base,
+                extra={"phase": "request_exception"},
+            )
+            raise RuntimeError(f"Upstream API failed: {exc}") from exc
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
+            write_error_log(
+                namespace="douyin-download-api",
+                path=path,
+                method="GET",
+                request={"params": params},
+                exc=exc,
+                api_base=self.api_base,
+                status_code=response.status_code,
+                response_text=response.text[:4000],
+                extra={"phase": "http_error"},
+            )
             raise RuntimeError(
                 f"Upstream API failed: HTTP {response.status_code}, body={response.text[:1200]}"
             ) from exc
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            write_error_log(
+                namespace="douyin-download-api",
+                path=path,
+                method="GET",
+                request={"params": params},
+                exc=exc,
+                api_base=self.api_base,
+                status_code=response.status_code,
+                response_text=response.text[:4000],
+                extra={"phase": "non_json_response"},
+            )
+            raise RuntimeError(f"Upstream API returned non-JSON response: {response.text[:1200]}") from exc
 
     def _download_one(self, url: str, fallback_name: str) -> str:
-        response = requests.get(
-            f"{self.api_base}/api/download",
-            params={"url": url, "prefix": "true", "with_watermark": "false"},
-            timeout=300,
-            stream=True,
-        )
+        download_path = "/api/download"
+        params = {"url": url, "prefix": "true", "with_watermark": "false"}
+        try:
+            response = requests.get(
+                f"{self.api_base}{download_path}",
+                params=params,
+                timeout=300,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            write_error_log(
+                namespace="douyin-download-api",
+                path=download_path,
+                method="GET",
+                request={"params": params},
+                exc=exc,
+                api_base=self.api_base,
+                extra={"phase": "request_exception"},
+            )
+            raise
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            write_error_log(
+                namespace="douyin-download-api",
+                path=download_path,
+                method="GET",
+                request={"params": params},
+                exc=exc,
+                api_base=self.api_base,
+                status_code=response.status_code,
+                response_text=response.text[:4000],
+                extra={"phase": "http_error"},
+            )
+            raise
         response.raise_for_status()
         file_name = self._filename_from_response(response) or f"douyin_{fallback_name}.mp4"
         target = self.output_dir / file_name

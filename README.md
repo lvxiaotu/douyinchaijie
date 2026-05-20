@@ -4,6 +4,30 @@
 
 当前仓库把前端工作台、FastAPI 后端、第三方能力适配层，以及剪映相关 SDK 能力整合在一起，目标是把“采集素材 -> 分析视频 -> 生成脚本 -> 进入剪映生产链路”串成一套可持续演进的本地工具链。
 
+## 数据策略
+
+抖音链路已改成默认的“先查库，再上游”模式：
+
+- 原始数据和规范化数据同时落库
+- 用户、视频、评论、分页结果都支持关键 ID / 分页键复用
+- 同一页结果命中后直接回库，不重复打上游
+- `recent_update_at`、`last_post_at` 必须保留
+- `play_count` 不能最终落成 0
+- AI 视频拆解里的评论采集是一个独立步骤，失败不阻断拆解
+- 评论失败会在任务中心保留状态，并支持再次获取
+
+统一错误落盘目录：
+
+```text
+data/runtime/error/<namespace>/<YYYYMMDD>/*.json
+```
+
+当前 namespace：
+
+- `tikhub`
+- `douyin-download-api`
+- `ai-provider`
+
 ## 当前能力
 
 - 抖音采集集成
@@ -11,6 +35,8 @@
   - 用户作品列表
   - 单作品详情
   - 收藏视频列表与下载
+  - 搜索结果、作品页、评论页缓存复用
+  - 上游报错统一写入 `data/runtime/error`
 - AI 视频拆解
   - 后端异步任务执行
   - 拆解结果归档
@@ -201,10 +227,39 @@ POST /api/integrations/douyin/config
 POST /api/integrations/douyin/user-profile
 POST /api/integrations/douyin/user-videos
 POST /api/integrations/douyin/work-detail
+POST /api/integrations/douyin/video-comments
+POST /api/integrations/douyin/video-comment-replies
 POST /api/integrations/douyin/favorites/items
 POST /api/integrations/douyin/favorites/download
 GET  /api/integrations/douyin/media-proxy
 ```
+
+### 抖音对标与 AI 拆解
+
+```text
+POST /api/tools/douyin-target/search
+POST /api/tools/douyin-target/users/bulk
+GET  /api/tools/douyin-target/sets
+POST /api/tools/douyin-target/sets
+GET  /api/tools/douyin-target/sets/{set_id}
+PATCH /api/tools/douyin-target/sets/{set_id}
+DELETE /api/tools/douyin-target/sets/{set_id}
+POST /api/tools/douyin-target/videos/collect
+GET  /api/tools/douyin-target/videos/{video_id}/interactions
+POST /api/tools/douyin-target/analysis/enqueue
+POST /api/tools/douyin-target/analysis/{task_id}/retry-comments
+POST /api/tools/ai-video-analysis/jobs/{task_id}/comments/retry
+```
+
+对标链路的数据保存：
+
+- `tiktok_target_users`：对标用户，保存名称、简介、头像、粉丝数、点赞数、作品数、关注数、认证/私密状态、`recent_update_at`、`last_post_at`、`source_json`
+- `tiktok_target_user_search_pages`：TikHub 用户搜索页原始响应、请求参数、分页信息、规范化 items
+- `tiktok_target_user_video_pages`：用户作品分页缓存，按 `source + sec_user_id + max_cursor + count + sort/filter` 复用
+- `tiktok_target_videos`：视频详情、播放/点赞/评论/转发/收藏、发布时间、派生指标、`source_json`
+- `tiktok_target_video_comment_pages`：评论页/回复页原始响应和分页缓存
+- `tiktok_target_video_comments`：评论和回复明细
+- `tiktok_target_video_interaction_insights`：互动洞察、Top 评论、置顶评论、作者回复、关键词/情绪统计
 
 ### AI 模型配置
 

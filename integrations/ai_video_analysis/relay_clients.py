@@ -11,6 +11,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
+from backend.app.error_log_store import write_error_log
+
 
 @dataclass
 class RelayChatResponse:
@@ -104,6 +106,15 @@ class OpenAICompatibleRelayClient:
                 if attempt >= self.max_retries:
                     break
                 time.sleep(delays[min(attempt, len(delays) - 1)])
+        write_error_log(
+            namespace="ai-provider",
+            path="/v1/chat/completions",
+            method="POST",
+            request={"json_body": payload, "headers": {"Authorization": "Bearer ***", "Content-Type": "application/json"}},
+            exc=last_error or RuntimeError("OpenAI-compatible relay request failed"),
+            api_base=self.base_url,
+            extra={"phase": "relay_chat_completions", "model": payload.get("model") or model},
+        )
         raise RuntimeError(f"OpenAI-compatible relay request failed: {last_error}") from last_error
 
     def build_payload(
@@ -260,6 +271,15 @@ class GeminiGenerateContentRelayClient:
                 if attempt >= self.max_retries:
                     break
                 time.sleep(delays[min(attempt, len(delays) - 1)])
+        write_error_log(
+            namespace="ai-provider",
+            path="/v1beta/models/:generateContent",
+            method="POST",
+            request={"json_body": payload, "headers": {"Authorization": "Bearer ***", "Content-Type": "application/json"}},
+            exc=last_error or RuntimeError("Gemini generateContent relay request failed"),
+            api_base=self.base_url,
+            extra={"phase": "relay_generate_content", "model": selected_model},
+        )
         raise RuntimeError(f"Gemini generateContent relay request failed: {last_error}") from last_error
 
     def build_payload(

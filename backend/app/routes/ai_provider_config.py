@@ -1,14 +1,65 @@
+from __future__ import annotations
+
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.app.error_log_store import write_error_log
 from .douyin import read_env_map, write_env_values
 from backend.app.ai_provider_state import summarize_provider_state
 
 router = APIRouter(prefix="/api/ai-provider", tags=["ai-provider"])
+
+
+def _dump_payload(payload: Any) -> dict[str, Any]:
+    model_dump = getattr(payload, "model_dump", None)
+    if callable(model_dump):
+        return model_dump()
+    dict_dump = getattr(payload, "dict", None)
+    if callable(dict_dump):
+        return dict_dump()
+    return dict(payload)
+
+
+def _log_ai_provider_error(
+    *,
+    path: str,
+    method: str,
+    request: dict[str, Any],
+    exc: Exception,
+    api_base: str,
+    status_code: int | None = None,
+    response_text: str = "",
+    extra: dict[str, Any] | None = None,
+) -> None:
+    write_error_log(
+        namespace="ai-provider",
+        path=path,
+        method=method,
+        request=request,
+        exc=exc,
+        api_base=api_base,
+        status_code=status_code,
+        response_text=response_text,
+        extra=extra,
+    )
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    return "***"
+
+
+def _request_payload(payload: AiProviderConfigPayload) -> dict[str, Any]:
+    data = _dump_payload(payload)
+    data["native_api_key"] = _mask_secret(str(data.get("native_api_key") or ""))
+    data["relay_api_key"] = _mask_secret(str(data.get("relay_api_key") or ""))
+    return {"json_body": data}
 
 
 class AiProviderConfigPayload(BaseModel):
@@ -331,21 +382,62 @@ def test_gemini_relay(payload: AiProviderConfigPayload) -> dict[str, Any]:
         raise ValueError("Missing relay token.")
     base_url = (payload.relay_base_url or "https://jeniya.top").rstrip("/")
     url = f"{base_url}/v1beta/models/{payload.model}:generateContent?key="
-    response = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {payload.relay_api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
+    request_payload = {
+        "json_body": {
             "contents": [{"parts": [{"text": "Reply with exactly: ok"}]}],
             "generationConfig": {"responseMimeType": "text/plain"},
         },
-        timeout=60,
-    )
+        "headers": {
+            "Authorization": "Bearer ***",
+            "Content-Type": "application/json",
+        },
+    }
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {payload.relay_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_payload["json_body"],
+            timeout=60,
+        )
+    except requests.RequestException as exc:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1beta/models/:generateContent",
+            method="POST",
+            request=request_payload,
+            exc=exc,
+            api_base=base_url,
+            extra={"phase": "relay_request_exception", "model": payload.model},
+        )
+        raise
     if not response.ok:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1beta/models/:generateContent",
+            method="POST",
+            request=request_payload,
+            exc=RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}"),
+            api_base=base_url,
+            status_code=response.status_code,
+            response_text=response.text[:4000],
+            extra={"phase": "relay_http_error", "model": payload.model},
+        )
         raise RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1beta/models/:generateContent",
+            method="POST",
+            request=request_payload,
+            exc=exc,
+            api_base=base_url,
+            status_code=response.status_code,
+            response_text=response.text[:4000],
+            extra={"phase": "relay_non_json_response", "model": payload.model},
+        )
+        raise RuntimeError(f"Non-JSON response: {response.text[:500]}") from exc
     sample = extract_gemini_text(data)
     return {
         "ok": True,
@@ -386,22 +478,63 @@ def test_openai_responses(payload: AiProviderConfigPayload, api_key: str, base_u
     if payload.provider == "openai":
         raise RuntimeError("OpenAI native Responses API is disabled. Use relay chat_completions.")
     url = f"{base_url}/v1/responses"
-    response = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
+    request_payload = {
+        "json_body": {
             "model": payload.model,
             "input": "Reply with exactly: ok",
             "max_output_tokens": 16,
         },
-        timeout=60,
-    )
+        "headers": {
+            "Authorization": "Bearer ***",
+            "Content-Type": "application/json",
+        },
+    }
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_payload["json_body"],
+            timeout=60,
+        )
+    except requests.RequestException as exc:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1/responses",
+            method="POST",
+            request=request_payload,
+            exc=exc,
+            api_base=base_url,
+            extra={"phase": "openai_responses_request_exception", "model": payload.model},
+        )
+        raise
     if not response.ok:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1/responses",
+            method="POST",
+            request=request_payload,
+            exc=RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}"),
+            api_base=base_url,
+            status_code=response.status_code,
+            response_text=response.text[:4000],
+            extra={"phase": "openai_responses_http_error", "model": payload.model},
+        )
         raise RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1/responses",
+            method="POST",
+            request=request_payload,
+            exc=exc,
+            api_base=base_url,
+            status_code=response.status_code,
+            response_text=response.text[:4000],
+            extra={"phase": "openai_responses_non_json_response", "model": payload.model},
+        )
+        raise RuntimeError(f"Non-JSON response: {response.text[:500]}") from exc
     sample = data.get("output_text") or extract_openai_responses_text(data)
     return {
         "ok": True,
@@ -415,22 +548,63 @@ def test_openai_responses(payload: AiProviderConfigPayload, api_key: str, base_u
 
 def test_openai_chat_completions(payload: AiProviderConfigPayload, api_key: str, base_url: str) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}/chat/completions" if base_url.rstrip("/").endswith("/v1") else f"{base_url}/v1/chat/completions"
-    response = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
+    request_payload = {
+        "json_body": {
             "model": payload.model,
             "messages": [{"role": "user", "content": "Reply with exactly: ok"}],
             "max_tokens": 8,
         },
-        timeout=60,
-    )
+        "headers": {
+            "Authorization": "Bearer ***",
+            "Content-Type": "application/json",
+        },
+    }
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_payload["json_body"],
+            timeout=60,
+        )
+    except requests.RequestException as exc:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1/chat/completions",
+            method="POST",
+            request=request_payload,
+            exc=exc,
+            api_base=base_url,
+            extra={"phase": "openai_chat_request_exception", "model": payload.model},
+        )
+        raise
     if not response.ok:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1/chat/completions",
+            method="POST",
+            request=request_payload,
+            exc=RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}"),
+            api_base=base_url,
+            status_code=response.status_code,
+            response_text=response.text[:4000],
+            extra={"phase": "openai_chat_http_error", "model": payload.model},
+        )
         raise RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        _log_ai_provider_error(
+            path=urlparse(url).path or "/v1/chat/completions",
+            method="POST",
+            request=request_payload,
+            exc=exc,
+            api_base=base_url,
+            status_code=response.status_code,
+            response_text=response.text[:4000],
+            extra={"phase": "openai_chat_non_json_response", "model": payload.model},
+        )
+        raise RuntimeError(f"Non-JSON response: {response.text[:500]}") from exc
     sample = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
     return {
         "ok": True,
@@ -445,7 +619,30 @@ def test_openai_chat_completions(payload: AiProviderConfigPayload, api_key: str,
 def test_local_endpoint(payload: AiProviderConfigPayload) -> dict[str, Any]:
     if not payload.local_endpoint:
         raise ValueError("Missing local endpoint.")
-    response = requests.get(payload.local_endpoint, timeout=15)
+    try:
+        response = requests.get(payload.local_endpoint, timeout=15)
+    except requests.RequestException as exc:
+        _log_ai_provider_error(
+            path=urlparse(payload.local_endpoint).path or "/api/ai-provider/test/local-endpoint",
+            method="GET",
+            request={"url": payload.local_endpoint},
+            exc=exc,
+            api_base=payload.local_endpoint,
+            extra={"phase": "local_endpoint_request_exception"},
+        )
+        raise
+    if not response.ok:
+        _log_ai_provider_error(
+            path=urlparse(payload.local_endpoint).path or "/api/ai-provider/test/local-endpoint",
+            method="GET",
+            request={"url": payload.local_endpoint},
+            exc=RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}"),
+            api_base=payload.local_endpoint,
+            status_code=response.status_code,
+            response_text=response.text[:4000],
+            extra={"phase": "local_endpoint_http_error"},
+        )
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
     return {
         "ok": response.ok,
         "provider": payload.provider,

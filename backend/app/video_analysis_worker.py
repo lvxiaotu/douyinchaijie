@@ -7,6 +7,11 @@ import traceback
 from typing import Any
 
 from backend.app.ai_provider_state import active_ai_provider
+from backend.app.ai_video_comment_service import (
+    collect_comments_for_ai_task,
+    merge_comment_context_into_result,
+    merge_comment_state_into_payload,
+)
 from backend.app.task_store import get_task, save_analysis_archive, update_task
 from backend.app.tiktok_target_store import update_target_task_by_ai_task_id
 from backend.app.short_video_analysis_store import persist_analysis_result
@@ -128,8 +133,27 @@ class VideoAnalysisCoordinator:
                 update_task(task_id, status="running", progress=progress, message=message)
 
             report(5, "后台 worker 已认领 AI 视频拆解任务")
+            comment_state, patched_video = collect_comments_for_ai_task(task, progress=report)
+            if patched_video:
+                payload = merge_comment_state_into_payload(payload, video=patched_video, comment_state=comment_state)
+                task["payload"] = payload
+                video = patched_video
+                update_task(task_id, payload_json=payload)
+                if comment_state.get("status") == "failed":
+                    report(30, f"评论数据获取失败，继续拆解：{comment_state.get('error') or 'unknown'}")
+                elif comment_state.get("status") == "done":
+                    report(
+                        30,
+                        f"评论数据已补全：评论 {comment_state.get('comment_saved_count') or 0} 条 / 回复 {comment_state.get('reply_saved_count') or 0} 条",
+                    )
+                else:
+                    report(30, "评论数据跳过，继续拆解")
             adapter = AiVideoAnalysisAdapter()
-            result_job = adapter.create_job(video=video, provider=provider, job_id=task_id, progress=report)
+
+            def analysis_report(progress: int, message: str) -> None:
+                report(30 + int(max(0, min(100, progress)) * 0.7), message)
+
+            result_job = adapter.create_job(video=video, provider=provider, job_id=task_id, progress=analysis_report)
             if not get_task(task_id):
                 fail_ai_video_job(
                     task_id,
@@ -142,12 +166,14 @@ class VideoAnalysisCoordinator:
             model_runs = list_ai_model_runs(task_id)
             if model_runs:
                 result = {**result, "model_runs": model_runs}
+            result = merge_comment_context_into_result(result, video=video, comment_state=comment_state)
             update_task(
                 task_id,
                 status="done" if result_job.get("status") == "done" else "running",
                 progress=100 if result_job.get("status") == "done" else 70,
                 message="拆解完成" if result_job.get("status") == "done" else "等待外部模型继续处理",
                 provider=result_job.get("provider", provider or ""),
+                payload_json=payload,
                 result_json=result,
                 error=None,
             )

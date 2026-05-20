@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Badge } from "../../components/common/index";
 import { statusText, taskBoardStatuses } from "../../constants/appConfig";
-import { preferredTaskStatus } from "../../utils/appUtils";
+import { commentCollectionLabel, commentCollectionTone, preferredTaskStatus } from "../../utils/appUtils";
 import { ChevronDown } from "lucide-react";
 
 export function TaskStatusRow({ title, desc, groups, activeStatus, onChangeStatus, onOpenTask }) {
@@ -57,6 +57,11 @@ export function TaskStatusRow({ title, desc, groups, activeStatus, onChangeStatu
                     <p>{task.message || `${title} 任务`}</p>
                   </div>
                   <div className="task-list-row-meta">
+                    {task.commentCollection && (
+                      <Badge status={commentCollectionTone(task.commentCollection)}>
+                        {commentCollectionLabel(task.commentCollection)}
+                      </Badge>
+                    )}
                     <Badge status={task.status}>{statusText[task.status] || task.status}</Badge>
                     <span className="task-list-progress">{task.progress}%</span>
                     <span>{task.updated}</span>

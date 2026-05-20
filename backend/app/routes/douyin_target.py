@@ -7,8 +7,13 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from backend.app.ai_video_comment_service import (
+    collect_video_comment_snapshot,
+    comment_sampling_plan,
+)
 from backend.app.ai_provider_state import active_ai_provider
 from backend.app.routes.ai_video_analysis import adapter as ai_video_adapter
+from backend.app.routes.ai_video_analysis import retry_job_comments
 from backend.app.routes.ai_video_analysis import video_title
 from backend.app.task_store import create_task, delete_task, get_task
 from backend.app.video_analysis_queue import delete_ai_video_job, enqueue_ai_video_job, get_ai_video_job, queue_stats
@@ -28,11 +33,9 @@ from backend.app.tiktok_target_store import (
     init_db,
     list_target_sets,
     list_target_tasks,
-    list_target_users,
     list_target_videos,
     mark_target_video_comment_snapshot,
     normalize_comment,
-    remove_user_from_target_set,
     replace_target_video_comments,
     resolve_target_video,
     update_target_set,
@@ -41,6 +44,7 @@ from backend.app.tiktok_target_store import (
 )
 from integrations.douyin_download_api.adapter import DouyinDownloadApiAdapter
 from integrations.tikhub_douyin_api import TikhubDouyinApiAdapter
+from integrations.tikhub_douyin_api.adapter import TikhubApiError
 
 router = APIRouter(prefix="/api/tools/douyin-target", tags=["douyin-target"])
 
@@ -110,40 +114,6 @@ class TargetSetUpdate(BaseModel):
     filters: dict[str, Any] | None = None
     video_strategy: dict[str, Any] | None = None
     status: str | None = None
-
-
-class AddUserToSet(BaseModel):
-    set_id: str
-    user_id: str
-
-
-class TargetVideoCreate(BaseModel):
-    set_id: str = Field(default="")
-    user_id: str
-    aweme_id: str
-    desc: str = Field(default="")
-    cover_url: str = Field(default="")
-    play_url: str = Field(default="")
-    download_url: str = Field(default="")
-    create_time: int | None = None
-    digg_count: int | None = None
-    comment_count: int | None = None
-    share_count: int | None = None
-    collect_count: int | None = None
-    play_count: int | None = None
-    is_top: bool = False
-    selection_strategy: str = Field(default="")
-    selected: bool = False
-    source_json: dict[str, Any] = Field(default_factory=dict)
-
-
-class UserVideoQuery(BaseModel):
-    sec_user_id: str | None = None
-    unique_id: str | None = None
-    max_cursor: int = 0
-    count: int = 20
-    sort_type: int = 0
-    filter_type: int | None = None
 
 
 class VideoStrategy(BaseModel):
@@ -851,6 +821,24 @@ def _collect_video_comment_snapshot(
 def search(payload: TargetSearchRequest) -> dict[str, Any]:
     try:
         result = TikhubDouyinApiAdapter().search_users(keyword=payload.keyword, page=payload.page, count=payload.count)
+    except TikhubApiError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "hint": "TikHub 搜索失败：请先核对 openapi 里 fetch_user_search 的参数，仅保留 keyword/cursor/douyin_user_fans/douyin_user_type/search_id。若仍失败，改用 v2 或把 upstream JSON 发给支持团队。",
+                "demo_request": {
+                    "keyword": payload.keyword,
+                    "cursor": 0,
+                    "douyin_user_fans": "",
+                    "douyin_user_type": "",
+                    "search_id": "",
+                },
+                "upstream": exc.to_dict(),
+                "error_log_path": exc.error_log_path,
+            },
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -866,21 +854,6 @@ def search(payload: TargetSearchRequest) -> dict[str, Any]:
     result["count"] = len(items)
     result["filters"] = payload.model_dump()
     return result
-
-
-@router.get("/users")
-def users(
-    status: str | None = None,
-    set_id: str | None = None,
-    limit: int = Query(default=200, ge=1, le=1000),
-) -> list[dict[str, Any]]:
-    return list_target_users(status=status, set_id=set_id, limit=limit)
-
-
-@router.post("/users")
-def create_user(payload: TargetUserCreate) -> dict[str, Any]:
-    user_id = _target_user_id(payload)
-    return upsert_target_user(user_id, _target_user_payload(payload))
 
 
 @router.post("/users/bulk-save")
@@ -970,79 +943,6 @@ def remove_set(set_id: str) -> dict[str, Any]:
     return {"status": "ok", "deleted": True, "set_id": set_id}
 
 
-@router.post("/sets/add-user")
-def add_set_user(payload: AddUserToSet) -> dict[str, Any]:
-    if not get_target_set(payload.set_id):
-        raise HTTPException(status_code=404, detail="Target set not found")
-    if not get_target_user(payload.user_id):
-        raise HTTPException(status_code=404, detail="Target user not found")
-    return add_user_to_target_set(payload.set_id, payload.user_id)
-
-
-@router.delete("/sets/{set_id}/users/{user_id}")
-def remove_set_user(set_id: str, user_id: str) -> dict[str, Any]:
-    deleted = remove_user_from_target_set(set_id, user_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Target set user not found")
-    return {"status": "ok", "deleted": True, "set_id": set_id, "user_id": user_id}
-
-
-@router.post("/users/videos")
-def user_videos(payload: UserVideoQuery) -> dict[str, Any]:
-    return TikhubDouyinApiAdapter().get_user_videos(
-        sec_user_id=payload.sec_user_id,
-        unique_id=payload.unique_id,
-        max_cursor=payload.max_cursor,
-        count=payload.count,
-        sort_type=payload.sort_type,
-        filter_type=payload.filter_type,
-    )
-
-
-@router.post("/videos")
-def create_video(payload: TargetVideoCreate) -> dict[str, Any]:
-    video_id = payload.aweme_id or str(uuid4())
-    return create_target_video(
-        video_id,
-        payload.user_id,
-        {
-            "set_id": payload.set_id,
-            "aweme_id": payload.aweme_id,
-            "desc": payload.desc,
-            "cover_url": payload.cover_url,
-            "play_url": payload.play_url,
-            "download_url": payload.download_url,
-            "create_time": payload.create_time,
-            "digg_count": payload.digg_count,
-            "comment_count": payload.comment_count,
-            "share_count": payload.share_count,
-            "collect_count": payload.collect_count,
-            "play_count": payload.play_count,
-            "is_top": payload.is_top,
-            "selection_strategy": payload.selection_strategy,
-            "selected": payload.selected,
-            "source_json": payload.source_json,
-        },
-    )
-
-
-@router.get("/videos")
-def videos(
-    set_id: str | None = None,
-    user_id: str | None = None,
-    selected: bool | None = None,
-    analysis_status: str | None = None,
-    limit: int = Query(default=500, ge=1, le=2000),
-) -> list[dict[str, Any]]:
-    return list_target_videos(
-        set_id=set_id,
-        user_id=user_id,
-        selected=selected,
-        analysis_status=analysis_status,
-        limit=limit,
-    )
-
-
 @router.get("/videos/{video_id}/interactions")
 def video_interactions(video_id: str) -> dict[str, Any]:
     video = resolve_target_video(video_id)
@@ -1060,26 +960,6 @@ def video_interactions(video_id: str) -> dict[str, Any]:
         "author_user_id": author.get("uid") or author.get("user_id") or video.get("user_id") or "",
     }
     return dataset
-
-
-@router.post("/videos/{video_id}/comments/collect")
-def collect_video_comments(video_id: str, payload: CollectCommentsRequest | None = None) -> dict[str, Any]:
-    video = resolve_target_video(video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Target video not found")
-    request = payload or CollectCommentsRequest(video_ids=[video_id])
-    try:
-        return _collect_video_comment_snapshot(video, DouyinDownloadApiAdapter(), request)
-    except Exception as exc:
-        mark_target_video_comment_snapshot(video_id, "failed", _short_error(exc))
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error_type": type(exc).__name__,
-                "message": _short_error(exc),
-                "hint": "评论采集失败，请检查本地 Douyin_TikTok_Download_API 服务、DY_COOKIES 和作品 aweme_id。",
-            },
-        ) from exc
 
 
 @router.post("/comments/collect")
@@ -1241,47 +1121,38 @@ def enqueue_analysis(payload: EnqueueAnalysisRequest) -> dict[str, Any]:
     enqueued = []
     skipped = []
     comment_errors = []
-    comment_adapter = DouyinDownloadApiAdapter() if payload.collect_comments else None
     for target_video in target_videos:
         existing = find_target_task_for_video(target_video["id"], {"pending", "running", "done"})
         if existing and not payload.force:
             skipped.append({"video_id": target_video["id"], "task_id": existing.get("task_id"), "status": existing.get("status")})
             continue
 
-        if comment_adapter and target_video.get("comment_snapshot_status") != "done":
-            comment_request = CollectCommentsRequest(
-                video_ids=[target_video["id"]],
-                adaptive_by_ratio=payload.adaptive_comments,
-                max_comments=payload.max_comments,
-                min_comments=payload.min_comments,
-                include_replies=True,
-                replies_per_comment=payload.replies_per_comment,
-            )
-            try:
-                _collect_video_comment_snapshot(target_video, comment_adapter, comment_request)
-                target_video = get_target_video(target_video["id"]) or target_video
-            except Exception as exc:
-                mark_target_video_comment_snapshot(target_video["id"], "failed", _short_error(exc))
-                comment_errors.append(
-                    {
-                        "video_id": target_video["id"],
-                        "aweme_id": target_video.get("aweme_id"),
-                        "error": _short_error(exc),
-                    }
-                )
-
         target_user = get_target_user(target_video.get("user_id") or "")
         analysis_video = _analysis_video_payload(target_video, target_user)
         target_context = _analysis_target_context(target_video, target_user)
         analysis_video["douyin_target_context"] = target_context
+        comment_collection = {
+            "enabled": payload.collect_comments,
+            "adaptive_by_ratio": payload.adaptive_comments,
+            "max_comments": payload.max_comments,
+            "min_comments": payload.min_comments,
+            "page_size": 20,
+            "include_replies": True,
+            "replies_per_comment": payload.replies_per_comment,
+        }
         task_id = f"target-breakdown-{target_video.get('aweme_id') or target_video['id']}-{int(time.time())}-{uuid4().hex[:8]}"
         task = create_task(
             task_id=task_id,
             task_type="ai_video_analysis",
             title=video_title(analysis_video),
             provider=provider,
-            payload={"video": analysis_video, "author": analysis_video.get("author") or {}, "douyin_target": target_context},
-            message="已从抖音对标工具加入拆解队列",
+            payload={
+                "video": analysis_video,
+                "author": analysis_video.get("author") or {},
+                "douyin_target": target_context,
+                "comment_collection": comment_collection,
+            },
+            message="已从抖音对标工具加入拆解队列，等待评论数据",
         )
         enqueue_ai_video_job(task_id=task_id, video=analysis_video, provider=provider)
         target_task = create_target_task(
@@ -1304,16 +1175,6 @@ def enqueue_analysis(payload: EnqueueAnalysisRequest) -> dict[str, Any]:
     }
 
 
-@router.get("/analysis/tasks")
-def analysis_tasks(
-    set_id: str | None = None,
-    video_id: str | None = None,
-    status: str | None = None,
-    limit: int = Query(default=500, ge=1, le=2000),
-) -> list[dict[str, Any]]:
-    return list_target_tasks(set_id=set_id, video_id=video_id, status=status, limit=limit)
-
-
 @router.post("/analysis/sync")
 def sync_analysis_tasks(set_id: str | None = None) -> dict[str, Any]:
     target_tasks = list_target_tasks(set_id=set_id, limit=2000)
@@ -1328,3 +1189,8 @@ def sync_analysis_tasks(set_id: str | None = None) -> dict[str, Any]:
         if updated:
             synced.append(updated)
     return {"status": "ok", "synced": synced, "missing": missing, "count": len(synced)}
+
+
+@router.post("/analysis/{task_id}/retry-comments")
+def retry_analysis_comments(task_id: str) -> dict[str, Any]:
+    return retry_job_comments(task_id)

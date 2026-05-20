@@ -1,5 +1,5 @@
 import React, { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
-import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchive, fetchAiProductionReverseArchives, fetchAiPromptReverseArchive, fetchAiPromptReverseArchives, fetchAiVideoArchive, fetchAiVideoArchives, fetchTask, fetchTasks, fetchWorkbench } from "./services/api";
+import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchive, fetchAiProductionReverseArchives, fetchAiPromptReverseArchive, fetchAiPromptReverseArchives, fetchAiVideoArchive, fetchAiVideoArchives, fetchTask, fetchTasks, fetchWorkbench, retryAiVideoComments } from "./services/api";
 import { fallbackWorkbench } from "./workbenchSeed";
 import { Database, FolderCog, Languages, MoonStar, RefreshCw, SunMedium } from "lucide-react";
 import { Badge, ToolCard } from "./components/common/index";
@@ -235,6 +235,21 @@ export function App() {
       setSelectedTaskRecord({ type, title, task: normalized });
     } catch (err) {
       setTaskSyncError(`任务详情加载失败：${err.message}`);
+    }
+  }
+
+  async function handleRetryAnalysisComments(task) {
+    try {
+      const response = await retryAiVideoComments(task.id);
+      const normalized = normalizeAnalysisTask(response.task || (await fetchTask(task.id)));
+      setAnalysisTasks((current) => [normalized, ...current.filter((item) => item.id !== normalized.id)]);
+      setSelectedTaskRecord((current) =>
+        current?.task?.id === normalized.id ? { ...current, task: normalized } : current,
+      );
+      return response;
+    } catch (err) {
+      setTaskSyncError(`评论数据重试失败：${err.message || err}`);
+      return null;
     }
   }
 
@@ -902,6 +917,7 @@ export function App() {
                 ? handleDeleteTextToAssetsTask
                 : null
         }
+        onRetryComments={selectedTaskRecord?.type === "analysis" ? handleRetryAnalysisComments : null}
       />
       <AnalysisResultModal task={selectedAnalysisTask} onClose={() => setSelectedAnalysisTask(null)} />
       <PromptReverseResultModal task={selectedPromptReverseTask} onClose={() => setSelectedPromptReverseTask(null)} />

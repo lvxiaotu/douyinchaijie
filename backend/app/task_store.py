@@ -186,18 +186,38 @@ def compact_text(value: Any, limit: int = 180) -> str:
 def compact_task_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
+    compact: dict[str, Any] = {}
     video = payload.get("video")
     if isinstance(video, dict):
-        return {
-            "video": {
-                "id": video.get("id") or video.get("aweme_id") or "",
-                "aweme_id": video.get("aweme_id") or video.get("id") or "",
-                "desc": compact_text(video.get("desc") or video.get("title") or "", 120),
-                "title": compact_text(video.get("title") or video.get("desc") or "", 120),
-                "cover_url": video.get("cover_url") or "",
-            }
+        compact["video"] = {
+            "id": video.get("id") or video.get("aweme_id") or "",
+            "aweme_id": video.get("aweme_id") or video.get("id") or "",
+            "desc": compact_text(video.get("desc") or video.get("title") or "", 120),
+            "title": compact_text(video.get("title") or video.get("desc") or "", 120),
+            "cover_url": video.get("cover_url") or "",
         }
-    compact: dict[str, Any] = {}
+    comment_state = payload.get("comment_collection_state")
+    if isinstance(comment_state, dict):
+        compact["comment_collection_state"] = {
+            "status": comment_state.get("status") or "",
+            "video_id": comment_state.get("video_id") or "",
+            "aweme_id": comment_state.get("aweme_id") or "",
+            "comment_saved_count": comment_state.get("comment_saved_count") or 0,
+            "reply_saved_count": comment_state.get("reply_saved_count") or 0,
+            "error": compact_text(comment_state.get("error") or comment_state.get("reason") or "", 180),
+            "snapshot_at": comment_state.get("snapshot_at"),
+        }
+    comment_options = payload.get("comment_collection")
+    if isinstance(comment_options, dict):
+        compact["comment_collection"] = {
+            "enabled": comment_options.get("enabled") is not False,
+            "max_comments": comment_options.get("max_comments"),
+            "min_comments": comment_options.get("min_comments"),
+            "include_replies": comment_options.get("include_replies") is not False,
+            "replies_per_comment": comment_options.get("replies_per_comment"),
+        }
+    if compact:
+        return compact
     for key in ("idea", "title", "text", "workflow_id", "workflow_key"):
         if key in payload:
             compact[key] = compact_text(payload.get(key), 160)
@@ -304,12 +324,12 @@ def create_task(
 
 def update_task(task_id: str, **updates: Any) -> dict[str, Any] | None:
     init_db()
-    allowed = {"status", "progress", "message", "provider", "result_json", "error"}
+    allowed = {"status", "progress", "message", "provider", "result_json", "error", "payload_json"}
     normalized: dict[str, Any] = {}
     for key, value in updates.items():
         if key not in allowed:
             continue
-        if key == "result_json" and not isinstance(value, str):
+        if key in {"result_json", "payload_json"} and not isinstance(value, str):
             value = json.dumps(value, ensure_ascii=False)
         normalized[key] = value
     normalized["updated_at"] = int(time.time())
@@ -320,13 +340,14 @@ def update_task(task_id: str, **updates: Any) -> dict[str, Any] | None:
         cursor = connection.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", values)
     if cursor.rowcount == 0:
         return None
-    append_task_event(
-        task_id,
-        status=str(normalized.get("status") or ""),
-        progress=int(normalized.get("progress") or 0),
-        message=str(normalized.get("message") or normalized.get("error") or ""),
-        detail={"error": normalized.get("error")} if normalized.get("error") else None,
-    )
+    if {"status", "progress", "message", "error"} & set(normalized):
+        append_task_event(
+            task_id,
+            status=str(normalized.get("status") or ""),
+            progress=int(normalized.get("progress") or 0),
+            message=str(normalized.get("message") or normalized.get("error") or ""),
+            detail={"error": normalized.get("error")} if normalized.get("error") else None,
+        )
     return get_task(task_id)
 
 

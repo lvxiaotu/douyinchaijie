@@ -7,7 +7,7 @@ export const UI_VERSION = "v0.1.0";
 export const THEME_STORAGE_KEY = "douyin-ops-theme";
 
 export const sections = {
-  dashboard: ["抖音工作台", "采集解析、对标账号、评论补全和 AI 拆解入口统一放在同一块控制台。"],
+  dashboard: ["抖音工作台", "采集解析、对标账号和 AI 拆解入口统一放在同一块控制台，评论数据作为 AI 拆解步骤自动获取。"],
   taskCenter: ["任务中心", "集中查看 AI 视频拆解、提示词反推、制作反推和一句话转素材任务。"],
   draftInspector: ["查看草稿", "按项目查看剪映草稿与时间线结构，保持和主工作流一致的控制台体验。"],
   jianyingEditor: ["剪映 Skill", "围绕 AI 剧本、第三方素材补齐和剪映草稿生成的主工作流。"],

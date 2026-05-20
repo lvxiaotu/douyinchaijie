@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge } from "../../components/common/index";
 import {
   createDouyinTargetSet,
-  collectDouyinTargetInteractions,
   collectDouyinTargetVideos,
   deleteDouyinTargetSet,
   deleteDouyinTargetVideoAnalysis,
@@ -86,8 +85,6 @@ function busyLabel(busy) {
     search: "正在持续搜索账号，直到达到目标数量或没有更多结果...",
     "search-more": "正在加载下一页账号...",
     collect: "正在逐个账号采集作品，账号较多时会比较久，请保持页面打开...",
-    interactions: "正在补全评论、回复和互动洞察，视频较多时会比较久...",
-    "interaction-one": "正在补全单条视频互动数据...",
     enqueue: "正在加入 AI 拆解任务池...",
     sync: "正在同步拆解结果...",
     save: "正在保存选中账号...",
@@ -311,7 +308,6 @@ export function DouyinTargetPanel() {
     fetchCount: 20,
     sortMetric: "digg_count",
   });
-  const [autoCollectInteractions, setAutoCollectInteractions] = useState(true);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -574,31 +570,6 @@ export function DouyinTargetPanel() {
     }
   }
 
-  async function handleCollectInteractions(videoId = "") {
-    if (!activeSetId && !videoId) {
-      setError("请先选择一个对标集合。");
-      return;
-    }
-    const result = await run(videoId ? "interaction-one" : "interactions", () =>
-      collectDouyinTargetInteractions({
-        setId: activeSetId,
-        videoIds: videoId ? [videoId] : [],
-        adaptiveByRatio: true,
-        maxComments: 160,
-        minComments: 30,
-        includeReplies: true,
-        repliesPerComment: 3,
-      }),
-    );
-    if (result) {
-      setMessage(`已补全 ${result.count} 条视频互动数据${result.errors?.length ? `，失败 ${result.errors.length} 条` : ""}`);
-      if (result.errors?.length) {
-        setError(`部分互动数据补全失败：${result.errors.slice(0, 3).map((item) => item.error).join("；")}`);
-      }
-      await loadSets(activeSetId);
-    }
-  }
-
   async function handleDeleteVideoAnalysis(video) {
     if (!video?.id) return;
     if ((video.analysis_status || "") === "running") {
@@ -608,7 +579,7 @@ export function DouyinTargetPanel() {
     const title = video.desc || video.aweme_id || video.id;
     if (
       !window.confirm(
-        `确认删除「${title}」的拆解记录吗？\n\n只会删除拆解任务、队列记录和拆解结果，不会删除视频指标、评论、回复和互动洞察。删除后可以重新补全互动数据并再次加入 AI 拆解。`,
+        `确认删除「${title}」的拆解记录吗？\n\n只会删除拆解任务、队列记录和拆解结果，不会删除视频指标、评论、回复和互动洞察。删除后可以重新加入 AI 拆解，评论数据会作为 AI 拆解步骤自动获取。`,
       )
     ) {
       return;
@@ -628,7 +599,7 @@ export function DouyinTargetPanel() {
     const result = await run("enqueue", () =>
       enqueueDouyinTargetAnalysis({
         setId: activeSetId,
-        collectComments: autoCollectInteractions,
+        collectComments: true,
       }),
     );
     if (result) {
@@ -870,20 +841,10 @@ export function DouyinTargetPanel() {
               <button className="text-button" type="button" onClick={handleCollectVideos} disabled={!activeSetId || busy === "collect"}>
                 {busy === "collect" ? "采集中..." : "采集并选择视频"}
               </button>
-              <button className="text-button" type="button" onClick={() => handleCollectInteractions()} disabled={!activeVideos.length || busy === "interactions"}>
-                {busy === "interactions" ? "补全中..." : "补全互动数据"}
-              </button>
-              <label className="target-auto-enrich-toggle">
-                <input
-                  type="checkbox"
-                  checked={autoCollectInteractions}
-                  onChange={(event) => setAutoCollectInteractions(event.target.checked)}
-                />
-                拆解前自动补全互动数据
-              </label>
               <button className="primary-button" type="button" onClick={handleEnqueue} disabled={!activeVideos.length || busy === "enqueue"}>
                 加入 AI 拆解
               </button>
+              <div className="field-hint target-strategy-hint">评论、回复和互动洞察已并入 AI 拆解步骤；采集失败不会阻断拆解，可在任务中心重试评论数据。</div>
               <button className="text-button" type="button" onClick={handleSync} disabled={!activeSetId || busy === "sync"}>
                 同步结果
               </button>
@@ -920,14 +881,11 @@ export function DouyinTargetPanel() {
                       </div>
                       <div className="target-video-actions">
                         <Badge status={commentStatusTone(item)}>
-                          {item.comment_snapshot_status === "done" ? "互动已补全" : "互动待补全"}
+                          {item.comment_snapshot_status === "done" ? "评论已采集" : item.comment_snapshot_status === "failed" ? "评论失败" : "AI 拆解中采集"}
                         </Badge>
                         <Badge status={analysisStatusTone(item.analysis_status)}>
                           {analysisStatusLabel(item.analysis_status)}
                         </Badge>
-                        <button className="text-button compact-target-action" type="button" onClick={() => handleCollectInteractions(item.id)} disabled={busy === "interaction-one" || busy === "interactions"}>
-                          补全
-                        </button>
                         {hasAnalysisRecord(item) && (
                           <button
                             className="text-button compact-target-action danger-target-action"

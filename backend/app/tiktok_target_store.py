@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -313,6 +314,62 @@ TARGET_TASK_COLUMNS = {
     "synced_at": "synced_at INTEGER",
 }
 
+TARGET_USER_VIDEO_PAGE_COLUMNS = {
+    "cache_key": "cache_key TEXT NOT NULL DEFAULT ''",
+    "source": "source TEXT NOT NULL DEFAULT ''",
+    "user_id": "user_id TEXT NOT NULL DEFAULT ''",
+    "sec_user_id": "sec_user_id TEXT NOT NULL DEFAULT ''",
+    "unique_id": "unique_id TEXT NOT NULL DEFAULT ''",
+    "max_cursor": "max_cursor INTEGER NOT NULL DEFAULT 0",
+    "count": "count INTEGER NOT NULL DEFAULT 0",
+    "sort_type": "sort_type INTEGER NOT NULL DEFAULT 0",
+    "filter_type": "filter_type INTEGER",
+    "next_cursor": "next_cursor INTEGER",
+    "has_more": "has_more INTEGER NOT NULL DEFAULT 0",
+    "item_count": "item_count INTEGER NOT NULL DEFAULT 0",
+    "request_json": "request_json TEXT NOT NULL DEFAULT '{}'",
+    "items_json": "items_json TEXT NOT NULL DEFAULT '[]'",
+    "raw_json": "raw_json TEXT NOT NULL DEFAULT '{}'",
+    "pagination_json": "pagination_json TEXT NOT NULL DEFAULT '{}'",
+    "normalized_json": "normalized_json TEXT NOT NULL DEFAULT '{}'",
+    "fetched_at": "fetched_at INTEGER",
+}
+
+TARGET_USER_SEARCH_PAGE_COLUMNS = {
+    "cache_key": "cache_key TEXT NOT NULL DEFAULT ''",
+    "source": "source TEXT NOT NULL DEFAULT ''",
+    "keyword": "keyword TEXT NOT NULL DEFAULT ''",
+    "cursor": "cursor INTEGER NOT NULL DEFAULT 0",
+    "count": "count INTEGER NOT NULL DEFAULT 0",
+    "search_id": "search_id TEXT NOT NULL DEFAULT ''",
+    "douyin_user_fans": "douyin_user_fans TEXT NOT NULL DEFAULT ''",
+    "douyin_user_type": "douyin_user_type TEXT NOT NULL DEFAULT ''",
+    "request_json": "request_json TEXT NOT NULL DEFAULT '{}'",
+    "items_json": "items_json TEXT NOT NULL DEFAULT '[]'",
+    "raw_json": "raw_json TEXT NOT NULL DEFAULT '{}'",
+    "pagination_json": "pagination_json TEXT NOT NULL DEFAULT '{}'",
+    "normalized_json": "normalized_json TEXT NOT NULL DEFAULT '{}'",
+    "fetched_at": "fetched_at INTEGER",
+}
+
+TARGET_VIDEO_COMMENT_PAGE_COLUMNS = {
+    "cache_key": "cache_key TEXT NOT NULL DEFAULT ''",
+    "source": "source TEXT NOT NULL DEFAULT ''",
+    "video_id": "video_id TEXT NOT NULL DEFAULT ''",
+    "aweme_id": "aweme_id TEXT NOT NULL DEFAULT ''",
+    "item_id": "item_id TEXT NOT NULL DEFAULT ''",
+    "comment_id": "comment_id TEXT NOT NULL DEFAULT ''",
+    "page_kind": "page_kind TEXT NOT NULL DEFAULT 'comments'",
+    "cursor": "cursor INTEGER NOT NULL DEFAULT 0",
+    "count": "count INTEGER NOT NULL DEFAULT 0",
+    "request_json": "request_json TEXT NOT NULL DEFAULT '{}'",
+    "items_json": "items_json TEXT NOT NULL DEFAULT '[]'",
+    "raw_json": "raw_json TEXT NOT NULL DEFAULT '{}'",
+    "pagination_json": "pagination_json TEXT NOT NULL DEFAULT '{}'",
+    "normalized_json": "normalized_json TEXT NOT NULL DEFAULT '{}'",
+    "fetched_at": "fetched_at INTEGER",
+}
+
 
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
@@ -331,6 +388,59 @@ def ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str
     for name, definition in columns.items():
         if name not in existing:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+
+def _cache_key(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def build_user_search_page_cache_key(
+    *,
+    source: str,
+    keyword: str,
+    cursor: int = 0,
+    count: int = 20,
+    search_id: str = "",
+    douyin_user_fans: str = "",
+    douyin_user_type: str = "",
+) -> str:
+    return _cache_key(
+        {
+            "source": source,
+            "keyword": keyword,
+            "cursor": int(cursor or 0),
+            "count": int(count or 0),
+            "search_id": search_id or "",
+            "douyin_user_fans": douyin_user_fans or "",
+            "douyin_user_type": douyin_user_type or "",
+        }
+    )
+
+
+def build_video_comment_page_cache_key(
+    *,
+    source: str,
+    video_id: str,
+    aweme_id: str = "",
+    item_id: str = "",
+    comment_id: str = "",
+    page_kind: str = "comments",
+    cursor: int = 0,
+    count: int = 20,
+) -> str:
+    return _cache_key(
+        {
+            "source": source,
+            "video_id": video_id,
+            "aweme_id": aweme_id or "",
+            "item_id": item_id or "",
+            "comment_id": comment_id or "",
+            "page_kind": page_kind,
+            "cursor": int(cursor or 0),
+            "count": int(count or 0),
+        }
+    )
 
 
 def init_db() -> None:
@@ -460,10 +570,87 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tiktok_target_user_video_pages (
+                id TEXT PRIMARY KEY,
+                cache_key TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                sec_user_id TEXT NOT NULL DEFAULT '',
+                unique_id TEXT NOT NULL DEFAULT '',
+                max_cursor INTEGER NOT NULL DEFAULT 0,
+                count INTEGER NOT NULL DEFAULT 0,
+                sort_type INTEGER NOT NULL DEFAULT 0,
+                filter_type INTEGER,
+                next_cursor INTEGER,
+                has_more INTEGER NOT NULL DEFAULT 0,
+                item_count INTEGER NOT NULL DEFAULT 0,
+                request_json TEXT NOT NULL DEFAULT '{}',
+                items_json TEXT NOT NULL DEFAULT '[]',
+                raw_json TEXT NOT NULL DEFAULT '{}',
+                pagination_json TEXT NOT NULL DEFAULT '{}',
+                normalized_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tiktok_target_user_search_pages (
+                id TEXT PRIMARY KEY,
+                cache_key TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL DEFAULT '',
+                keyword TEXT NOT NULL DEFAULT '',
+                cursor INTEGER NOT NULL DEFAULT 0,
+                count INTEGER NOT NULL DEFAULT 0,
+                search_id TEXT NOT NULL DEFAULT '',
+                douyin_user_fans TEXT NOT NULL DEFAULT '',
+                douyin_user_type TEXT NOT NULL DEFAULT '',
+                request_json TEXT NOT NULL DEFAULT '{}',
+                items_json TEXT NOT NULL DEFAULT '[]',
+                raw_json TEXT NOT NULL DEFAULT '{}',
+                pagination_json TEXT NOT NULL DEFAULT '{}',
+                normalized_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tiktok_target_video_comment_pages (
+                id TEXT PRIMARY KEY,
+                cache_key TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL DEFAULT '',
+                video_id TEXT NOT NULL DEFAULT '',
+                aweme_id TEXT NOT NULL DEFAULT '',
+                item_id TEXT NOT NULL DEFAULT '',
+                comment_id TEXT NOT NULL DEFAULT '',
+                page_kind TEXT NOT NULL DEFAULT 'comments',
+                cursor INTEGER NOT NULL DEFAULT 0,
+                count INTEGER NOT NULL DEFAULT 0,
+                request_json TEXT NOT NULL DEFAULT '{}',
+                items_json TEXT NOT NULL DEFAULT '[]',
+                raw_json TEXT NOT NULL DEFAULT '{}',
+                pagination_json TEXT NOT NULL DEFAULT '{}',
+                normalized_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
         ensure_columns(connection, "tiktok_target_users", TARGET_USER_COLUMNS)
         ensure_columns(connection, "tiktok_target_sets", TARGET_SET_COLUMNS)
         ensure_columns(connection, "tiktok_target_videos", TARGET_VIDEO_COLUMNS)
         ensure_columns(connection, "tiktok_target_tasks", TARGET_TASK_COLUMNS)
+        ensure_columns(connection, "tiktok_target_user_video_pages", TARGET_USER_VIDEO_PAGE_COLUMNS)
+        ensure_columns(connection, "tiktok_target_user_search_pages", TARGET_USER_SEARCH_PAGE_COLUMNS)
+        ensure_columns(connection, "tiktok_target_video_comment_pages", TARGET_VIDEO_COMMENT_PAGE_COLUMNS)
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_users_keyword ON tiktok_target_users(keyword, status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_user ON tiktok_target_videos(user_id, selected)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_set ON tiktok_target_videos(set_id, selected)")
@@ -472,6 +659,24 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_tasks_video ON tiktok_target_tasks(video_id, status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_comments_video ON tiktok_target_video_comments(video_id, level, rank_index)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_comments_parent ON tiktok_target_video_comments(video_id, parent_comment_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_user ON tiktok_target_user_video_pages(user_id, sec_user_id, unique_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_cache ON tiktok_target_user_video_pages(cache_key)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_cursor ON tiktok_target_user_video_pages(user_id, max_cursor, count)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_search_pages_cache ON tiktok_target_user_search_pages(cache_key)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_search_pages_keyword ON tiktok_target_user_search_pages(keyword, cursor)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_video_comment_pages_cache ON tiktok_target_video_comment_pages(cache_key)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_video_comment_pages_video ON tiktok_target_video_comment_pages(video_id, page_kind, cursor)")
+        connection.execute(
+            """
+            UPDATE tiktok_target_users
+            SET recent_update_at = COALESCE(NULLIF(recent_update_at, 0), NULLIF(searched_at, 0), created_at),
+                last_post_at = COALESCE(NULLIF(last_post_at, 0), NULLIF(searched_at, 0), created_at)
+            WHERE recent_update_at IS NULL
+               OR recent_update_at = 0
+               OR last_post_at IS NULL
+               OR last_post_at = 0
+            """
+        )
 
 
 def now() -> int:
@@ -496,6 +701,39 @@ def to_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def first_positive_int(*values: Any, default: int = 1) -> int:
+    for value in values:
+        number = to_int(value)
+        if number is not None and number > 0:
+            return number
+    return default
+
+
+def build_user_video_page_cache_key(
+    *,
+    source: str,
+    user_id: str = "",
+    sec_user_id: str = "",
+    unique_id: str = "",
+    max_cursor: int = 0,
+    count: int = 20,
+    sort_type: int = 0,
+    filter_type: int | None = None,
+) -> str:
+    del user_id
+    del unique_id
+    return _cache_key(
+        {
+            "source": source,
+            "sec_user_id": sec_user_id,
+            "max_cursor": int(max_cursor or 0),
+            "count": int(count or 0),
+            "sort_type": int(sort_type or 0),
+            "filter_type": None if filter_type is None else int(filter_type),
+        }
+    )
 
 
 def normalize_genre(value: Any) -> str:
@@ -562,7 +800,33 @@ def derive_video_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     comment_count = to_int(payload.get("comment_count")) or 0
     share_count = to_int(payload.get("share_count")) or 0
     collect_count = to_int(payload.get("collect_count")) or 0
-    play_count = to_int(payload.get("play_count")) or 0
+    source_json = payload.get("source_json") if isinstance(payload.get("source_json"), dict) else {}
+    metrics_json = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    raw_json = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+    nested_stats = source_json.get("statistics") if isinstance(source_json.get("statistics"), dict) else {}
+    nested_raw_stats = raw_json.get("statistics") if isinstance(raw_json.get("statistics"), dict) else {}
+    play_count = first_positive_int(
+        payload.get("play_count"),
+        payload.get("play_count_raw"),
+        metrics_json.get("play_count"),
+        metrics_json.get("play_count_raw"),
+        source_json.get("play_count"),
+        source_json.get("playCount"),
+        source_json.get("view_count"),
+        source_json.get("video_view_count"),
+        nested_stats.get("play_count"),
+        nested_stats.get("playCount"),
+        nested_stats.get("view_count"),
+        nested_stats.get("video_view_count"),
+        raw_json.get("play_count"),
+        raw_json.get("playCount"),
+        raw_json.get("view_count"),
+        raw_json.get("video_view_count"),
+        nested_raw_stats.get("play_count"),
+        nested_raw_stats.get("playCount"),
+        nested_raw_stats.get("view_count"),
+        nested_raw_stats.get("video_view_count"),
+    )
     published = datetime.fromtimestamp(create_time, CHINA_TZ) if create_time else None
     engagement_score = digg_count + comment_count * 3 + share_count * 5 + collect_count * 4
     engagement_rate = round(engagement_score / play_count, 6) if play_count else None
@@ -582,6 +846,7 @@ def derive_video_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         "share_like_ratio": to_float_ratio(share_count, digg_count),
         "engagement_score": engagement_score,
         "engagement_rate": engagement_rate,
+        "play_count_raw": to_int(payload.get("play_count")) or 0,
     }
     metrics["metrics_json"] = {
         "ratios": {
@@ -633,6 +898,37 @@ def row_to_target_task(row: sqlite3.Row) -> dict[str, Any]:
     task = dict(row)
     task["result"] = load_json(task.pop("result_json", "{}"), {})
     return task
+
+
+def row_to_target_user_video_page(row: sqlite3.Row) -> dict[str, Any]:
+    page = dict(row)
+    page["request"] = load_json(page.pop("request_json", "{}"), {})
+    page["items"] = load_json(page.pop("items_json", "[]"), [])
+    page["raw"] = load_json(page.pop("raw_json", "{}"), {})
+    page["pagination"] = load_json(page.pop("pagination_json", "{}"), {})
+    page["normalized"] = load_json(page.pop("normalized_json", "{}"), {})
+    page["has_more"] = bool(page.get("has_more"))
+    return page
+
+
+def row_to_target_user_search_page(row: sqlite3.Row) -> dict[str, Any]:
+    page = dict(row)
+    page["request"] = load_json(page.pop("request_json", "{}"), {})
+    page["items"] = load_json(page.pop("items_json", "[]"), [])
+    page["raw"] = load_json(page.pop("raw_json", "{}"), {})
+    page["pagination"] = load_json(page.pop("pagination_json", "{}"), {})
+    page["normalized"] = load_json(page.pop("normalized_json", "{}"), {})
+    return page
+
+
+def row_to_target_video_comment_page(row: sqlite3.Row) -> dict[str, Any]:
+    page = dict(row)
+    page["request"] = load_json(page.pop("request_json", "{}"), {})
+    page["items"] = load_json(page.pop("items_json", "[]"), [])
+    page["raw"] = load_json(page.pop("raw_json", "{}"), {})
+    page["pagination"] = load_json(page.pop("pagination_json", "{}"), {})
+    page["normalized"] = load_json(page.pop("normalized_json", "{}"), {})
+    return page
 
 
 def row_to_target_comment(row: sqlite3.Row) -> dict[str, Any]:
@@ -888,6 +1184,50 @@ def build_interaction_insights(
 def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     init_db()
     current = now()
+    existing = get_target_user(user_id) or {}
+    existing_source = existing.get("source_json") if isinstance(existing.get("source_json"), dict) else {}
+    incoming_source = payload.get("source_json") if isinstance(payload.get("source_json"), dict) else {}
+    merged_source = {**existing_source, **incoming_source} if existing_source or incoming_source else payload.get("source_json") or {}
+
+    def pick_text(key: str, *, default: str = "") -> str:
+        value = payload.get(key)
+        if value not in [None, ""]:
+            return str(value)
+        value = existing.get(key)
+        if value not in [None, ""]:
+            return str(value)
+        return default
+
+    def pick_int(key: str) -> int | None:
+        incoming = to_int(payload.get(key)) if payload.get(key) not in [None, ""] else None
+        current_value = to_int(existing.get(key)) if existing.get(key) not in [None, ""] else None
+        if incoming and incoming > 0:
+            return incoming
+        if current_value and current_value > 0:
+            return current_value
+        return incoming if incoming is not None else current_value
+
+    def pick_bool(key: str, *, default: bool = False) -> bool:
+        if key in payload:
+            return bool(payload.get(key))
+        if key in existing:
+            return bool(existing.get(key))
+        return default
+
+    resolved_recent_update_at = max(
+        to_int(payload.get("recent_update_at") or payload.get("last_post_at") or payload.get("searched_at")) or 0,
+        to_int(existing.get("recent_update_at")) or 0,
+        to_int(existing.get("searched_at")) or 0,
+    ) or current
+    resolved_last_post_at = max(
+        to_int(payload.get("last_post_at") or payload.get("recent_update_at") or payload.get("searched_at")) or 0,
+        to_int(existing.get("last_post_at")) or 0,
+        to_int(existing.get("searched_at")) or 0,
+        resolved_recent_update_at,
+    ) or resolved_recent_update_at
+    resolved_status = str(payload.get("status") or "").strip() or str(existing.get("status") or "candidate")
+    if resolved_status == "candidate" and str(existing.get("status") or "").strip() and str(existing.get("status")) != "candidate":
+        resolved_status = str(existing.get("status"))
     with connect() as connection:
         connection.execute(
             """
@@ -918,25 +1258,25 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             """,
             (
                 user_id,
-                payload.get('keyword', ''),
-                payload.get('sec_user_id', ''),
-                payload.get('unique_id', ''),
-                payload.get('nickname', ''),
-                payload.get('follower_count'),
-                payload.get('like_count'),
-                payload.get('recent_update_at'),
-                1 if payload.get('verified') else 0,
-                payload.get('status', 'candidate'),
-                json.dumps(payload.get('source_json') or payload, ensure_ascii=False),
+                pick_text('keyword'),
+                pick_text('sec_user_id'),
+                pick_text('unique_id'),
+                pick_text('nickname'),
+                pick_int('follower_count'),
+                pick_int('like_count'),
+                resolved_recent_update_at,
+                1 if pick_bool('verified') else 0,
+                resolved_status,
+                json.dumps(merged_source or payload, ensure_ascii=False),
                 current,
                 current,
-                payload.get('avatar_url') or payload.get('avatar') or '',
-                payload.get('signature', ''),
-                payload.get('aweme_count'),
-                payload.get('following_count'),
-                1 if payload.get('is_private') else 0,
-                payload.get('last_post_at') or payload.get('recent_update_at'),
-                payload.get('searched_at') or current,
+                pick_text('avatar_url') or pick_text('avatar'),
+                pick_text('signature'),
+                pick_int('aweme_count'),
+                pick_int('following_count'),
+                1 if pick_bool('is_private') else 0,
+                resolved_last_post_at,
+                to_int(payload.get('searched_at')) or to_int(existing.get('searched_at')) or current,
             ),
         )
     return get_target_user(user_id) or {}
@@ -947,6 +1287,386 @@ def get_target_user(user_id: str) -> dict[str, Any] | None:
     with connect() as connection:
         row = connection.execute("SELECT * FROM tiktok_target_users WHERE id = ?", (user_id,)).fetchone()
     return row_to_target_user(row) if row else None
+
+
+def get_target_user_by_identifiers(
+    *,
+    user_id: str = "",
+    sec_user_id: str = "",
+    unique_id: str = "",
+) -> dict[str, Any] | None:
+    init_db()
+    conditions = []
+    values: list[Any] = []
+    if user_id:
+        conditions.append("id = ?")
+        values.append(user_id)
+    if sec_user_id:
+        conditions.append("sec_user_id = ?")
+        values.append(sec_user_id)
+    if unique_id:
+        conditions.append("unique_id = ?")
+        values.append(unique_id)
+    if not conditions:
+        return None
+    where = " OR ".join(conditions)
+    query = f"SELECT * FROM tiktok_target_users WHERE {where} ORDER BY updated_at DESC LIMIT 1"
+    with connect() as connection:
+        row = connection.execute(query, values).fetchone()
+    return row_to_target_user(row) if row else None
+
+
+def get_target_user_search_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM tiktok_target_user_search_pages WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()
+    return row_to_target_user_search_page(row) if row else None
+
+
+def get_target_user_search_page(
+    *,
+    source: str,
+    keyword: str,
+    cursor: int = 0,
+    count: int = 20,
+    search_id: str = "",
+    douyin_user_fans: str = "",
+    douyin_user_type: str = "",
+) -> dict[str, Any] | None:
+    cache_key = build_user_search_page_cache_key(
+        source=source,
+        keyword=keyword,
+        cursor=cursor,
+        count=count,
+        search_id=search_id,
+        douyin_user_fans=douyin_user_fans,
+        douyin_user_type=douyin_user_type,
+    )
+    return get_target_user_search_page_by_cache_key(cache_key)
+
+
+def upsert_target_user_search_page(
+    *,
+    source: str,
+    keyword: str,
+    cursor: int = 0,
+    count: int = 20,
+    search_id: str = "",
+    douyin_user_fans: str = "",
+    douyin_user_type: str = "",
+    request: dict[str, Any] | None = None,
+    items: list[dict[str, Any]] | None = None,
+    raw: dict[str, Any] | None = None,
+    pagination: dict[str, Any] | None = None,
+    normalized: dict[str, Any] | None = None,
+    fetched_at: int | None = None,
+) -> dict[str, Any]:
+    init_db()
+    current = now()
+    request = request or {}
+    items = items or []
+    raw = raw or {}
+    pagination = pagination or {}
+    normalized = normalized or {}
+    cache_key = build_user_search_page_cache_key(
+        source=source,
+        keyword=keyword,
+        cursor=cursor,
+        count=count,
+        search_id=search_id,
+        douyin_user_fans=douyin_user_fans,
+        douyin_user_type=douyin_user_type,
+    )
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO tiktok_target_user_search_pages (
+                id, cache_key, source, keyword, cursor, count, search_id, douyin_user_fans,
+                douyin_user_type, request_json, items_json, raw_json, pagination_json,
+                normalized_json, fetched_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                source = excluded.source,
+                keyword = excluded.keyword,
+                cursor = excluded.cursor,
+                count = excluded.count,
+                search_id = excluded.search_id,
+                douyin_user_fans = excluded.douyin_user_fans,
+                douyin_user_type = excluded.douyin_user_type,
+                request_json = excluded.request_json,
+                items_json = excluded.items_json,
+                raw_json = excluded.raw_json,
+                pagination_json = excluded.pagination_json,
+                normalized_json = excluded.normalized_json,
+                fetched_at = excluded.fetched_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                cache_key,
+                cache_key,
+                source,
+                keyword,
+                int(cursor or 0),
+                int(count or 0),
+                search_id or "",
+                douyin_user_fans or "",
+                douyin_user_type or "",
+                json.dumps(request, ensure_ascii=False),
+                json.dumps(items, ensure_ascii=False),
+                json.dumps(raw, ensure_ascii=False),
+                json.dumps(pagination, ensure_ascii=False),
+                json.dumps(normalized, ensure_ascii=False),
+                fetched_at or current,
+                current,
+                current,
+            ),
+        )
+    return get_target_user_search_page_by_cache_key(cache_key) or {}
+
+
+def get_target_video_comment_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM tiktok_target_video_comment_pages WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()
+    return row_to_target_video_comment_page(row) if row else None
+
+
+def get_target_video_comment_page(
+    *,
+    source: str,
+    video_id: str,
+    aweme_id: str = "",
+    item_id: str = "",
+    comment_id: str = "",
+    page_kind: str = "comments",
+    cursor: int = 0,
+    count: int = 20,
+) -> dict[str, Any] | None:
+    cache_key = build_video_comment_page_cache_key(
+        source=source,
+        video_id=video_id,
+        aweme_id=aweme_id,
+        item_id=item_id,
+        comment_id=comment_id,
+        page_kind=page_kind,
+        cursor=cursor,
+        count=count,
+    )
+    return get_target_video_comment_page_by_cache_key(cache_key)
+
+
+def upsert_target_video_comment_page(
+    *,
+    source: str,
+    video_id: str,
+    aweme_id: str = "",
+    item_id: str = "",
+    comment_id: str = "",
+    page_kind: str = "comments",
+    cursor: int = 0,
+    count: int = 20,
+    request: dict[str, Any] | None = None,
+    items: list[dict[str, Any]] | None = None,
+    raw: dict[str, Any] | None = None,
+    pagination: dict[str, Any] | None = None,
+    normalized: dict[str, Any] | None = None,
+    fetched_at: int | None = None,
+) -> dict[str, Any]:
+    init_db()
+    current = now()
+    request = request or {}
+    items = items or []
+    raw = raw or {}
+    pagination = pagination or {}
+    normalized = normalized or {}
+    cache_key = build_video_comment_page_cache_key(
+        source=source,
+        video_id=video_id,
+        aweme_id=aweme_id,
+        item_id=item_id,
+        comment_id=comment_id,
+        page_kind=page_kind,
+        cursor=cursor,
+        count=count,
+    )
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO tiktok_target_video_comment_pages (
+                id, cache_key, source, video_id, aweme_id, item_id, comment_id, page_kind,
+                cursor, count, request_json, items_json, raw_json, pagination_json,
+                normalized_json, fetched_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                source = excluded.source,
+                video_id = excluded.video_id,
+                aweme_id = excluded.aweme_id,
+                item_id = excluded.item_id,
+                comment_id = excluded.comment_id,
+                page_kind = excluded.page_kind,
+                cursor = excluded.cursor,
+                count = excluded.count,
+                request_json = excluded.request_json,
+                items_json = excluded.items_json,
+                raw_json = excluded.raw_json,
+                pagination_json = excluded.pagination_json,
+                normalized_json = excluded.normalized_json,
+                fetched_at = excluded.fetched_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                cache_key,
+                cache_key,
+                source,
+                video_id,
+                aweme_id,
+                item_id,
+                comment_id,
+                page_kind,
+                int(cursor or 0),
+                int(count or 0),
+                json.dumps(request, ensure_ascii=False),
+                json.dumps(items, ensure_ascii=False),
+                json.dumps(raw, ensure_ascii=False),
+                json.dumps(pagination, ensure_ascii=False),
+                json.dumps(normalized, ensure_ascii=False),
+                fetched_at or current,
+                current,
+                current,
+            ),
+        )
+    return get_target_video_comment_page_by_cache_key(cache_key) or {}
+
+
+def get_target_user_video_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM tiktok_target_user_video_pages WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()
+    return row_to_target_user_video_page(row) if row else None
+
+
+def get_target_user_video_page(
+    *,
+    source: str,
+    user_id: str = "",
+    sec_user_id: str = "",
+    unique_id: str = "",
+    max_cursor: int = 0,
+    count: int = 20,
+    sort_type: int = 0,
+    filter_type: int | None = None,
+) -> dict[str, Any] | None:
+    cache_key = build_user_video_page_cache_key(
+        source=source,
+        user_id=user_id,
+        sec_user_id=sec_user_id,
+        unique_id=unique_id,
+        max_cursor=max_cursor,
+        count=count,
+        sort_type=sort_type,
+        filter_type=filter_type,
+    )
+    return get_target_user_video_page_by_cache_key(cache_key)
+
+
+def upsert_target_user_video_page(
+    *,
+    source: str,
+    user_id: str = "",
+    sec_user_id: str = "",
+    unique_id: str = "",
+    max_cursor: int = 0,
+    count: int = 20,
+    sort_type: int = 0,
+    filter_type: int | None = None,
+    next_cursor: int | None = None,
+    has_more: bool = False,
+    request: dict[str, Any] | None = None,
+    items: list[dict[str, Any]] | None = None,
+    raw: dict[str, Any] | None = None,
+    pagination: dict[str, Any] | None = None,
+    normalized: dict[str, Any] | None = None,
+    fetched_at: int | None = None,
+) -> dict[str, Any]:
+    init_db()
+    current = now()
+    request = request or {}
+    items = items or []
+    raw = raw or {}
+    pagination = pagination or {}
+    normalized = normalized or {}
+    cache_key = build_user_video_page_cache_key(
+        source=source,
+        user_id=user_id,
+        sec_user_id=sec_user_id,
+        unique_id=unique_id,
+        max_cursor=max_cursor,
+        count=count,
+        sort_type=sort_type,
+        filter_type=filter_type,
+    )
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO tiktok_target_user_video_pages (
+                id, cache_key, source, user_id, sec_user_id, unique_id, max_cursor, count,
+                sort_type, filter_type, next_cursor, has_more, item_count, request_json, items_json,
+                raw_json, pagination_json, normalized_json, fetched_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                source = excluded.source,
+                user_id = excluded.user_id,
+                sec_user_id = excluded.sec_user_id,
+                unique_id = excluded.unique_id,
+                max_cursor = excluded.max_cursor,
+                count = excluded.count,
+                sort_type = excluded.sort_type,
+                filter_type = excluded.filter_type,
+                next_cursor = excluded.next_cursor,
+                has_more = excluded.has_more,
+                item_count = excluded.item_count,
+                request_json = excluded.request_json,
+                items_json = excluded.items_json,
+                raw_json = excluded.raw_json,
+                pagination_json = excluded.pagination_json,
+                normalized_json = excluded.normalized_json,
+                fetched_at = excluded.fetched_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                cache_key,
+                cache_key,
+                source,
+                user_id,
+                sec_user_id,
+                unique_id,
+                int(max_cursor or 0),
+                int(count or 0),
+                int(sort_type or 0),
+                filter_type,
+                next_cursor,
+                1 if has_more else 0,
+                len(items),
+                json.dumps(request, ensure_ascii=False),
+                json.dumps(items, ensure_ascii=False),
+                json.dumps(raw, ensure_ascii=False),
+                json.dumps(pagination, ensure_ascii=False),
+                json.dumps(normalized, ensure_ascii=False),
+                fetched_at or current,
+                current,
+                current,
+            ),
+        )
+    return get_target_user_video_page_by_cache_key(cache_key) or {}
 
 
 def list_target_users(status: str | None = None, limit: int = 200, set_id: str | None = None) -> list[dict[str, Any]]:
@@ -1132,7 +1852,36 @@ def remove_user_from_target_set(set_id: str, user_id: str) -> bool:
 def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     init_db()
     current = now()
+    existing = get_target_video(video_id) or {}
+    existing_source = existing.get("source_json") if isinstance(existing.get("source_json"), dict) else {}
+    incoming_source = payload.get("source_json") if isinstance(payload.get("source_json"), dict) else {}
+    merged_source = {**existing_source, **incoming_source} if existing_source or incoming_source else payload.get("source_json") or payload
     metrics = derive_video_metrics(payload)
+    if metrics["play_count"] <= 0:
+        metrics["play_count"] = first_positive_int(
+            payload.get("play_count"),
+            payload.get("source_json", {}).get("statistics", {}).get("play_count") if isinstance(payload.get("source_json"), dict) else None,
+            payload.get("source_json", {}).get("statistics", {}).get("view_count") if isinstance(payload.get("source_json"), dict) else None,
+            payload.get("raw", {}).get("statistics", {}).get("play_count") if isinstance(payload.get("raw"), dict) else None,
+            payload.get("raw", {}).get("statistics", {}).get("view_count") if isinstance(payload.get("raw"), dict) else None,
+            existing.get("play_count"),
+        )
+        metrics["engagement_rate"] = round(metrics["engagement_score"] / metrics["play_count"], 6) if metrics["play_count"] else None
+    for metric_key in ("digg_count", "comment_count", "share_count", "collect_count"):
+        existing_value = to_int(existing.get(metric_key)) if existing.get(metric_key) not in [None, ""] else 0
+        if metrics[metric_key] <= 0 and existing_value > 0:
+            metrics[metric_key] = existing_value
+    metrics["metrics_json"] = {**(existing.get("metrics") if isinstance(existing.get("metrics"), dict) else {}), **metrics["metrics_json"]}
+    resolved_desc = str(payload.get("desc") or existing.get("desc") or "")
+    resolved_cover_url = str(payload.get("cover_url") or existing.get("cover_url") or "")
+    resolved_play_url = str(payload.get("play_url") or existing.get("play_url") or "")
+    resolved_download_url = str(payload.get("download_url") or existing.get("download_url") or "")
+    resolved_set_id = str(payload.get("set_id") or existing.get("set_id") or "")
+    resolved_analysis_status = str(payload.get("analysis_status") or existing.get("analysis_status") or "none")
+    resolved_analysis_task_id = str(payload.get("analysis_task_id") or existing.get("analysis_task_id") or "")
+    resolved_is_top = bool(payload.get("is_top")) or bool(existing.get("is_top"))
+    resolved_selected = bool(payload.get("selected")) or bool(existing.get("selected"))
+    resolved_aweme_id = str(payload.get("aweme_id") or existing.get("aweme_id") or "")
     with connect() as connection:
         connection.execute(
             """
@@ -1173,22 +1922,29 @@ def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) ->
                 engagement_rate = excluded.engagement_rate,
                 metrics_json = excluded.metrics_json,
                 is_top = excluded.is_top,
-                selection_strategy = excluded.selection_strategy
+                selection_strategy = COALESCE(NULLIF(excluded.selection_strategy, ''), selection_strategy),
+                analysis_status = COALESCE(NULLIF(excluded.analysis_status, ''), analysis_status),
+                analysis_task_id = COALESCE(NULLIF(excluded.analysis_task_id, ''), analysis_task_id),
+                analysis_result_json = CASE
+                    WHEN excluded.analysis_result_json IS NOT NULL AND excluded.analysis_result_json != '{}' THEN excluded.analysis_result_json
+                    ELSE analysis_result_json
+                END,
+                analyzed_at = COALESCE(excluded.analyzed_at, analyzed_at)
             """,
             (
                 video_id,
                 user_id,
-                payload.get('aweme_id', ''),
-                payload.get('desc', ''),
-                payload.get('cover_url', ''),
-                payload.get('play_url', ''),
-                payload.get('download_url', ''),
-                json.dumps(payload.get('source_json') or payload, ensure_ascii=False),
-                1 if payload.get('selected') else 0,
+                resolved_aweme_id,
+                resolved_desc,
+                resolved_cover_url,
+                resolved_play_url,
+                resolved_download_url,
+                json.dumps(merged_source or payload, ensure_ascii=False),
+                1 if resolved_selected else 0,
                 current,
                 current,
-                payload.get('set_id', ''),
-                payload.get('create_time'),
+                resolved_set_id,
+                payload.get('create_time') if payload.get('create_time') not in [None, ""] else existing.get('create_time'),
                 metrics["digg_count"],
                 metrics["comment_count"],
                 metrics["share_count"],
@@ -1205,12 +1961,12 @@ def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) ->
                 metrics["engagement_score"],
                 metrics["engagement_rate"],
                 json.dumps(metrics["metrics_json"], ensure_ascii=False),
-                1 if payload.get('is_top') else 0,
-                payload.get('selection_strategy', ''),
-                payload.get('analysis_status', 'none'),
-                payload.get('analysis_task_id', ''),
+                1 if resolved_is_top else 0,
+                payload.get('selection_strategy', '') or existing.get('selection_strategy') or '',
+                resolved_analysis_status,
+                resolved_analysis_task_id,
                 json.dumps(payload.get('analysis_result') or payload.get('analysis_result_json') or {}, ensure_ascii=False),
-                payload.get('analyzed_at'),
+                payload.get('analyzed_at') if payload.get('analyzed_at') not in [None, ""] else existing.get('analyzed_at'),
             ),
         )
     return get_target_video(video_id) or {}

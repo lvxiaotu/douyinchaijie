@@ -2,21 +2,70 @@
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import requests
 from dotenv import load_dotenv
 
+from backend.app.error_log_store import write_error_log
+from backend.app.tiktok_target_store import (
+    create_target_video,
+    get_target_user_by_identifiers,
+    get_target_user_search_page,
+    get_target_user_video_page,
+    get_target_video,
+    upsert_target_user,
+    upsert_target_user_search_page,
+    upsert_target_user_video_page,
+)
 from integrations.base import IntegrationAdapter, IntegrationManifest
 
 
 DEFAULT_API_BASE = "https://api.tikhub.io"
 DEFAULT_API_KEY_ENV = "TIKHUB_API_KEY"
 DEFAULT_USER_SEARCH_PATH = "/api/v1/douyin/search/fetch_user_search"
+DEFAULT_USER_SEARCH_V2_PATH = "/api/v1/douyin/search/fetch_user_search_v2"
 DEFAULT_USER_PROFILE_PATH = "/api/v1/douyin/web/handler_user_profile"
 DEFAULT_USER_VIDEOS_PATH = "/api/v1/douyin/web/fetch_user_post_videos"
 DEFAULT_ONE_VIDEO_PATH = "/api/v1/douyin/app/v3/fetch_one_video_v3"
+USER_SEARCH_FANS_ALIASES = {
+    "": "",
+    "0_1k": "0_1k",
+    "below_1k": "0_1k",
+    "under_1k": "0_1k",
+    "1k_5k": "1k_5k",
+    "5k_10k": "5k_10k",
+    "10k_100k": "10k_100k",
+    "1w_10w": "10k_100k",
+    "10w_100w": "100k_1M",
+    "100k_1m": "100k_1M",
+    "100k_1M": "100k_1M",
+    "1m_": "1M_",
+    "1M_": "1M_",
+    "100w_": "1M_",
+}
+
+USER_SEARCH_TYPE_ALIASES = {
+    "": "",
+    "300": "300",
+    "creator": "300",
+    "creator_user": "300",
+    "900": "900",
+    "shop": "900",
+    "shop_user": "900",
+    "mall": "900",
+    "700": "700",
+    "music": "700",
+    "musician": "700",
+    "800": "800",
+    "star": "800",
+    "celebrity": "800",
+    "common_user": "",
+    "enterprise_user": "",
+    "personal_user": "",
+}
 
 
 @dataclass
@@ -25,6 +74,58 @@ class TikhubRequestSpec:
     method: str
     params: dict[str, Any] | None = None
     json_body: dict[str, Any] | None = None
+
+
+class TikhubApiError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        status_code: int | None = None,
+        path: str = "",
+        method: str = "",
+        request_payload: dict[str, Any] | None = None,
+        response_payload: Any = None,
+        response_text: str = "",
+        message: str = "",
+        previous_errors: list[dict[str, Any]] | None = None,
+        error_log_path: str = "",
+    ):
+        self.status_code = status_code
+        self.path = path
+        self.method = method
+        self.request_payload = request_payload or {}
+        self.response_payload = response_payload
+        self.response_text = response_text
+        self.previous_errors = previous_errors or []
+        self.error_log_path = error_log_path
+        super().__init__(message or self._fallback_message())
+
+    def _fallback_message(self) -> str:
+        status = f" HTTP {self.status_code}" if self.status_code else ""
+        return f"TikHub API{status} request failed"
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "status_code": self.status_code,
+            "path": self.path,
+            "method": self.method,
+            "request": self.request_payload,
+            "message": str(self),
+        }
+        if self.response_payload is not None:
+            payload["response"] = self.response_payload
+            if isinstance(self.response_payload, dict):
+                source = self.response_payload.get("detail") if isinstance(self.response_payload.get("detail"), dict) else self.response_payload
+                payload["request_id"] = source.get("request_id") or self.response_payload.get("request_id")
+                payload["router"] = source.get("router") or self.response_payload.get("router")
+                payload["docs"] = source.get("docs") or self.response_payload.get("docs")
+        elif self.response_text:
+            payload["response_text"] = self.response_text[:2000]
+        if self.previous_errors:
+            payload["previous_errors"] = self.previous_errors
+        if self.error_log_path:
+            payload["error_log_path"] = self.error_log_path
+        return {key: value for key, value in payload.items() if value not in [None, "", {}]}
 
 
 class TikhubDouyinApiAdapter(IntegrationAdapter):
@@ -107,50 +208,163 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         douyin_user_type: str = "",
         enrich_profiles: bool = True,
     ) -> dict[str, Any]:
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            raise ValueError("TikHub 用户搜索 keyword 不能为空。")
         resolved_page = page if page > 0 else 1
+        target_count = max(1, min(int(count or 20), 50))
         resolved_cursor = cursor if cursor is not None else 0
         if offset is not None and offset > 0 and cursor is None and page <= 1:
             resolved_cursor = offset
-        if resolved_cursor == 0 and resolved_page > 1 and cursor is None:
-            resolved_cursor = (resolved_page - 1) * max(count, 1)
         resolved_user_type = user_type or user_search_profile_type or douyin_user_type
         resolved_follower_filter = follower_filter or user_search_follower_count
+        normalized_user_type = self._normalize_user_search_type(resolved_user_type)
+        normalized_follower_filter = self._normalize_user_search_fans(resolved_follower_filter)
+        cached = get_target_user_search_page(
+            source=self.manifest.id,
+            keyword=keyword,
+            cursor=int(resolved_cursor or 0),
+            count=target_count,
+            search_id=search_id,
+            douyin_user_fans=normalized_follower_filter,
+            douyin_user_type=normalized_user_type,
+        )
+        if cached:
+            response = self._build_cached_user_search_response(cached, page=resolved_page, count=target_count)
+            if enrich_profiles:
+                response["items"] = self._enrich_users(response.get("items", [])[:target_count] if target_count else response.get("items", []))
+            response["count"] = len(response.get("items", []))
+            return response
+        data: dict[str, Any] = {}
+        raw_pages: list[dict[str, Any]] = []
+        fallback_errors: list[dict[str, Any]] = []
+        spec: TikhubRequestSpec | None = None
+
+        if cursor is not None or resolved_page <= 1:
+            data, spec, errors = self._request_user_search_page(
+                keyword=keyword,
+                cursor=resolved_cursor,
+                search_id=search_id,
+                douyin_user_fans=normalized_follower_filter,
+                douyin_user_type=normalized_user_type,
+            )
+            raw_pages.append(data)
+            fallback_errors.extend(errors)
+        else:
+            current_cursor = 0
+            current_search_id = search_id or ""
+            for page_index in range(1, resolved_page + 1):
+                data, spec, errors = self._request_user_search_page(
+                    keyword=keyword,
+                    cursor=current_cursor,
+                    search_id=current_search_id,
+                    douyin_user_fans=normalized_follower_filter,
+                    douyin_user_type=normalized_user_type,
+                )
+                raw_pages.append(data)
+                fallback_errors.extend(errors)
+                if page_index >= resolved_page:
+                    break
+                pagination = self._extract_user_search_pagination(data)
+                next_cursor = self._to_int(pagination.get("cursor"))
+                if not self._has_more(pagination.get("has_more")) or next_cursor is None or next_cursor == current_cursor:
+                    break
+                current_cursor = next_cursor
+                current_search_id = str(pagination.get("search_id") or current_search_id)
+
+        spec = spec or TikhubRequestSpec(path=DEFAULT_USER_SEARCH_PATH, method="POST", json_body={})
+        items = self._extract_items(data)
+        if enrich_profiles:
+            items = self._enrich_users(items[:target_count] if target_count else items)
+        response = {
+            "status": "ok",
+            "source": self.manifest.id,
+            "endpoint": spec.path,
+            "keyword": keyword,
+            "page": resolved_page,
+            "cursor": (spec.json_body or {}).get("cursor", resolved_cursor),
+            "search_id": (spec.json_body or {}).get("search_id", search_id),
+            "count": target_count,
+            "request": {k: v for k, v in (spec.json_body or {}).items() if v is not None},
+            "raw": data,
+            "raw_pages": raw_pages,
+            "items": items[:target_count] if target_count else items,
+            "pagination": self._extract_user_search_pagination(data),
+            "normalized": self._normalize_response(data),
+        }
+        if fallback_errors:
+            response["fallback"] = {
+                "used": spec.path == DEFAULT_USER_SEARCH_V2_PATH,
+                "reason": "TikHub v1 user search returned HTTP 400; retried with v2 minimal payload.",
+                "errors": fallback_errors,
+            }
+        self._cache_user_search_page(
+            keyword=keyword,
+            cursor=int(response["cursor"] or 0),
+            count=target_count,
+            search_id=str(response["search_id"] or ""),
+            douyin_user_fans=normalized_follower_filter,
+            douyin_user_type=normalized_user_type,
+            request={k: v for k, v in (spec.json_body or {}).items() if v is not None},
+            raw_page=data,
+            page_items=response["items"],
+            pagination=response["pagination"],
+            normalized=response["normalized"],
+        )
+        self._upsert_search_users(keyword, response["items"], fallback_search_id=str(response["search_id"] or ""))
+        return response
+
+    def _request_user_search_page(
+        self,
+        *,
+        keyword: str,
+        cursor: int,
+        search_id: str,
+        douyin_user_fans: str,
+        douyin_user_type: str,
+    ) -> tuple[dict[str, Any], TikhubRequestSpec, list[dict[str, Any]]]:
         spec = TikhubRequestSpec(
             path=DEFAULT_USER_SEARCH_PATH,
             method="POST",
             json_body={
                 "keyword": keyword,
-                "page": resolved_page,
-                "cursor": resolved_cursor,
-                "search_id": search_id,
-                "userType": resolved_user_type,
-                "douyin_user_fans": resolved_follower_filter,
-                "douyin_user_type": resolved_user_type,
-                "count": count,
+                "cursor": int(cursor or 0),
+                "douyin_user_fans": douyin_user_fans or "",
+                "douyin_user_type": douyin_user_type or "",
+                "search_id": search_id or "",
             },
         )
-        if user_search_other_pref:
-            spec.json_body["user_search_other_pref"] = user_search_other_pref
-        data = self._request_json(spec)
-        items = self._extract_items(data)
-        if enrich_profiles:
-            items = self._enrich_users(items[:count] if count else items)
-        return {
-            "status": "ok",
-            "source": self.manifest.id,
-            "keyword": keyword,
-            "page": resolved_page,
-            "cursor": resolved_cursor,
-            "search_id": search_id,
-            "count": count,
-            "request": {k: v for k, v in (spec.json_body or {}).items() if v not in [None, ""]},
-            "raw": data,
-            "items": items[:count] if count else items,
-            "pagination": self._extract_user_search_pagination(data),
-            "normalized": self._normalize_response(data),
-        }
+        try:
+            return self._request_json(spec), spec, []
+        except TikhubApiError as exc:
+            if exc.status_code != 400:
+                raise
+            fallback_spec = TikhubRequestSpec(
+                path=DEFAULT_USER_SEARCH_V2_PATH,
+                method="POST",
+                json_body={
+                    "keyword": keyword,
+                    "cursor": int(cursor or 0),
+                },
+            )
+            previous_errors = [exc.to_dict()]
+            try:
+                return self._request_json(fallback_spec), fallback_spec, previous_errors
+            except TikhubApiError as fallback_exc:
+                fallback_exc.previous_errors = previous_errors + fallback_exc.previous_errors
+                raise
 
     def get_user_profile(self, sec_user_id: str) -> dict[str, Any]:
+        cached_user = get_target_user_by_identifiers(sec_user_id=sec_user_id)
+        if cached_user and cached_user.get("source_json"):
+            return {
+                "status": "ok",
+                "source": self.manifest.id,
+                "request": {"sec_user_id": sec_user_id},
+                "raw": cached_user.get("source_json") or {},
+                "user": self._normalize_user(cached_user.get("source_json") or cached_user),
+                "cache": {"hit": True, "user_id": cached_user.get("id")},
+            }
         spec = TikhubRequestSpec(
             path=DEFAULT_USER_PROFILE_PATH,
             method="GET",
@@ -158,12 +372,15 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         )
         data = self._request_json(spec)
         user = self._extract_profile_user(data)
+        normalized = self._normalize_user(user) if user else {}
+        if normalized:
+            self._upsert_normalized_user(sec_user_id=sec_user_id, normalized=normalized, raw=data)
         return {
             "status": "ok",
             "source": self.manifest.id,
             "request": spec.params,
             "raw": data,
-            "user": self._normalize_user(user) if user else {},
+            "user": normalized,
         }
 
     def get_user_videos(
@@ -180,13 +397,34 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             raise ValueError("Douyin Web 作品接口需要 sec_user_id，当前账号缺少可用的 sec_user_id。")
 
         target_count = max(1, min(int(count or 20), 50))
-        page_size = min(target_count, 20)
-        current_cursor = int(max_cursor or 0)
         resolved_filter_type = int(filter_type if filter_type is not None else sort_type or 0)
+        initial_cursor = int(max_cursor or 0)
+        cached = get_target_user_video_page(
+            source=self.manifest.id,
+            sec_user_id=sec,
+            unique_id=str(unique_id or ""),
+            max_cursor=initial_cursor,
+            count=target_count,
+            sort_type=int(sort_type or 0),
+            filter_type=resolved_filter_type,
+        )
+        if cached:
+            return self._build_cached_user_videos_response(cached)
+        request_payload = {
+            "sec_user_id": sec,
+            "unique_id": str(unique_id or ""),
+            "max_cursor": initial_cursor,
+            "count": target_count,
+            "sort_type": int(sort_type or 0),
+            "filter_type": resolved_filter_type,
+        }
+
+        page_size = min(target_count, 20)
+        current_cursor = initial_cursor
         raw_pages: list[dict[str, Any]] = []
         items: list[dict[str, Any]] = []
-        last_spec: TikhubRequestSpec | None = None
         pagination: dict[str, Any] = {}
+        last_page_raw: dict[str, Any] = {}
 
         while len(items) < target_count:
             current_page_size = min(page_size, target_count - len(items))
@@ -200,12 +438,23 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
                     filter_type=resolved_filter_type,
                 ),
             )
-            last_spec = spec
             data = self._request_json(spec)
             raw_pages.append(data)
+            last_page_raw = data
             page_items = self._extract_video_items(data)
-            items.extend(page_items)
             pagination = self._extract_video_pagination(data)
+            self._cache_user_video_page_variants(
+                sec_user_id=sec,
+                unique_id=str(unique_id or ""),
+                max_cursor=current_cursor,
+                sort_type=int(sort_type or 0),
+                filter_type=resolved_filter_type,
+                request_params={k: v for k, v in ((spec.params or {}) or {}).items() if v not in [None, ""] and k != "cookie"},
+                raw_page=data,
+                page_items=page_items,
+                pagination=pagination,
+            )
+            items.extend(page_items)
 
             next_cursor = pagination.get("max_cursor")
             has_more = pagination.get("has_more")
@@ -213,61 +462,207 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
                 break
             current_cursor = int(next_cursor)
 
-        raw = raw_pages[0] if raw_pages else {}
-        return {
+        raw = last_page_raw if last_page_raw else {}
+        response = {
             "status": "ok",
             "source": self.manifest.id,
             "endpoint": DEFAULT_USER_VIDEOS_PATH,
-            "request": {k: v for k, v in ((last_spec.params if last_spec else {}) or {}).items() if v not in [None, ""] and k != "cookie"},
+            "request": request_payload,
             "raw": raw,
             "raw_pages": raw_pages,
             "items": items[:target_count],
             "pagination": pagination,
             "normalized": self._normalize_video_response(raw),
+            "next_cursor": pagination.get("max_cursor"),
+            "has_more": bool(pagination.get("has_more")),
         }
+        self._upsert_videos_from_items(sec, response["items"], unique_id=str(unique_id or ""), source_page=response)
+        self._cache_user_video_page_variants(
+            sec_user_id=sec,
+            unique_id=str(unique_id or ""),
+            max_cursor=initial_cursor,
+            sort_type=int(sort_type or 0),
+            filter_type=resolved_filter_type,
+            request_params=request_payload,
+            raw_page=raw,
+            page_items=response["items"],
+            pagination=pagination,
+        )
+        upsert_target_user_video_page(
+            source=self.manifest.id,
+            sec_user_id=sec,
+            unique_id=str(unique_id or ""),
+            max_cursor=initial_cursor,
+            count=target_count,
+            sort_type=int(sort_type or 0),
+            filter_type=resolved_filter_type,
+            next_cursor=self._to_int(pagination.get("max_cursor")),
+            has_more=bool(pagination.get("has_more")),
+            request=request_payload,
+            items=response["items"],
+            raw={"raw": raw, "raw_pages": raw_pages},
+            pagination=pagination,
+            normalized=response["normalized"],
+            fetched_at=int(time.time()),
+        )
+        return response
 
     def get_one_video(self, aweme_id: str, region: str = "US") -> dict[str, Any]:
+        cached_video = get_target_video(aweme_id)
+        if cached_video:
+            return {
+                "status": "ok",
+                "source": self.manifest.id,
+                "request": {"aweme_id": aweme_id, "region": region},
+                "raw": cached_video.get("source_json") or {},
+                "video": cached_video,
+                "download_urls": {
+                    "play_addr": cached_video.get("play_url") or "",
+                    "download_addr": cached_video.get("download_url") or "",
+                },
+                "cache": {"hit": True, "video_id": cached_video.get("id")},
+            }
         spec = TikhubRequestSpec(path=DEFAULT_ONE_VIDEO_PATH, method="GET", params={"aweme_id": aweme_id, "region": region})
         data = self._request_json(spec)
+        video = self._extract_one_video(data)
+        if video:
+            self._upsert_videos_from_items("", [video], source_page={"endpoint": DEFAULT_ONE_VIDEO_PATH})
         return {
             "status": "ok",
             "source": self.manifest.id,
             "request": spec.params,
             "raw": data,
-            "video": self._extract_one_video(data),
+            "video": video,
             "download_urls": self._extract_download_urls(data),
         }
 
     def _request_json(self, spec: TikhubRequestSpec) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        response = requests.request(spec.method, f"{self.api_base}{spec.path}", params=spec.params, json=spec.json_body, headers=headers, timeout=60)
+        try:
+            response = requests.request(spec.method, f"{self.api_base}{spec.path}", params=spec.params, json=spec.json_body, headers=headers, timeout=60)
+        except requests.RequestException as exc:
+            error_log_path = write_error_log(
+                namespace="tikhub",
+                path=spec.path,
+                method=spec.method,
+                request=self._safe_request_payload(spec),
+                exc=exc,
+                api_base=self.api_base,
+                extra={"phase": "request_exception"},
+            )
+            raise TikhubApiError(
+                path=spec.path,
+                method=spec.method,
+                request_payload=self._safe_request_payload(spec),
+                message=f"TikHub API 请求失败：{exc}",
+                error_log_path=error_log_path,
+            ) from exc
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
-            raise RuntimeError(self._format_http_error(response)) from exc
-        return response.json()
-
-    def _format_http_error(self, response: requests.Response) -> str:
+            error = self._build_http_error(response, spec)
+            error.error_log_path = write_error_log(
+                namespace="tikhub",
+                path=spec.path,
+                method=spec.method,
+                request=self._safe_request_payload(spec),
+                exc=exc,
+                api_base=self.api_base,
+                status_code=response.status_code,
+                response_payload=error.response_payload,
+                response_text=error.response_text,
+                extra={"phase": "http_error"},
+            )
+            raise error from exc
         try:
-            payload = response.json()
+            return response.json()
+        except ValueError as exc:
+            error_log_path = write_error_log(
+                namespace="tikhub",
+                path=spec.path,
+                method=spec.method,
+                request=self._safe_request_payload(spec),
+                exc=exc,
+                api_base=self.api_base,
+                status_code=response.status_code,
+                response_text=response.text.strip(),
+                extra={"phase": "non_json_response"},
+            )
+            raise TikhubApiError(
+                status_code=response.status_code,
+                path=spec.path,
+                method=spec.method,
+                request_payload=self._safe_request_payload(spec),
+                response_text=response.text.strip(),
+                message=f"TikHub API 返回非 JSON 响应：{response.text.strip()[:220]}",
+                error_log_path=error_log_path,
+            ) from exc
+
+    def _safe_request_payload(self, spec: TikhubRequestSpec) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if spec.params:
+            payload["params"] = spec.params
+        if spec.json_body:
+            payload["json_body"] = spec.json_body
+        return payload
+
+    def _build_http_error(self, response: requests.Response, spec: TikhubRequestSpec) -> TikhubApiError:
+        response_payload: Any = None
+        response_text = ""
+        try:
+            response_payload = response.json()
         except ValueError:
-            body = response.text.strip().replace("\n", " ")
+            response_text = response.text.strip()
+        return TikhubApiError(
+            status_code=response.status_code,
+            path=spec.path,
+            method=spec.method,
+            request_payload=self._safe_request_payload(spec),
+            response_payload=response_payload,
+            response_text=response_text,
+            message=self._format_http_error(response, response_payload=response_payload, response_text=response_text),
+        )
+
+    def _format_http_error(self, response: requests.Response, *, response_payload: Any = None, response_text: str = "") -> str:
+        payload = response_payload
+        if payload is None:
+            try:
+                payload = response.json()
+            except ValueError:
+                body = (response_text or response.text).strip().replace("\n", " ")
+                return f"TikHub API HTTP {response.status_code}: {body[:220]}"
+        if not isinstance(payload, dict):
+            body = str(payload).strip().replace("\n", " ")
             return f"TikHub API HTTP {response.status_code}: {body[:220]}"
         detail = payload.get("detail") if isinstance(payload, dict) else None
-        if isinstance(detail, dict):
-            message = detail.get("message_zh") or detail.get("message") or payload.get("message")
-            router = detail.get("router")
-            request_id = detail.get("request_id")
-            parts = [f"TikHub API HTTP {response.status_code}"]
-            if message:
-                parts.append(str(message))
-            if router:
-                parts.append(f"接口：{router}")
-            if request_id:
-                parts.append(f"request_id：{request_id}")
-            return "；".join(parts)
-        message = payload.get("message_zh") or payload.get("message") if isinstance(payload, dict) else ""
-        return f"TikHub API HTTP {response.status_code}: {message or str(payload)[:220]}"
+        source = detail if isinstance(detail, dict) else payload
+        message = source.get("message_zh") or source.get("message") or payload.get("message_zh") or payload.get("message")
+        router = source.get("router") or payload.get("router")
+        request_id = source.get("request_id") or payload.get("request_id")
+        docs = source.get("docs") or payload.get("docs")
+        parts = [f"TikHub API HTTP {response.status_code}"]
+        if message:
+            parts.append(str(message))
+        if router:
+            parts.append(f"接口：{router}")
+        if request_id:
+            parts.append(f"request_id：{request_id}")
+        if docs:
+            parts.append(f"docs：{docs}")
+        return "；".join(parts)
+
+    def _normalize_user_search_fans(self, value: Any) -> str:
+        text = str(value or "").strip()
+        return USER_SEARCH_FANS_ALIASES.get(text, USER_SEARCH_FANS_ALIASES.get(text.lower(), ""))
+
+    def _normalize_user_search_type(self, value: Any) -> str:
+        text = str(value or "").strip()
+        return USER_SEARCH_TYPE_ALIASES.get(text, USER_SEARCH_TYPE_ALIASES.get(text.lower(), ""))
+
+    def _has_more(self, value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() not in {"", "0", "false", "none", "no"}
+        return bool(value)
 
     def _user_videos_params(
         self,
@@ -358,6 +753,239 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         if not isinstance(aweme_list, list):
             return []
         return [self._normalize_video(item) for item in aweme_list if isinstance(item, dict)]
+
+    def _build_cached_user_videos_response(self, cached: dict[str, Any]) -> dict[str, Any]:
+        raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
+        raw_pages = raw.get("raw_pages") if isinstance(raw.get("raw_pages"), list) else []
+        first_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else (raw_pages[0] if raw_pages else raw)
+        pagination = cached.get("pagination") if isinstance(cached.get("pagination"), dict) else {}
+        return {
+            "status": "ok",
+            "source": self.manifest.id,
+            "endpoint": DEFAULT_USER_VIDEOS_PATH,
+            "request": cached.get("request") or {},
+            "raw": first_raw,
+            "raw_pages": raw_pages,
+            "items": cached.get("items") or [],
+            "pagination": pagination,
+            "normalized": cached.get("normalized") or {},
+            "next_cursor": cached.get("next_cursor") or pagination.get("max_cursor"),
+            "has_more": bool(cached.get("has_more")),
+            "cache": {
+                "hit": True,
+                "cache_key": cached.get("cache_key"),
+                "fetched_at": cached.get("fetched_at"),
+                "item_count": cached.get("item_count"),
+            },
+        }
+
+    def _build_cached_user_search_response(self, cached: dict[str, Any], *, page: int, count: int) -> dict[str, Any]:
+        raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
+        raw_pages = raw.get("raw_pages") if isinstance(raw.get("raw_pages"), list) else []
+        first_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else (raw_pages[0] if raw_pages else raw)
+        pagination = cached.get("pagination") if isinstance(cached.get("pagination"), dict) else {}
+        items = cached.get("items") or []
+        return {
+            "status": "ok",
+            "source": self.manifest.id,
+            "endpoint": cached.get("source") or DEFAULT_USER_SEARCH_PATH,
+            "keyword": cached.get("keyword") or "",
+            "page": page,
+            "cursor": cached.get("cursor") or pagination.get("cursor") or 0,
+            "search_id": cached.get("search_id") or pagination.get("search_id") or "",
+            "count": count,
+            "request": cached.get("request") or {},
+            "raw": first_raw,
+            "raw_pages": raw_pages,
+            "items": items,
+            "pagination": pagination,
+            "normalized": cached.get("normalized") or {},
+            "cache": {
+                "hit": True,
+                "cache_key": cached.get("cache_key"),
+                "fetched_at": cached.get("fetched_at"),
+                "item_count": cached.get("item_count") or len(items),
+            },
+        }
+
+    def _cache_user_video_page_variants(
+        self,
+        *,
+        sec_user_id: str,
+        unique_id: str,
+        max_cursor: int,
+        sort_type: int,
+        filter_type: int,
+        request_params: dict[str, Any],
+        raw_page: dict[str, Any],
+        page_items: list[dict[str, Any]],
+        pagination: dict[str, Any],
+    ) -> None:
+        fetched_at = int(time.time())
+        has_more = bool(pagination.get("has_more"))
+        next_cursor = self._to_int(pagination.get("max_cursor"))
+        for count in range(1, len(page_items) + 1):
+            items = page_items[:count]
+            upsert_target_user_video_page(
+                source=self.manifest.id,
+                sec_user_id=sec_user_id,
+                unique_id=unique_id,
+                max_cursor=int(max_cursor or 0),
+                count=count,
+                sort_type=int(sort_type or 0),
+                filter_type=int(filter_type or 0),
+                next_cursor=next_cursor,
+                has_more=has_more,
+                request={**request_params, "count": count},
+                items=items,
+                raw={"raw": raw_page, "raw_pages": [raw_page]},
+                pagination=pagination,
+                normalized=self._normalize_video_response(raw_page),
+                fetched_at=fetched_at,
+            )
+
+    def _cache_user_search_page(
+        self,
+        *,
+        keyword: str,
+        cursor: int,
+        count: int,
+        search_id: str,
+        douyin_user_fans: str,
+        douyin_user_type: str,
+        request: dict[str, Any],
+        raw_page: dict[str, Any],
+        page_items: list[dict[str, Any]],
+        pagination: dict[str, Any],
+        normalized: dict[str, Any],
+    ) -> None:
+        upsert_target_user_search_page(
+            source=self.manifest.id,
+            keyword=keyword,
+            cursor=cursor,
+            count=count,
+            search_id=search_id,
+            douyin_user_fans=douyin_user_fans,
+            douyin_user_type=douyin_user_type,
+            request=request,
+            items=page_items,
+            raw={"raw": raw_page, "raw_pages": [raw_page]},
+            pagination=pagination,
+            normalized=normalized,
+            fetched_at=int(time.time()),
+        )
+
+    def _upsert_search_users(self, keyword: str, items: list[dict[str, Any]], *, fallback_search_id: str = "") -> None:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            user_id = str(item.get("uid") or item.get("user_id") or item.get("id") or "")
+            sec_user_id = str(item.get("sec_uid") or item.get("sec_user_id") or "")
+            unique_id = str(item.get("unique_id") or "")
+            if not user_id:
+                user_id = sec_user_id or unique_id
+            if not user_id:
+                continue
+            upsert_target_user(
+                user_id,
+                {
+                    "keyword": keyword,
+                    "sec_user_id": sec_user_id,
+                    "unique_id": unique_id,
+                    "nickname": item.get("nickname") or "",
+                    "avatar_url": item.get("avatar") or item.get("avatar_url") or "",
+                    "signature": item.get("signature") or "",
+                    "follower_count": item.get("follower_count"),
+                    "like_count": item.get("like_count"),
+                    "aweme_count": item.get("aweme_count"),
+                    "following_count": item.get("following_count"),
+                    "recent_update_at": item.get("recent_update_at") or item.get("last_post_at"),
+                    "last_post_at": item.get("last_post_at") or item.get("recent_update_at"),
+                    "verified": item.get("verified"),
+                    "is_private": item.get("is_private"),
+                    "status": "candidate",
+                    "searched_at": int(time.time()),
+                    "source_json": item.get("raw") or item,
+                },
+            )
+        if fallback_search_id and items:
+            first = items[0]
+            user_id = str(first.get("uid") or first.get("user_id") or first.get("id") or "")
+            if user_id:
+                upsert_target_user(user_id, {"keyword": keyword, "searched_at": int(time.time())})
+
+    def _upsert_normalized_user(self, *, sec_user_id: str, normalized: dict[str, Any], raw: dict[str, Any]) -> None:
+        user_id = str(normalized.get("uid") or normalized.get("user_id") or normalized.get("id") or sec_user_id or "")
+        if not user_id:
+            return
+        upsert_target_user(
+            user_id,
+            {
+                "keyword": "",
+                "sec_user_id": sec_user_id,
+                "unique_id": normalized.get("unique_id") or "",
+                "nickname": normalized.get("nickname") or "",
+                "avatar_url": normalized.get("avatar") or normalized.get("avatar_url") or "",
+                "signature": normalized.get("signature") or "",
+                "follower_count": normalized.get("follower_count"),
+                "like_count": normalized.get("like_count"),
+                "aweme_count": normalized.get("aweme_count"),
+                "following_count": normalized.get("following_count"),
+                "recent_update_at": normalized.get("recent_update_at") or normalized.get("last_post_at"),
+                "last_post_at": normalized.get("last_post_at") or normalized.get("recent_update_at"),
+                "verified": normalized.get("verified"),
+                "is_private": normalized.get("is_private"),
+                "status": "candidate",
+                "searched_at": int(time.time()),
+                "source_json": raw or normalized,
+            },
+        )
+
+    def _upsert_videos_from_items(
+        self,
+        sec_user_id: str,
+        items: list[dict[str, Any]],
+        *,
+        unique_id: str = "",
+        source_page: dict[str, Any] | None = None,
+    ) -> None:
+        source_page = source_page or {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            aweme_id = str(item.get("aweme_id") or item.get("id") or "")
+            if not aweme_id:
+                continue
+            author = item.get("author") if isinstance(item.get("author"), dict) else {}
+            user_id = str(author.get("uid") or author.get("user_id") or author.get("id") or sec_user_id or "")
+            if not user_id:
+                user_id = sec_user_id or aweme_id
+            create_target_video(
+                aweme_id,
+                user_id,
+                {
+                    "set_id": "",
+                    "aweme_id": aweme_id,
+                    "desc": item.get("desc") or "",
+                    "cover_url": item.get("cover_url") or "",
+                    "play_url": item.get("play_url") or "",
+                    "download_url": item.get("download_url") or item.get("source_video_url") or "",
+                    "create_time": item.get("create_time"),
+                    "digg_count": item.get("digg_count"),
+                    "comment_count": item.get("comment_count"),
+                    "share_count": item.get("share_count"),
+                    "collect_count": item.get("collect_count"),
+                    "play_count": item.get("play_count") or item.get("play_count_raw"),
+                    "is_top": item.get("is_top"),
+                    "selected": False,
+                    "selection_strategy": "cache_refresh",
+                    "source_json": {
+                        **item,
+                        "unique_id": unique_id,
+                        "source_page": source_page.get("endpoint") or "",
+                    },
+                },
+            )
 
     def _extract_one_video(self, data: dict[str, Any]) -> dict[str, Any]:
         root = self._payload_root(data)
@@ -468,6 +1096,14 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         play_url = self._first_url(video.get("play_addr")) or self._first_url(video.get("play_addr_h264"))
         download_url = self._first_url(video.get("download_addr")) or play_url
         cover_url = self._first_url(video.get("cover")) or self._first_url(video.get("origin_cover")) or self._first_url(video.get("dynamic_cover"))
+        play_count = self._to_int(
+            stats.get("play_count")
+            or stats.get("playCount")
+            or stats.get("view_count")
+            or stats.get("video_view_count")
+            or item.get("play_count")
+            or item.get("view_count")
+        )
         return {
             "aweme_id": item.get("aweme_id") or item.get("id"),
             "desc": item.get("desc") or item.get("title") or "",
@@ -479,7 +1115,8 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             "comment_count": self._to_int(stats.get("comment_count")),
             "share_count": self._to_int(stats.get("share_count")),
             "collect_count": self._to_int(stats.get("collect_count") or stats.get("favorite_count")),
-            "play_count": self._to_int(stats.get("play_count")),
+            "play_count": play_count if play_count and play_count > 0 else 1,
+            "play_count_raw": play_count or 0,
             "is_top": bool(item.get("is_top") or item.get("is_pinned") or item.get("is_top_item")),
             "cover_url": cover_url,
             "play_url": play_url,

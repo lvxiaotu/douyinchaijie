@@ -502,9 +502,59 @@ export function normalizeModelRuns(...sources) {
   });
 }
 
+export function resolveCommentCollectionState(taskOrResult = {}) {
+  const result = taskOrResult?.result && typeof taskOrResult.result === "object" ? taskOrResult.result : taskOrResult;
+  const payload = taskOrResult?.payload && typeof taskOrResult.payload === "object" ? taskOrResult.payload : {};
+  const video = taskOrResult?.video || payload.video || {};
+  const resultState = result?.comment_collection;
+  const payloadState = payload?.comment_collection_state;
+  const snapshot = result?.douyin_target?.interaction_snapshot || video?.douyin_target_context?.interaction_snapshot || {};
+  const state =
+    (resultState && typeof resultState === "object" && resultState) ||
+    (payloadState && typeof payloadState === "object" && payloadState) ||
+    (snapshot && typeof snapshot === "object" && snapshot) ||
+    null;
+  if (!state) {
+    return null;
+  }
+  const status = state.status || snapshot.status || "";
+  return {
+    status,
+    video_id: state.video_id || result?.douyin_target?.video_id || video?.douyin_target_context?.video_id || "",
+    aweme_id: state.aweme_id || result?.douyin_target?.aweme_id || video?.aweme_id || video?.id || "",
+    snapshot_at: state.snapshot_at || snapshot.snapshot_at || null,
+    comment_saved_count: Number(state.comment_saved_count || snapshot.comment_saved_count || 0),
+    reply_saved_count: Number(state.reply_saved_count || snapshot.reply_saved_count || 0),
+    error: state.error || snapshot.error || state.reason || "",
+  };
+}
+
+export function commentCollectionLabel(state) {
+  if (!state) return "评论数据：等待 AI 拆解步骤获取";
+  if (state.status === "done") {
+    return `评论数据：已保存 ${state.comment_saved_count || 0} 条评论 / ${state.reply_saved_count || 0} 条回复`;
+  }
+  if (state.status === "failed") {
+    return `评论数据：获取失败${state.error ? `（${safeSlice(state.error, 80)}）` : ""}`;
+  }
+  if (state.status === "running") return "评论数据：获取中";
+  if (state.status === "skipped") return "评论数据：已跳过";
+  return "评论数据：等待获取";
+}
+
+export function commentCollectionTone(state) {
+  if (!state) return "draft";
+  if (state.status === "done") return "done";
+  if (state.status === "failed") return "error";
+  if (state.status === "running") return "running";
+  return "draft";
+}
+
 export function normalizeAnalysisTask(task, normalizeResult = normalizeCommercialAnalysisResult) {
   const updated = task.updated_at ? new Date(task.updated_at * 1000) : new Date();
   const result = normalizeResult(task.result?.result || task.result || {});
+  const rawResult = task.result?.result || task.result || {};
+  const commentCollection = resolveCommentCollectionState({ ...task, result: rawResult });
   const modelRuns = normalizeModelRuns(task.model_runs, task.result?.model_runs, result.model_runs);
   const events = Array.isArray(task.events)
     ? task.events.map((event) => ({
@@ -524,6 +574,7 @@ export function normalizeAnalysisTask(task, normalizeResult = normalizeCommercia
     updated: updated.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
     video: task.payload?.video,
     result,
+    commentCollection,
     modelRuns,
     error: task.error,
     events,

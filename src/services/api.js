@@ -47,9 +47,10 @@ async function postJson(path, payload) {
       data?.detail ||
       `Request failed: ${response.status}`;
     const hint = data?.detail?.hint ? `\n${data.detail.hint}` : "";
+    const upstream = data?.detail?.upstream ? `\n${JSON.stringify(data.detail.upstream, null, 2)}` : "";
     const errorType = data?.detail?.error_type ? `${data.detail.error_type}: ` : "";
     if (typeof message === "string") {
-      throw new Error(`${errorType}${message}${hint}`);
+      throw new Error(`${errorType}${message}${hint}${upstream}`);
     }
     throw new Error(JSON.stringify(message, null, 2));
   }
@@ -154,11 +155,15 @@ export function testAiProviderConfig(config) {
 }
 
 export function createAiVideoBreakdownJob(video, provider) {
-  const payload = { video };
+  const payload = { video, comment_collection: { enabled: true } };
   if (provider) {
     payload.provider = provider;
   }
   return postJson("/api/tools/ai-video-analysis/jobs", payload);
+}
+
+export function retryAiVideoComments(taskId) {
+  return postJson(`/api/tools/ai-video-analysis/jobs/${encodeURIComponent(taskId)}/comments/retry`, {});
 }
 
 async function patchJson(path, payload) {
@@ -178,11 +183,12 @@ async function patchJson(path, payload) {
       data?.detail ||
       `Request failed: ${response.status}`;
     const hint = data?.detail?.hint ? `\n${data.detail.hint}` : "";
+    const upstream = data?.detail?.upstream ? `\n${JSON.stringify(data.detail.upstream, null, 2)}` : "";
     const errorType = data?.detail?.error_type ? `${data.detail.error_type}: ` : "";
     if (typeof message === "string") {
-      throw new Error(`${errorType}${message}${hint}`);
+      throw new Error(`${errorType}${message}${hint}${upstream}`);
     }
-    throw new Error(typeof message === "string" ? message : JSON.stringify(message, null, 2));
+    throw new Error(JSON.stringify(message, null, 2));
   }
   return data;
 }
@@ -278,19 +284,6 @@ export function collectDouyinTargetVideos(payload) {
       fetch_count: Number(payload.fetchCount || 20),
       sort_metric: payload.sortMetric || "digg_count",
     },
-  });
-}
-
-export function collectDouyinTargetInteractions(payload) {
-  return postJson("/api/tools/douyin-target/comments/collect", {
-    set_id: payload.setId || "",
-    video_ids: payload.videoIds || [],
-    adaptive_by_ratio: payload.adaptiveByRatio !== false,
-    max_comments: Number(payload.maxComments || 160),
-    min_comments: Number(payload.minComments ?? 30),
-    page_size: Number(payload.pageSize || 20),
-    include_replies: payload.includeReplies !== false,
-    replies_per_comment: Number(payload.repliesPerComment ?? 3),
   });
 }
 
