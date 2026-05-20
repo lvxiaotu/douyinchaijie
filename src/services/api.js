@@ -495,7 +495,19 @@ export async function fetchAiVideoConfig() {
   return data;
 }
 
+export async function fetchAiVideoConfigSchema() {
+  const response = await fetch(`${API_BASE}/api/tools/ai-video-analysis/config/schema`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
 export function saveAiVideoConfig(config) {
+  if (config && Object.prototype.hasOwnProperty.call(config, "output_dir")) {
+    return postJson("/api/tools/ai-video-analysis/config", config);
+  }
   return postJson("/api/tools/ai-video-analysis/config", {
     output_dir: config.outputDir,
     pipeline_mode: config.pipelineMode,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, CircleAlert, RefreshCw, RotateCcw, Server, TimerReset, Trash2, Users, X } from "lucide-react";
+import { CheckCircle2, CircleAlert, FileJson, Layers3, RefreshCw, RotateCcw, Server, TimerReset, Trash2, Users, X } from "lucide-react";
 import { Badge } from "../../components/common/index";
 import { cancelAiVideoQueueJob, deleteAiVideoQueueJob, fetchAiVideoQueueStatus, retryAiVideoQueueJob } from "../../services/api";
 
@@ -22,10 +22,76 @@ function formatDuration(startAt, endAt) {
 
 function queueStatusTone(status) {
   if (status === "running" || status === "claimed") return "running";
-  if (status === "retry_waiting" || status === "queued" || status === "stale_requeued") return "draft";
-  if (status === "failed_final") return "error";
+  if (status === "pending" || status === "retry_waiting" || status === "queued" || status === "stale_requeued") return "draft";
+  if (status === "failed" || status === "failed_final") return "error";
   if (status === "cancelled") return "paused";
   return "done";
+}
+
+function formatSeconds(value) {
+  const seconds = Number(value || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "00:00";
+  const minutes = Math.floor(seconds / 60);
+  const remain = Math.floor(seconds % 60);
+  return `${String(minutes).padStart(2, "0")}:${String(remain).padStart(2, "0")}`;
+}
+
+function artifactLabel(type) {
+  const labels = {
+    audio: "音频",
+    evidence_json: "证据包",
+    global_breakdown: "全局拆解",
+    keyframe_grid: "网格图",
+    keyframes: "关键帧索引",
+    segment_breakdown: "分段拆解",
+    transcript: "转写",
+    transcript_raw: "ASR 原文",
+    video: "视频",
+  };
+  return labels[type] || type || "artifact";
+}
+
+function compactUri(uri) {
+  const text = String(uri || "");
+  if (!text) return "-";
+  const normalized = text.replaceAll("\\", "/");
+  return normalized.split("/").filter(Boolean).slice(-2).join("/");
+}
+
+function ChunkStatusPanel({ chunks = [] }) {
+  if (!chunks.length) return <div className="empty-result">暂无分段状态。</div>;
+  return (
+    <div className="queue-chunk-list">
+      {chunks.map((chunk) => (
+        <div className="queue-chunk-row" key={chunk.id || chunk.chunk_index}>
+          <div>
+            <strong>{chunk.meta?.segment_id || `片段 ${chunk.chunk_index}`}</strong>
+            <span>{formatSeconds(chunk.start_time)}-{formatSeconds(chunk.end_time)}</span>
+          </div>
+          <Badge status={queueStatusTone(chunk.status)}>{chunk.status}</Badge>
+          <span>{chunk.frame_count || 0} 帧</span>
+          <span>尝试 {chunk.attempts || 0}</span>
+          {chunk.vision_result_uri && <span title={chunk.vision_result_uri}>{compactUri(chunk.vision_result_uri)}</span>}
+          {chunk.error_message && <span className="queue-error-text" title={chunk.error_message}>{chunk.error_message}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ArtifactPanel({ artifacts = [] }) {
+  if (!artifacts.length) return <div className="empty-result">暂无产物记录。</div>;
+  return (
+    <div className="queue-artifact-list">
+      {artifacts.map((artifact) => (
+        <div className="queue-artifact-row" key={artifact.id || `${artifact.type}-${artifact.uri}`}>
+          <Badge status="ready">{artifactLabel(artifact.type)}</Badge>
+          <span title={artifact.uri}>{compactUri(artifact.uri)}</span>
+          <span>{artifact.size_bytes ? `${Math.round(artifact.size_bytes / 1024)} KB` : "-"}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function QueueStat({ label, value, tone = "draft" }) {
@@ -264,6 +330,22 @@ export function AiVideoQueuePanel({ taskId, onDeleted }) {
                   <span>位置 {snapshot.position ?? "-"}</span>
                   <span>状态 {snapshot.task?.status || snapshot.job?.status || "-"}</span>
                   <span>阶段 {snapshot.job?.stage || "-"}</span>
+                </div>
+                <div className="queue-task-runtime-grid">
+                  <div>
+                    <div className="queue-section-head compact">
+                      <Layers3 size={15} />
+                      <strong>分段状态</strong>
+                    </div>
+                    <ChunkStatusPanel chunks={snapshot.chunks || []} />
+                  </div>
+                  <div>
+                    <div className="queue-section-head compact">
+                      <FileJson size={15} />
+                      <strong>关键产物</strong>
+                    </div>
+                    <ArtifactPanel artifacts={snapshot.artifacts || []} />
+                  </div>
                 </div>
               </div>
             </div>

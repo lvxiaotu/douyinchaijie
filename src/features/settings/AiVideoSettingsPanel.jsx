@@ -1,74 +1,115 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Badge } from "../../components/common/index";
-import { fetchAiVideoConfig, saveAiVideoConfig } from "../../services/api";
+import { fetchAiVideoConfig, fetchAiVideoConfigSchema, saveAiVideoConfig } from "../../services/api";
+
+const FALLBACK_SCHEMA = [
+  { name: "pipeline_mode", label: "拆解流程", type: "select", default: "evidence", options: [{ value: "evidence", label: "证据包优先：转写 + 关键帧 + 分段拆解" }, { value: "auto", label: "自动：证据包失败时回退直接视频分析" }, { value: "direct", label: "直接视频分析：跳过转写流程" }] },
+  { name: "output_dir", label: "输出目录", type: "text", default: "./data/runtime/ai_video_analysis" },
+  { name: "analysis_prompt", label: "拆解提示词模板", type: "textarea", rows: 12, default: "", wide: true },
+];
+
+function normalizeFields(schema) {
+  const fields = Array.isArray(schema?.fields) ? schema.fields : Array.isArray(schema) ? schema : [];
+  return fields.length ? fields : FALLBACK_SCHEMA;
+}
+
+function defaultsFromFields(fields) {
+  return fields.reduce((acc, field) => {
+    acc[field.name] = field.default ?? (field.type === "boolean" ? false : "");
+    return acc;
+  }, {});
+}
+
+function parseFieldValue(field, value) {
+  if (field.type === "number") {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : Number(field.default || 0);
+  }
+  if (field.type === "boolean") return Boolean(value);
+  return value ?? "";
+}
+
+function ConfigField({ field, value, onChange }) {
+  const className = `${field.type === "textarea" ? "textarea-label" : ""} ${field.wide ? "wide-field" : ""}`.trim() || undefined;
+  if (field.type === "boolean") {
+    return (
+      <label className={`checkbox-field ${field.wide ? "wide-field" : ""}`}>
+        <input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(field.name, event.target.checked)} />
+        <span>{field.label}</span>
+      </label>
+    );
+  }
+  return (
+    <label className={className}>
+      {field.label}
+      {field.type === "select" ? (
+        <select value={value ?? ""} onChange={(event) => onChange(field.name, event.target.value)}>
+          {(field.options || []).map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label || option.value}
+            </option>
+          ))}
+        </select>
+      ) : field.type === "textarea" ? (
+        <textarea
+          value={value ?? ""}
+          onChange={(event) => onChange(field.name, event.target.value)}
+          rows={field.rows || 8}
+          placeholder={field.placeholder || ""}
+        />
+      ) : (
+        <input
+          type={field.type === "number" ? "number" : "text"}
+          min={field.min}
+          max={field.max}
+          value={value ?? ""}
+          placeholder={field.placeholder || ""}
+          onChange={(event) => onChange(field.name, event.target.value)}
+        />
+      )}
+      {field.hint && <span className="field-hint">{field.hint}</span>}
+    </label>
+  );
+}
 
 export function AiVideoSettingsPanel() {
-  const [outputDir, setOutputDir] = useState("./data/runtime/ai_video_analysis");
-  const [pipelineMode, setPipelineMode] = useState("evidence");
-  const [transcriber, setTranscriber] = useState("auto");
-  const [transcribeModel, setTranscribeModel] = useState("small");
-  const [transcribeLanguage, setTranscribeLanguage] = useState("zh");
-  const [transcribeDevice, setTranscribeDevice] = useState("cpu");
-  const [transcribeComputeType, setTranscribeComputeType] = useState("int8");
-  const [asrUploadMode, setAsrUploadMode] = useState("url");
-  const [asrPublisher, setAsrPublisher] = useState("local");
-  const [asrPublicBaseUrl, setAsrPublicBaseUrl] = useState("");
-  const [asrPublicDir, setAsrPublicDir] = useState("");
-  const [summaryProvider, setSummaryProvider] = useState("");
-  const [summaryModel, setSummaryModel] = useState("deepseek-v4-flash");
-  const [summaryFallbackProvider, setSummaryFallbackProvider] = useState("vision");
-  const [segmentSeconds, setSegmentSeconds] = useState(90);
-  const [silentSegmentSeconds, setSilentSegmentSeconds] = useState(6);
-  const [keyframeIntervalSeconds, setKeyframeIntervalSeconds] = useState(30);
-  const [maxSegments, setMaxSegments] = useState(18);
-  const [maxConcurrentTasks, setMaxConcurrentTasks] = useState(3);
-  const [resumeEnabled, setResumeEnabled] = useState(true);
-  const [highlightScreenshots, setHighlightScreenshots] = useState(true);
-  const [gridColumns, setGridColumns] = useState(3);
-  const [gridMaxFrames, setGridMaxFrames] = useState(9);
-  const [gridCellWidth, setGridCellWidth] = useState(320);
-  const [gridCellHeight, setGridCellHeight] = useState(180);
-  const [ffmpegBinary, setFfmpegBinary] = useState("ffmpeg");
-  const [ffprobeBinary, setFfprobeBinary] = useState("ffprobe");
-  const [analysisPrompt, setAnalysisPrompt] = useState("");
+  const [fields, setFields] = useState(FALLBACK_SCHEMA);
+  const [values, setValues] = useState(() => defaultsFromFields(FALLBACK_SCHEMA));
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    fetchAiVideoConfig()
-      .then((config) => {
-        setOutputDir(config.output_dir || "./data/runtime/ai_video_analysis");
-        setPipelineMode(config.pipeline_mode || "evidence");
-        setTranscriber(config.transcriber || "auto");
-        setTranscribeModel(config.transcribe_model || "small");
-        setTranscribeLanguage(config.transcribe_language || "zh");
-        setTranscribeDevice(config.transcribe_device || "cpu");
-        setTranscribeComputeType(config.transcribe_compute_type || "int8");
-        setAsrUploadMode(config.asr_upload_mode || "url");
-        setAsrPublisher(config.asr_publisher || "local");
-        setAsrPublicBaseUrl(config.asr_public_base_url || "");
-        setAsrPublicDir(config.asr_public_dir || "");
-        setSummaryProvider(config.summary_provider || "");
-        setSummaryModel(config.summary_model || "deepseek-v4-flash");
-        setSummaryFallbackProvider(config.summary_fallback_provider || "vision");
-        setSegmentSeconds(config.segment_seconds || 90);
-        setSilentSegmentSeconds(config.silent_segment_seconds || 6);
-        setKeyframeIntervalSeconds(config.keyframe_interval_seconds || 30);
-        setMaxSegments(config.max_segments || 18);
-        setMaxConcurrentTasks(config.max_concurrent_tasks || 3);
-        setResumeEnabled(Boolean(config.resume_enabled));
-        setHighlightScreenshots(Boolean(config.highlight_screenshots));
-        setGridColumns(config.grid_columns || 3);
-        setGridMaxFrames(config.grid_max_frames || 9);
-        setGridCellWidth(config.grid_cell_width || 320);
-        setGridCellHeight(config.grid_cell_height || 180);
-        setFfmpegBinary(config.ffmpeg_binary || "ffmpeg");
-        setFfprobeBinary(config.ffprobe_binary || "ffprobe");
-        setAnalysisPrompt(config.analysis_prompt || "");
+    let cancelled = false;
+    Promise.all([fetchAiVideoConfig(), fetchAiVideoConfigSchema().catch(() => ({ fields: FALLBACK_SCHEMA }))])
+      .then(([config, schema]) => {
+        if (cancelled) return;
+        const nextFields = normalizeFields(schema);
+        setFields(nextFields);
+        setValues({ ...defaultsFromFields(nextFields), ...config });
       })
-      .catch((err) => setError(err.message || String(err)));
+      .catch((err) => {
+        if (!cancelled) setError(err.message || String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  const pipelineMode = values.pipeline_mode || "evidence";
+  const groupedFields = useMemo(() => {
+    const visible = fields.filter((field) => field.name && field.type !== "hidden");
+    return visible.reduce((acc, field) => {
+      const section = field.section || "main";
+      if (!acc[section]) acc[section] = [];
+      acc[section].push(field);
+      return acc;
+    }, {});
+  }, [fields]);
+
+  function updateValue(name, value) {
+    setValues((current) => ({ ...current, [name]: value }));
+  }
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -76,36 +117,11 @@ export function AiVideoSettingsPanel() {
     setError("");
     setMessage("");
     try {
-      await saveAiVideoConfig({
-        outputDir,
-        pipelineMode,
-        transcriber,
-        transcribeModel,
-        transcribeLanguage,
-        transcribeDevice,
-        transcribeComputeType,
-        asrUploadMode,
-        asrPublisher,
-        asrPublicBaseUrl,
-        asrPublicDir,
-        summaryProvider,
-        summaryModel,
-        summaryFallbackProvider,
-        segmentSeconds,
-        silentSegmentSeconds,
-        keyframeIntervalSeconds,
-        maxSegments,
-        maxConcurrentTasks,
-        resumeEnabled,
-        highlightScreenshots,
-        gridColumns,
-        gridMaxFrames,
-        gridCellWidth,
-        gridCellHeight,
-        ffmpegBinary,
-        ffprobeBinary,
-        analysisPrompt,
-      });
+      const payload = {};
+      for (const field of fields) {
+        payload[field.name] = parseFieldValue(field, values[field.name]);
+      }
+      await saveAiVideoConfig(payload);
       setMessage("AI 视频拆解配置已保存。模型连接仍使用全局 AI 模型配置。");
     } catch (err) {
       setError(err.message || String(err));
@@ -124,170 +140,13 @@ export function AiVideoSettingsPanel() {
         <Badge status={pipelineMode === "direct" ? "draft" : "ready"}>{pipelineMode}</Badge>
       </div>
       <form className="settings-form" onSubmit={handleSubmit}>
-        <label>
-          拆解流程
-          <select value={pipelineMode} onChange={(event) => setPipelineMode(event.target.value)}>
-            <option value="evidence">证据包优先：转写 + 关键帧 + 分段拆解</option>
-            <option value="auto">自动：证据包失败时回退直接视频分析</option>
-            <option value="direct">直接视频分析：跳过转写流程</option>
-          </select>
-        </label>
-        <label>
-          输出目录
-          <input value={outputDir} onChange={(event) => setOutputDir(event.target.value)} />
-        </label>
-        <label>
-          转写器
-          <select value={transcriber} onChange={(event) => setTranscriber(event.target.value)}>
-            <option value="auto">自动选择</option>
-            <option value="faster_whisper">faster-whisper</option>
-            <option value="openai_whisper">openai-whisper</option>
-            <option value="doubao_file_asr">Doubao file ASR 2.0</option>
-          </select>
-        </label>
-        <label>
-          Whisper 模型
-          <input value={transcribeModel} onChange={(event) => setTranscribeModel(event.target.value)} placeholder="small / medium" />
-        </label>
-        <label>
-          转写语言
-          <input value={transcribeLanguage} onChange={(event) => setTranscribeLanguage(event.target.value)} placeholder="zh" />
-        </label>
-        <label>
-          转写设备
-          <select value={transcribeDevice} onChange={(event) => setTranscribeDevice(event.target.value)}>
-            <option value="cpu">cpu</option>
-            <option value="cuda">cuda</option>
-            <option value="auto">auto</option>
-          </select>
-        </label>
-        <label>
-          计算精度
-          <select value={transcribeComputeType} onChange={(event) => setTranscribeComputeType(event.target.value)}>
-            <option value="int8">int8</option>
-            <option value="float16">float16</option>
-            <option value="float32">float32</option>
-          </select>
-        </label>
-        <label>
-          Doubao ASR upload mode
-          <select value={asrUploadMode} onChange={(event) => setAsrUploadMode(event.target.value)}>
-            <option value="url">url: publish audio, then let Volcengine pull it</option>
-            <option value="base64">base64: direct audio payload</option>
-          </select>
-          <span className="field-hint">Recording-file ASR 2.0 should use url for normal 10-minute videos. Use base64 only with a direct-upload endpoint and small audio.</span>
-        </label>
-        <label>
-          ASR audio publisher
-          <select value={asrPublisher} onChange={(event) => setAsrPublisher(event.target.value)}>
-            <option value="local">local: public backend directory</option>
-            <option value="tos">tos: Volcengine TOS pre-signed URL</option>
-          </select>
-          <span className="field-hint">TOS bucket, endpoint, region, AK and SK are read from backend environment variables only.</span>
-        </label>
-        <label>
-          Local ASR public URL
-          <input
-            value={asrPublicBaseUrl}
-            onChange={(event) => setAsrPublicBaseUrl(event.target.value)}
-            placeholder="https://your-domain/api/tools/ai-video-analysis/public"
-          />
-        </label>
-        <label>
-          Local ASR public directory
-          <input
-            value={asrPublicDir}
-            onChange={(event) => setAsrPublicDir(event.target.value)}
-            placeholder="./data/runtime/ai_video_analysis/public_asr_audio"
-          />
-        </label>
-        <label>
-          Global summary provider
-          <select value={summaryProvider} onChange={(event) => setSummaryProvider(event.target.value)}>
-            <option value="">same as segment model</option>
-            <option value="deepseek">DeepSeek</option>
-          </select>
-          <span className="field-hint">Segment vision analysis still uses Gemini/Yunwu. This only controls the final global summary.</span>
-        </label>
-        <label>
-          Global summary model
-          <input
-            value={summaryModel}
-            onChange={(event) => setSummaryModel(event.target.value)}
-            placeholder="deepseek-v4-flash"
-          />
-        </label>
-        <label>
-          Summary fallback
-          <select value={summaryFallbackProvider} onChange={(event) => setSummaryFallbackProvider(event.target.value)}>
-            <option value="vision">fallback to segment model</option>
-            <option value="none">fail if summary provider fails</option>
-          </select>
-        </label>
-        <label>
-          分段秒数
-          <input type="number" min="30" max="600" value={segmentSeconds} onChange={(event) => setSegmentSeconds(event.target.value)} />
-        </label>
-        <label>
-          无语音视觉切段秒数
-          <input type="number" min="2" max="30" value={silentSegmentSeconds} onChange={(event) => setSilentSegmentSeconds(event.target.value)} />
-          <span className="field-hint">适合 AI 小动物、音乐卡点、纯画面视频。无转写文本时按这个秒数切割。</span>
-        </label>
-        <label>
-          关键帧间隔秒数
-          <input type="number" min="5" max="300" value={keyframeIntervalSeconds} onChange={(event) => setKeyframeIntervalSeconds(event.target.value)} />
-        </label>
-        <label>
-          最多 AI 拆解片段
-          <input type="number" min="1" max="100" value={maxSegments} onChange={(event) => setMaxSegments(event.target.value)} />
-        </label>
-        <label>
-          最大并发任务数
-          <input type="number" min="1" max="3" value={maxConcurrentTasks} onChange={(event) => setMaxConcurrentTasks(event.target.value)} />
-          <span className="field-hint">普通 CPU 建议保持 1。多任务会同时占用 Whisper、FFmpeg 和 API 调用，可能导致机器明显卡顿。</span>
-        </label>
-        <label>
-          网格列数
-          <input type="number" min="1" max="6" value={gridColumns} onChange={(event) => setGridColumns(event.target.value)} />
-        </label>
-        <label>
-          每段最多关键帧
-          <input type="number" min="1" max="24" value={gridMaxFrames} onChange={(event) => setGridMaxFrames(event.target.value)} />
-        </label>
-        <label>
-          网格单格宽度
-          <input type="number" min="120" max="960" value={gridCellWidth} onChange={(event) => setGridCellWidth(event.target.value)} />
-        </label>
-        <label>
-          网格单格高度
-          <input type="number" min="90" max="720" value={gridCellHeight} onChange={(event) => setGridCellHeight(event.target.value)} />
-        </label>
-        <label className="checkbox-field wide-field">
-          <input type="checkbox" checked={resumeEnabled} onChange={(event) => setResumeEnabled(event.target.checked)} />
-          <span>启用断点续跑：逐步复用已完成的音频、转写、关键帧、分段拆解和全局汇总</span>
-        </label>
-        <label className="checkbox-field wide-field">
-          <input type="checkbox" checked={highlightScreenshots} onChange={(event) => setHighlightScreenshots(event.target.checked)} />
-          <span>让 AI 标注爆点截图时间，并自动截取对应画面</span>
-        </label>
-        <label>
-          FFmpeg
-          <input value={ffmpegBinary} onChange={(event) => setFfmpegBinary(event.target.value)} placeholder="ffmpeg 或绝对路径" />
-        </label>
-        <label>
-          FFprobe
-          <input value={ffprobeBinary} onChange={(event) => setFfprobeBinary(event.target.value)} placeholder="ffprobe 或绝对路径" />
-        </label>
-        <label className="textarea-label">
-          拆解提示词模板
-          <textarea
-            value={analysisPrompt}
-            onChange={(event) => setAnalysisPrompt(event.target.value)}
-            rows={12}
-            placeholder="可使用变量：{desc}、{author}"
-          />
-          <span className="field-hint">可使用变量：{"{desc}"} 视频描述，{"{author}"} 作者。建议要求模型严格返回 JSON。</span>
-        </label>
+        {Object.entries(groupedFields).map(([section, sectionFields]) => (
+          <div className="settings-schema-group" key={section}>
+            {sectionFields.map((field) => (
+              <ConfigField key={field.name} field={field} value={values[field.name]} onChange={updateValue} />
+            ))}
+          </div>
+        ))}
         <button className="primary-button" type="submit" disabled={saving}>
           {saving ? "保存中" : "保存拆解配置"}
         </button>

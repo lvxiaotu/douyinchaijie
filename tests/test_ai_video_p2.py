@@ -7,10 +7,24 @@ from pathlib import Path
 from PIL import Image
 
 from backend.app import task_store
-from backend.app.video_analysis_queue import init_ai_video_queue_db, list_ai_model_runs, record_ai_model_run
+from backend.app.video_analysis_queue import (
+    AiVideoTaskCancelled,
+    cancel_ai_video_job,
+    enqueue_ai_video_job,
+    init_ai_video_queue_db,
+    list_ai_model_runs,
+    list_ai_video_artifacts,
+    list_ai_video_chunks,
+    record_ai_model_run,
+)
 from integrations.ai_video_analysis.doubao_asr import normalize_doubao_asr_response
 from integrations.ai_video_analysis.adapter import AiVideoAnalysisAdapter
+from integrations.ai_video_analysis.analysis_runner import run_evidence_breakdown
 from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
+from integrations.ai_video_analysis.model_gateway import normalized_usage, uses_openai_compatible_relay
+from integrations.ai_video_analysis.prompt_builder import segment_breakdown_prompt
+from integrations.ai_video_analysis.result_normalizer import parse_model_json, parse_segment_json
+from integrations.ai_video_analysis.result_schema import validate_analysis_result, validate_segment_breakdown
 from integrations.ai_video_analysis.relay_clients import GeminiGenerateContentRelayClient, OpenAICompatibleRelayClient
 from integrations.ai_video_analysis.relay_clients import DeepSeekChatClient
 
@@ -189,6 +203,21 @@ class AiVideoP2Tests(unittest.TestCase):
             "https://yunwu.ai/v1",
         )
 
+    def test_model_gateway_openai_compatible_detection_is_independent(self):
+        os.environ["AI_VIDEO_RELAY_API_FORMAT"] = "chat_completions"
+
+        self.assertTrue(uses_openai_compatible_relay("yunwu"))
+        self.assertEqual(
+            normalized_usage(
+                {"promptTokenCount": 7, "candidatesTokenCount": 4},
+                action="summary",
+                latency_ms=123,
+                input_token_keys=("promptTokenCount", "prompt_tokens"),
+                output_token_keys=("candidatesTokenCount", "completion_tokens"),
+            ),
+            {"input_tokens": 7, "output_tokens": 4, "latency_ms": 123, "action": "summary"},
+        )
+
     def test_doubao_response_normalizes_segments_words_and_pause_points(self):
         raw = {
             "result": {
@@ -342,6 +371,16 @@ class AiVideoP2Tests(unittest.TestCase):
         self.assertIn("narrative_technique", prompt)
         self.assertIn("retention_mechanism", prompt)
 
+    def test_prompt_builder_segment_prompt_is_independent(self):
+        prompt = segment_breakdown_prompt(
+            {"desc": "3 个护肤避坑", "genre": "beauty"},
+            {"segment_id": "seg_001", "time_range": "00:00-00:12", "transcript": "敏感肌不要乱叠加"},
+        )
+
+        self.assertIn("美妆/护肤", prompt)
+        self.assertIn('"segment_id": "seg_001"', prompt)
+        self.assertIn("敏感肌不要乱叠加", prompt)
+
     def test_global_prompt_uses_generic_cross_genre_contract(self):
         adapter = AiVideoAnalysisAdapter({"provider": "mock"})
         prompt = adapter._global_breakdown_prompt(
@@ -386,6 +425,162 @@ class AiVideoP2Tests(unittest.TestCase):
         self.assertEqual(result["genre"], "knowledge")
         self.assertIn("美妆", result["replication_plan"]["cross_genre_variants"])
         self.assertEqual(result["standard_remake_template"], "[人群] 以为 [误区]，其实 [真相]")
+
+    def test_result_normalizer_parse_model_json_is_independent(self):
+        result = parse_model_json(
+            "```json\n"
+            + json.dumps(
+                {
+                    "summary": "ok",
+                    "核心钩子": {"开头3秒钩子": "先抛反常识"},
+                    "评分": {"综合评分": "88分"},
+                },
+                ensure_ascii=False,
+            )
+            + "\n```"
+        )
+
+        self.assertEqual(result["summary"], "ok")
+        self.assertEqual(result["core_hook"]["opening_3s"], "先抛反常识")
+        self.assertEqual(result["viral_scores"]["overall"], 88)
+
+    def test_result_normalizer_parse_segment_json_repairs_aliases(self):
+        result = parse_segment_json(
+            json.dumps({"visual_signal": "近景切换", "audio_rhythm": "快节奏", "hook": "反常识"}, ensure_ascii=False),
+            {"segment_id": "seg_001", "time_range": "00:00-00:05", "genre": "knowledge"},
+        )
+
+        self.assertEqual(result["segment_id"], "seg_001")
+        self.assertEqual(result["visual_style"], "近景切换")
+        self.assertEqual(result["audio_pacing"], "快节奏")
+        self.assertEqual(result["retention_mechanism"], "反常识")
+
+    def test_result_schema_clamps_scores_and_keeps_raw_json(self):
+        result = validate_analysis_result(
+            {
+                "summary": ["ok", "next"],
+                "viral_scores": {"overall": "108分", "comment_potential": "-5"},
+                "segment_breakdowns": [{"segment_id": "seg_001", "visual_style": ["近景", "字幕"]}],
+                "unexpected": {"keep": True},
+            }
+        )
+
+        self.assertEqual(result["summary"], "ok；next")
+        self.assertEqual(result["viral_scores"]["overall"], 100)
+        self.assertEqual(result["viral_scores"]["comment_potential"], 0)
+        self.assertEqual(result["segment_breakdowns"][0]["visual_style"], "近景；字幕")
+        self.assertTrue(result["unexpected"]["keep"])
+        self.assertIn("raw_model_json", result)
+
+    def test_segment_schema_normalizes_text_fields(self):
+        result = validate_segment_breakdown(
+            {
+                "segment_id": 1,
+                "time_range": "00:00-00:05",
+                "visual_style": {"shot": "close"},
+                "audio_pacing": ["fast", "beat"],
+            }
+        )
+
+        self.assertEqual(result["segment_id"], "1")
+        self.assertEqual(result["visual_style"], "close")
+        self.assertEqual(result["audio_pacing"], "fast；beat")
+
+    def test_adapter_records_evidence_artifacts_and_initial_chunks(self):
+        root = Path(self.tmp.name)
+        task_store.DB_PATH = root / "tasks.sqlite3"
+        task_store.init_db()
+        init_ai_video_queue_db()
+        video_path = root / "video.mp4"
+        audio_path = root / "audio.wav"
+        transcript_path = root / "transcript.json"
+        keyframes_path = root / "keyframes.json"
+        grid_path = root / "grid.jpg"
+        evidence_path = root / "analysis_evidence.json"
+        for path in [video_path, audio_path, transcript_path, keyframes_path, grid_path, evidence_path]:
+            path.write_text("x", encoding="utf-8")
+        adapter = AiVideoAnalysisAdapter({"provider": "mock", "output_dir": str(root)})
+
+        adapter._record_evidence_state(
+            "task-1",
+            {
+                "schema_version": "2.0",
+                "evidence_path": str(evidence_path),
+                "metadata": {"video_path": str(video_path), "audio_path": str(audio_path), "duration": 12},
+                "asr": {"provider": "fake"},
+                "keyframes": [{"image_path": "frame.jpg"}],
+                "checkpoints": {"transcript_path": str(transcript_path), "keyframes_path": str(keyframes_path)},
+                "analysis_segments": [
+                    {
+                        "segment_id": "seg_001",
+                        "start": 0,
+                        "end": 12,
+                        "time_range": "00:00-00:12",
+                        "transcript": "hello",
+                        "keyframes": [{"image_path": "frame.jpg"}],
+                        "keyframe_grid": {"image_path": str(grid_path)},
+                    }
+                ],
+            },
+        )
+
+        artifact_types = {item["type"] for item in list_ai_video_artifacts("task-1")}
+        chunks = list_ai_video_chunks("task-1")
+        self.assertTrue({"video", "audio", "transcript", "keyframes", "keyframe_grid", "evidence_json"}.issubset(artifact_types))
+        self.assertEqual(chunks[0]["status"], "pending")
+        self.assertEqual(chunks[0]["grid_uri"], str(grid_path))
+        self.assertEqual(chunks[0]["meta"]["segment_id"], "seg_001")
+
+    def test_analysis_runner_stops_after_segment_model_when_cancel_requested(self):
+        root = Path(self.tmp.name)
+        task_store.DB_PATH = root / "tasks.sqlite3"
+        task_store.init_db()
+        init_ai_video_queue_db()
+        evidence_dir = root / "task-cancel-runner"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_path = evidence_dir / "analysis_evidence.json"
+        evidence_path.write_text("{}", encoding="utf-8")
+        grid_path = evidence_dir / "grid.jpg"
+        grid_path.write_text("x", encoding="utf-8")
+        task_store.create_task(
+            task_id="task-cancel-runner",
+            task_type="ai_video_analysis",
+            title="video",
+            provider="mock",
+            payload={"video": {"id": "v1"}},
+        )
+        enqueue_ai_video_job(task_id="task-cancel-runner", video={"id": "v1"}, provider="mock")
+        adapter = AiVideoAnalysisAdapter({"provider": "mock", "output_dir": str(root)})
+
+        def fake_generate(prompt, *, action, image_paths=None):
+            cancel_ai_video_job("task-cancel-runner")
+            return json.dumps({"segment_role": "hook"}, ensure_ascii=False)
+
+        adapter._generate_text_json = fake_generate
+
+        with self.assertRaises(AiVideoTaskCancelled):
+            run_evidence_breakdown(
+                adapter,
+                {"id": "v1"},
+                evidence={
+                    "evidence_path": str(evidence_path),
+                    "analysis_segments": [
+                        {
+                            "segment_id": "seg_001",
+                            "start": 0,
+                            "end": 5,
+                            "time_range": "00:00-00:05",
+                            "transcript": "hello",
+                            "keyframes": [],
+                            "keyframe_grid": {"image_path": str(grid_path)},
+                        }
+                    ],
+                },
+            )
+
+        chunks = list_ai_video_chunks("task-cancel-runner")
+        self.assertEqual(chunks[0]["status"], "cancelled")
+        self.assertFalse(list_ai_video_artifacts("task-cancel-runner"))
 
 
 if __name__ == "__main__":

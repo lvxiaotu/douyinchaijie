@@ -6,6 +6,7 @@ import socket
 import time
 from contextlib import contextmanager
 from hashlib import sha256
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -18,6 +19,12 @@ TERMINAL_STATUSES = {"done", "failed_final", "cancelled"}
 AI_MODEL_RUN_COLUMNS = {
     "meta_json": "meta_json TEXT NOT NULL DEFAULT '{}'",
 }
+
+
+class AiVideoTaskCancelled(RuntimeError):
+    def __init__(self, task_id: str):
+        super().__init__("AI_VIDEO_TASK_CANCELLED")
+        self.task_id = task_id
 
 
 @contextmanager
@@ -185,6 +192,218 @@ def row_to_ai_video_queue_item(row: Any, *, position: int | None = None) -> dict
     return item
 
 
+def row_to_ai_video_artifact(row: Any) -> dict[str, Any]:
+    artifact = dict(row)
+    artifact["meta"] = load_json(artifact.pop("meta_json", "{}"), {})
+    return artifact
+
+
+def row_to_ai_video_chunk(row: Any) -> dict[str, Any]:
+    chunk = dict(row)
+    chunk["meta"] = load_json(chunk.pop("meta_json", "{}"), {})
+    return chunk
+
+
+def _local_file_info(uri: str) -> tuple[int, str]:
+    if not uri or "://" in uri:
+        return 0, ""
+    path = Path(uri)
+    if not path.exists() or not path.is_file():
+        return 0, ""
+    size = path.stat().st_size
+    hash_limit = int(os.getenv("AI_VIDEO_ARTIFACT_HASH_MAX_BYTES", str(20 * 1024 * 1024)) or 0)
+    if hash_limit <= 0 or size > hash_limit:
+        return int(size), ""
+    digest = sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return int(size), digest.hexdigest()
+
+
+def record_ai_video_artifact(
+    *,
+    task_id: str,
+    type: str,
+    uri: str,
+    checksum: str | None = None,
+    size_bytes: int | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    init_ai_video_queue_db()
+    if not task_id or not type or not uri:
+        return {}
+    detected_size, detected_checksum = _local_file_info(uri)
+    size = int(size_bytes if size_bytes is not None else detected_size)
+    digest = checksum if checksum is not None else detected_checksum
+    now = now_ts()
+    with queue_connection() as connection:
+        existing = connection.execute(
+            """
+            SELECT *
+            FROM ai_video_artifacts
+            WHERE task_id = ? AND type = ? AND uri = ?
+            LIMIT 1
+            """,
+            (task_id, type, uri),
+        ).fetchone()
+        artifact_id = existing["id"] if existing else f"artifact-{uuid4().hex}"
+        existing_meta = load_json(existing["meta_json"], {}) if existing else {}
+        merged_meta = {**existing_meta, **(meta or {})}
+        if existing:
+            connection.execute(
+                """
+                UPDATE ai_video_artifacts
+                SET checksum = ?, size_bytes = ?, meta_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (digest or "", size, json.dumps(merged_meta, ensure_ascii=False), now, artifact_id),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO ai_video_artifacts (
+                    id, task_id, type, uri, checksum, size_bytes, meta_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (artifact_id, task_id, type, uri, digest or "", size, json.dumps(merged_meta, ensure_ascii=False), now, now),
+            )
+        row = connection.execute("SELECT * FROM ai_video_artifacts WHERE id = ?", (artifact_id,)).fetchone()
+    return row_to_ai_video_artifact(row) if row else {"id": artifact_id}
+
+
+def list_ai_video_artifacts(task_id: str) -> list[dict[str, Any]]:
+    init_ai_video_queue_db()
+    with queue_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM ai_video_artifacts
+            WHERE task_id = ?
+            ORDER BY created_at ASC, type ASC
+            """,
+            (task_id,),
+        ).fetchall()
+    return [row_to_ai_video_artifact(row) for row in rows]
+
+
+def upsert_ai_video_chunk(
+    *,
+    task_id: str,
+    chunk_index: int,
+    start_time: float = 0.0,
+    end_time: float = 0.0,
+    status: str = "pending",
+    transcript: str = "",
+    frame_count: int = 0,
+    grid_uri: str = "",
+    vision_result_uri: str = "",
+    attempts: int | None = None,
+    increment_attempts: bool = False,
+    error_message: str = "",
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    init_ai_video_queue_db()
+    if not task_id or int(chunk_index or 0) <= 0:
+        return {}
+    now = now_ts()
+    index = int(chunk_index)
+    with queue_connection() as connection:
+        existing = connection.execute(
+            """
+            SELECT *
+            FROM ai_video_chunks
+            WHERE task_id = ? AND chunk_index = ?
+            LIMIT 1
+            """,
+            (task_id, index),
+        ).fetchone()
+        chunk_id = existing["id"] if existing else f"chunk-{uuid4().hex}"
+        existing_meta = load_json(existing["meta_json"], {}) if existing else {}
+        merged_meta = {**existing_meta, **(meta or {})}
+        next_attempts = int(attempts if attempts is not None else (existing["attempts"] if existing else 0))
+        if increment_attempts:
+            next_attempts += 1
+        if existing:
+            connection.execute(
+                """
+                UPDATE ai_video_chunks
+                SET start_time = ?,
+                    end_time = ?,
+                    status = ?,
+                    transcript = ?,
+                    frame_count = ?,
+                    grid_uri = ?,
+                    vision_result_uri = ?,
+                    attempts = ?,
+                    error_message = ?,
+                    meta_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    float(start_time or existing["start_time"] or 0),
+                    float(end_time or existing["end_time"] or 0),
+                    status or existing["status"],
+                    transcript if transcript != "" else existing["transcript"],
+                    int(frame_count if frame_count is not None else existing["frame_count"]),
+                    grid_uri if grid_uri != "" else existing["grid_uri"],
+                    vision_result_uri if vision_result_uri != "" else existing["vision_result_uri"],
+                    next_attempts,
+                    error_message[:2000],
+                    json.dumps(merged_meta, ensure_ascii=False),
+                    now,
+                    chunk_id,
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO ai_video_chunks (
+                    id, task_id, chunk_index, start_time, end_time, status, transcript,
+                    frame_count, grid_uri, vision_result_uri, attempts, error_message,
+                    meta_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chunk_id,
+                    task_id,
+                    index,
+                    float(start_time or 0),
+                    float(end_time or 0),
+                    status,
+                    transcript,
+                    int(frame_count or 0),
+                    grid_uri,
+                    vision_result_uri,
+                    next_attempts,
+                    error_message[:2000],
+                    json.dumps(merged_meta, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        row = connection.execute("SELECT * FROM ai_video_chunks WHERE id = ?", (chunk_id,)).fetchone()
+    return row_to_ai_video_chunk(row) if row else {"id": chunk_id}
+
+
+def list_ai_video_chunks(task_id: str) -> list[dict[str, Any]]:
+    init_ai_video_queue_db()
+    with queue_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM ai_video_chunks
+            WHERE task_id = ?
+            ORDER BY chunk_index ASC
+            """,
+            (task_id,),
+        ).fetchall()
+    return [row_to_ai_video_chunk(row) for row in rows]
+
+
 def video_source_url(video: dict[str, Any]) -> str:
     return str(
         video.get("source_video_url")
@@ -261,6 +480,18 @@ def get_ai_video_job(task_id: str) -> dict[str, Any] | None:
     with queue_connection() as connection:
         row = connection.execute("SELECT * FROM ai_video_jobs WHERE task_id = ?", (task_id,)).fetchone()
     return row_to_ai_video_job(row) if row else None
+
+
+def is_ai_video_cancel_requested(task_id: str) -> bool:
+    if not task_id:
+        return False
+    job = get_ai_video_job(task_id)
+    return bool(job and (job.get("cancel_requested") or job.get("status") == "cancelled"))
+
+
+def raise_if_ai_video_cancelled(task_id: str) -> None:
+    if is_ai_video_cancel_requested(task_id):
+        raise AiVideoTaskCancelled(task_id)
 
 
 def active_job_count(connection: Any | None = None) -> int:
@@ -747,6 +978,9 @@ def queue_snapshot(*, task_id: str | None = None, backlog_limit: int = 20) -> di
     if task_id:
         result["task_id"] = task_id
         result["position"] = queue_position(task_id)
+        result["job"] = get_ai_video_job(task_id)
+        result["artifacts"] = list_ai_video_artifacts(task_id)
+        result["chunks"] = list_ai_video_chunks(task_id)
     return result
 
 

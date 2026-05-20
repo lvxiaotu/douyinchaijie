@@ -2,34 +2,26 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 import traceback
 from typing import Any
 
 from backend.app.ai_provider_state import active_ai_provider
-from backend.app.ai_video_comment_service import (
-    collect_comments_for_ai_task,
-    merge_comment_context_into_result,
-    merge_comment_state_into_payload,
-)
-from backend.app.task_store import get_task, save_analysis_archive, update_task
-from backend.app.tiktok_target_store import update_target_task_by_ai_task_id
-from backend.app.short_video_analysis_store import persist_analysis_result
+from backend.app.ai_video_analysis_runner import AiVideoAnalysisRunner
+from backend.app.task_store import get_task, update_task
 from backend.app.video_analysis_queue import (
+    AiVideoTaskCancelled,
     cancel_ai_video_job,
     claim_next_ai_video_job,
     complete_ai_video_job,
     fail_ai_video_job,
     heartbeat_ai_video_job,
     init_ai_video_queue_db,
-    list_ai_model_runs,
     queue_stats,
     requeue_stale_ai_video_jobs,
     update_ai_video_job,
     worker_host_id,
 )
 from backend.app.video_task_limiter import video_task_concurrency_limit
-from integrations.ai_video_analysis.adapter import AiVideoAnalysisAdapter
 
 
 class VideoAnalysisCoordinator:
@@ -133,28 +125,13 @@ class VideoAnalysisCoordinator:
                 update_task(task_id, status="running", progress=progress, message=message)
 
             report(5, "后台 worker 已认领 AI 视频拆解任务")
-            comment_state, patched_video = collect_comments_for_ai_task(task, progress=report)
-            if patched_video:
-                payload = merge_comment_state_into_payload(payload, video=patched_video, comment_state=comment_state)
-                task["payload"] = payload
-                video = patched_video
-                update_task(task_id, payload_json=payload)
-                if comment_state.get("status") == "failed":
-                    report(30, f"评论数据获取失败，继续拆解：{comment_state.get('error') or 'unknown'}")
-                elif comment_state.get("status") == "done":
-                    report(
-                        30,
-                        f"评论数据已补全：评论 {comment_state.get('comment_saved_count') or 0} 条 / 回复 {comment_state.get('reply_saved_count') or 0} 条",
-                    )
-                else:
-                    report(30, "评论数据跳过，继续拆解")
-            adapter = AiVideoAnalysisAdapter()
-
-            def analysis_report(progress: int, message: str) -> None:
-                report(30 + int(max(0, min(100, progress)) * 0.7), message)
-
-            result_job = adapter.create_job(video=video, provider=provider, job_id=task_id, progress=analysis_report)
-            if not get_task(task_id):
+            result_job = AiVideoAnalysisRunner().run(
+                task_id=task_id,
+                video=video,
+                provider=provider,
+                progress=report,
+            )
+            if result_job.status == "task_missing":
                 fail_ai_video_job(
                     task_id,
                     error_code="TASK_NOT_FOUND",
@@ -162,36 +139,12 @@ class VideoAnalysisCoordinator:
                     retryable=False,
                 )
                 return
-            result = result_job.get("result") or {}
-            model_runs = list_ai_model_runs(task_id)
-            if model_runs:
-                result = {**result, "model_runs": model_runs}
-            result = merge_comment_context_into_result(result, video=video, comment_state=comment_state)
-            update_task(
-                task_id,
-                status="done" if result_job.get("status") == "done" else "running",
-                progress=100 if result_job.get("status") == "done" else 70,
-                message="拆解完成" if result_job.get("status") == "done" else "等待外部模型继续处理",
-                provider=result_job.get("provider", provider or ""),
-                payload_json=payload,
-                result_json=result,
-                error=None,
-            )
-            if result_job.get("status") == "done":
-                self.save_archive_if_possible(task_id, task, provider=result_job.get("provider", provider or ""), result=result)
-                self.persist_analysis_dataset_if_possible(
-                    task_id,
-                    task,
-                    provider=result_job.get("provider", provider or ""),
-                    result=result,
-                    job_path=result_job.get("job_path") or "",
-                )
-                self.sync_target_state_if_possible(task_id, task, result=result)
+            if result_job.status == "done":
                 complete_ai_video_job(task_id)
             else:
                 update_ai_video_job(task_id, status="running", stage="model_pending", progress=70, worker_id=worker_id)
         except Exception as exc:
-            if str(exc) == "AI_VIDEO_TASK_CANCELLED":
+            if isinstance(exc, AiVideoTaskCancelled) or str(exc) == "AI_VIDEO_TASK_CANCELLED":
                 cancel_ai_video_job(task_id)
                 update_task(task_id, status="cancelled", progress=100, message="AI 视频拆解已取消", error=None)
                 return
@@ -220,58 +173,6 @@ class VideoAnalysisCoordinator:
                 )
         finally:
             heartbeat.stop()
-
-    def save_archive_if_possible(self, task_id: str, task: dict[str, Any], *, provider: str, result: dict[str, Any]) -> None:
-        try:
-            video = (task.get("payload") or {}).get("video") or {}
-            save_analysis_archive(
-                archive_id=task_id,
-                task_id=task_id,
-                title=task.get("title") or "AI 视频拆解",
-                provider=provider,
-                video=video,
-                result=result,
-            )
-        except Exception as exc:
-            print(f"[ai-video-worker] archive save failed {task_id}: {type(exc).__name__}: {exc}", flush=True)
-
-    def persist_analysis_dataset_if_possible(
-        self,
-        task_id: str,
-        task: dict[str, Any],
-        *,
-        provider: str,
-        result: dict[str, Any],
-        job_path: str = "",
-    ) -> None:
-        try:
-            video = (task.get("payload") or {}).get("video") or {}
-            persist_analysis_result(
-                task_id=task_id,
-                video=video,
-                result=result,
-                provider=provider,
-                job_path=job_path,
-            )
-        except Exception as exc:
-            print(f"[ai-video-worker] analysis dataset save failed {task_id}: {type(exc).__name__}: {exc}", flush=True)
-
-    def sync_target_state_if_possible(self, task_id: str, task: dict[str, Any], *, result: dict[str, Any]) -> None:
-        try:
-            payload = task.get("payload") or {}
-            if "douyin_target" not in payload and "douyin_target_context" not in (payload.get("video") or {}):
-                return
-            ai_task = {
-                "id": task_id,
-                "status": "done",
-                "result": result,
-                "error": "",
-            }
-            updated = update_target_task_by_ai_task_id(ai_task)
-            if updated:
-                print(f"[ai-video-worker] synced target task {updated['id']} from {task_id}", flush=True)
-        except Exception as exc:
-            print(f"[ai-video-worker] target sync failed {task_id}: {type(exc).__name__}: {exc}", flush=True)
 
     def status(self) -> dict[str, Any]:
         data = queue_stats()

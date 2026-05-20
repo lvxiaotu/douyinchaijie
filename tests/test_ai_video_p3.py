@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from integrations.ai_video_analysis.audio_publication import AudioPublisher, TosAudioPublisher
 from integrations.ai_video_analysis.doubao_asr import (
@@ -13,6 +14,7 @@ from integrations.ai_video_analysis.doubao_asr import (
     validate_doubao_asr_environment,
 )
 from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
+from integrations.ai_video_analysis.http_policy import get_with_retries
 from backend.app import short_video_analysis_store
 from backend.app.routes.ai_video_analysis import RemakeExportPayload, save_remake_export_route
 
@@ -109,6 +111,32 @@ class FakeTranscriptPipeline(VideoEvidencePipeline):
 
     def extract_keyframes(self, video_path, segments, output_dir, *, progress=None):
         return []
+
+
+class FakeDownloadResponse:
+    def __init__(self, status_code=200, content=b"video"):
+        self.status_code = status_code
+        self.text = "error" if status_code >= 400 else "ok"
+        self.headers = {"content-length": str(len(content))}
+        self._content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size=1):
+        yield self._content
+
+
+class FlakyDownloadSession:
+    def __init__(self):
+        self.calls = 0
+
+    def get(self, url, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return FakeDownloadResponse(status_code=503)
+        return FakeDownloadResponse(status_code=200)
 
 
 class AiVideoP3Tests(unittest.TestCase):
@@ -315,6 +343,31 @@ class AiVideoP3Tests(unittest.TestCase):
         errors = validate_doubao_asr_environment(config=config, publisher="local")
 
         self.assertIn("AI_VIDEO_ASR_UPLOAD_MODE=base64 requires VOLCENGINE_ASR_DIRECT_URL", errors)
+
+    def test_http_policy_retries_transient_download_errors(self):
+        session = FlakyDownloadSession()
+
+        with patch("integrations.ai_video_analysis.http_policy.time.sleep", lambda _seconds: None):
+            response = get_with_retries("https://example.test/video.mp4", session=session, max_retries=1, timeout=1)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(session.calls, 2)
+
+    def test_ffmpeg_command_stops_when_cancel_requested(self):
+        pipeline = VideoEvidencePipeline(output_dir=Path(self.tmp.name))
+        calls = {"count": 0}
+
+        def cancel_check():
+            calls["count"] += 1
+            if calls["count"] >= 2:
+                raise RuntimeError("cancelled")
+
+        pipeline.cancel_check = cancel_check
+
+        with self.assertRaises(RuntimeError):
+            pipeline.run_command_capture(["python", "-c", "import time; time.sleep(30)"], timeout=30)
+
+        self.assertGreaterEqual(calls["count"], 2)
 
 
 if __name__ == "__main__":

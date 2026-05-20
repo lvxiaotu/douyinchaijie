@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from integrations.ai_video_analysis.result_schema import validate_analysis_result
+
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = ROOT / "data" / "runtime" / "short_video_analysis.sqlite3"
 CHINA_TZ = timezone(timedelta(hours=8))
@@ -519,6 +521,7 @@ def save_analysis_run(
 ) -> dict[str, Any]:
     init_db()
     current = now()
+    result = validate_analysis_result(result if isinstance(result, dict) else {})
     run_id = task_id or f"run-{video_id}-{current}"
     genre = infer_genre(video, result)
     evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else {}

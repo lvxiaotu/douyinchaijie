@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 
 from backend.app.error_log_store import write_error_log
+from integrations.ai_video_analysis.http_policy import default_max_retries, default_timeout_seconds, post_with_retries
 
 
 @dataclass
@@ -43,8 +44,8 @@ class OpenAICompatibleRelayClient:
         )
         self.api_key = api_key or os.getenv("AI_VIDEO_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY") or ""
         self.model = model or os.getenv("AI_VIDEO_VISION_MODEL") or os.getenv("GEMINI_MODEL") or os.getenv("YUNWU_MODEL") or os.getenv("AI_MODEL") or "gemini-2.5-flash"
-        self.timeout_seconds = float(timeout_seconds or os.getenv("AI_VIDEO_MODEL_TIMEOUT_SECONDS", "180") or 180)
-        self.max_retries = int(max_retries if max_retries is not None else os.getenv("AI_VIDEO_MODEL_MAX_RETRIES", "2") or 2)
+        self.timeout_seconds = float(timeout_seconds or default_timeout_seconds("model"))
+        self.max_retries = int(max_retries if max_retries is not None else default_max_retries("model"))
         self.session = session or requests
 
     @classmethod
@@ -88,11 +89,13 @@ class OpenAICompatibleRelayClient:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = self.session.post(
+                response = post_with_retries(
                     self.chat_completions_url,
+                    session=self.session,
                     headers=headers,
                     json=payload,
                     timeout=self.timeout_seconds,
+                    max_retries=0,
                 )
                 if response.status_code in {429, 500, 502, 503, 504} and attempt < self.max_retries:
                     last_error = RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
@@ -204,8 +207,8 @@ class GeminiGenerateContentRelayClient:
             or ""
         )
         self.model = model or os.getenv("AI_VIDEO_VISION_MODEL") or os.getenv("GEMINI_MODEL") or os.getenv("YUNWU_MODEL") or os.getenv("AI_MODEL") or "gemini-2.5-flash"
-        self.timeout_seconds = float(timeout_seconds or os.getenv("AI_VIDEO_MODEL_TIMEOUT_SECONDS", "180") or 180)
-        self.max_retries = int(max_retries if max_retries is not None else os.getenv("AI_VIDEO_MODEL_MAX_RETRIES", "2") or 2)
+        self.timeout_seconds = float(timeout_seconds or default_timeout_seconds("model"))
+        self.max_retries = int(max_retries if max_retries is not None else default_max_retries("model"))
         self.session = session or requests
 
     @classmethod
@@ -249,11 +252,13 @@ class GeminiGenerateContentRelayClient:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = self.session.post(
+                response = post_with_retries(
                     self.generate_content_url(selected_model),
+                    session=self.session,
                     headers=headers,
                     json=payload,
                     timeout=self.timeout_seconds,
+                    max_retries=0,
                 )
                 if response.status_code in {429, 500, 502, 503, 504} and attempt < self.max_retries:
                     last_error = RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")

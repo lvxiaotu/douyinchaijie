@@ -11,6 +11,7 @@ from uuid import uuid4
 import requests
 
 from integrations.ai_video_analysis.audio_publication import AudioPublisher, configured_publisher_mode, tos_config_status
+from integrations.ai_video_analysis.http_policy import default_max_retries, post_with_retries
 
 
 SUCCESS_CODE = "20000000"
@@ -169,11 +170,13 @@ class DoubaoFileAsrClient:
 
     def submit(self, *, audio_url: str, audio_format: str, language: str | None, request_id: str) -> None:
         payload = self.build_payload(audio={"url": audio_url}, audio_format=audio_format, language=language)
-        response = self.session.post(
+        response = post_with_retries(
             self.config.submit_url,
+            session=self.session,
             headers=self.headers(request_id=request_id, include_sequence=True),
             json=payload,
             timeout=self.config.timeout_seconds,
+            max_retries=default_max_retries("asr"),
         )
         code = response.headers.get("X-Api-Status-Code") or ""
         if code != SUCCESS_CODE:
@@ -200,11 +203,13 @@ class DoubaoFileAsrClient:
         request_id = request_id or str(uuid4())
         encoded = base64.b64encode(audio_path.read_bytes()).decode("ascii")
         payload = self.build_payload(audio={"data": encoded}, audio_format=audio_format, language=language)
-        response = self.session.post(
+        response = post_with_retries(
             self.config.direct_url,
+            session=self.session,
             headers=self.headers(request_id=request_id, include_sequence=False),
             json=payload,
             timeout=self.config.timeout_seconds,
+            max_retries=default_max_retries("asr"),
         )
         code = response.headers.get("X-Api-Status-Code") or ""
         try:
@@ -240,11 +245,13 @@ class DoubaoFileAsrClient:
         return payload
 
     def query(self, request_id: str) -> tuple[str, dict[str, Any]]:
-        response = self.session.post(
+        response = post_with_retries(
             self.config.query_url,
+            session=self.session,
             headers=self.headers(request_id=request_id, include_sequence=False),
             json={},
             timeout=self.config.timeout_seconds,
+            max_retries=default_max_retries("asr"),
         )
         code = response.headers.get("X-Api-Status-Code") or ""
         try:

@@ -4,7 +4,21 @@ import unittest
 from pathlib import Path
 
 from backend.app import task_store
-from backend.app.video_analysis_queue import init_ai_video_queue_db, list_ai_model_runs, record_ai_model_run
+from backend.app.video_analysis_queue import (
+    AiVideoTaskCancelled,
+    cancel_ai_video_job,
+    delete_ai_video_job,
+    enqueue_ai_video_job,
+    init_ai_video_queue_db,
+    list_ai_model_runs,
+    list_ai_video_artifacts,
+    list_ai_video_chunks,
+    queue_snapshot,
+    record_ai_model_run,
+    record_ai_video_artifact,
+    raise_if_ai_video_cancelled,
+    upsert_ai_video_chunk,
+)
 from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
 
 
@@ -149,6 +163,84 @@ class AiVideoEvidenceP1Tests(unittest.TestCase):
         self.assertEqual(runs[0]["purpose"], "segment_breakdown")
         self.assertEqual(runs[0]["latency_ms"], 123)
         self.assertEqual(runs[0]["meta"]["action"], "segment breakdown")
+
+    def test_artifacts_and_chunks_round_trip_in_queue_snapshot(self):
+        artifact_path = Path(self.tmp.name) / "artifact.json"
+        artifact_path.write_text('{"ok": true}', encoding="utf-8")
+
+        record_ai_video_artifact(
+            task_id="task-1",
+            type="evidence_json",
+            uri=str(artifact_path),
+            meta={"schema_version": "2.0"},
+        )
+        upsert_ai_video_chunk(
+            task_id="task-1",
+            chunk_index=1,
+            start_time=0,
+            end_time=12.5,
+            status="running",
+            transcript="hello",
+            frame_count=2,
+            grid_uri="grid.jpg",
+            increment_attempts=True,
+            meta={"segment_id": "seg_001"},
+        )
+        upsert_ai_video_chunk(
+            task_id="task-1",
+            chunk_index=1,
+            status="done",
+            vision_result_uri="segment.json",
+            meta={"segment_role": "hook"},
+        )
+
+        artifacts = list_ai_video_artifacts("task-1")
+        chunks = list_ai_video_chunks("task-1")
+        snapshot = queue_snapshot(task_id="task-1")
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["type"], "evidence_json")
+        self.assertGreater(artifacts[0]["size_bytes"], 0)
+        self.assertEqual(chunks[0]["status"], "done")
+        self.assertEqual(chunks[0]["attempts"], 1)
+        self.assertEqual(chunks[0]["vision_result_uri"], "segment.json")
+        self.assertEqual(chunks[0]["meta"]["segment_role"], "hook")
+        self.assertEqual(snapshot["artifacts"][0]["type"], "evidence_json")
+        self.assertEqual(snapshot["chunks"][0]["status"], "done")
+
+    def test_delete_job_clears_artifacts_and_chunks(self):
+        video = {"id": "v1", "desc": "video"}
+        task_store.create_task(
+            task_id="task-delete",
+            task_type="ai_video_analysis",
+            title="video",
+            provider="mock",
+            payload={"video": video},
+        )
+        enqueue_ai_video_job(task_id="task-delete", video=video, provider="mock")
+        record_ai_video_artifact(task_id="task-delete", type="evidence_json", uri="evidence.json")
+        upsert_ai_video_chunk(task_id="task-delete", chunk_index=1, status="done")
+
+        deleted = delete_ai_video_job("task-delete")
+
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(list_ai_video_artifacts("task-delete"), [])
+        self.assertEqual(list_ai_video_chunks("task-delete"), [])
+
+    def test_cancel_check_raises_special_exception(self):
+        video = {"id": "v1", "desc": "video"}
+        task_store.create_task(
+            task_id="task-cancel",
+            task_type="ai_video_analysis",
+            title="video",
+            provider="mock",
+            payload={"video": video},
+        )
+        enqueue_ai_video_job(task_id="task-cancel", video=video, provider="mock")
+        cancel_ai_video_job("task-cancel")
+
+        with self.assertRaises(AiVideoTaskCancelled):
+            raise_if_ai_video_cancelled("task-cancel")
 
 
 if __name__ == "__main__":

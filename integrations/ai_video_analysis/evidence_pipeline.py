@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 import importlib.util
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from integrations.ai_video_analysis.audio_publication import configured_publisher_mode, tos_config_status
+from integrations.ai_video_analysis.http_policy import default_max_retries, default_timeout_seconds, get_with_retries
 from integrations.ai_video_analysis.transcribers import resolve_transcriber
 
 
@@ -52,8 +54,24 @@ class VideoEvidencePipeline:
         self.ffmpeg = self.resolve_ffmpeg_binary(os.getenv("FFMPEG_BINARY") or "ffmpeg")
         self.ffprobe = os.getenv("FFPROBE_BINARY") or "ffprobe"
         self.resume_enabled = os.getenv("AI_VIDEO_RESUME_ENABLED", "true").lower() not in {"0", "false", "no"}
+        self.cancel_check: Callable[[], None] | None = None
 
     def build(
+        self,
+        video: dict[str, Any],
+        *,
+        job_id: str,
+        progress: Callable[[int, str], None] | None = None,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        previous_cancel_check = self.cancel_check
+        self.cancel_check = cancel_check
+        try:
+            return self._build(video, job_id=job_id, progress=progress)
+        finally:
+            self.cancel_check = previous_cancel_check
+
+    def _build(
         self,
         video: dict[str, Any],
         *,
@@ -64,12 +82,15 @@ class VideoEvidencePipeline:
         evidence_dir.mkdir(parents=True, exist_ok=True)
         evidence_path = evidence_dir / "analysis_evidence.json"
 
+        self.check_cancelled()
         if progress:
             progress(12, f"创建证据包目录：{evidence_dir}")
         video_path = self.resolve_video_file(video, evidence_dir=evidence_dir, progress=progress)
+        self.check_cancelled()
         if progress:
             progress(20, f"视频文件准备完成：{video_path.name}")
         duration = self.probe_duration(video_path)
+        self.check_cancelled()
         if progress:
             duration_text = self.format_time(duration) if duration else "未知"
             progress(21, f"读取视频时长：{duration_text}")
@@ -82,6 +103,7 @@ class VideoEvidencePipeline:
                 progress(32, f"断点续跑：复用已提取音频 {audio_path.name}")
         else:
             self.extract_audio(video_path, audio_path, duration=duration, progress=progress)
+        self.check_cancelled()
         if progress:
             progress(32, f"音频提取完成：{audio_path.name}")
 
@@ -95,6 +117,7 @@ class VideoEvidencePipeline:
                 progress(48, f"断点续跑：复用已转写文本 {len(transcript.get('segments') or [])} 个片段")
         else:
             transcript = self.transcribe(audio_path, duration=duration, progress=progress)
+            self.check_cancelled()
             raw_response = transcript.pop("raw_response", None)
             if raw_response is not None:
                 transcript_raw_path.write_text(json.dumps(raw_response, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -105,6 +128,7 @@ class VideoEvidencePipeline:
 
         if progress:
             progress(50, f"按 {self.segment_seconds} 秒切分转写文本")
+        self.check_cancelled()
         analysis_segments = self.chunk_transcript(
             transcript.get("segments") or [],
             duration=duration,
@@ -123,6 +147,7 @@ class VideoEvidencePipeline:
                 progress(58, f"断点续跑：复用已抽取关键帧 {len(keyframes)} 张")
         else:
             keyframes = self.extract_keyframes(video_path, analysis_segments, evidence_dir / "keyframes", progress=progress)
+            self.check_cancelled()
             keyframes_path.write_text(json.dumps(keyframes, ensure_ascii=False, indent=2), encoding="utf-8")
         if progress:
             progress(58, f"关键帧抽取完成：{len(keyframes)} 张")
@@ -132,7 +157,9 @@ class VideoEvidencePipeline:
 
         if progress:
             progress(58, "生成带时间戳的关键帧网格图")
+        self.check_cancelled()
         self.create_segment_grids(analysis_segments, evidence_dir / "keyframe_grids", progress=progress)
+        self.check_cancelled()
 
         douyin_target_context = video.get("douyin_target_context") if isinstance(video.get("douyin_target_context"), dict) else {}
         metadata = {
@@ -176,6 +203,10 @@ class VideoEvidencePipeline:
         if progress:
             progress(59, f"证据包已保存：{evidence_path}")
         return evidence
+
+    def check_cancelled(self) -> None:
+        if self.cancel_check:
+            self.cancel_check()
 
     def dependency_status(self) -> dict[str, Any]:
         faster_whisper_ready = bool(importlib.util.find_spec("faster_whisper"))
@@ -258,8 +289,6 @@ class VideoEvidencePipeline:
                 progress(16, f"复用已下载视频：{target.name}")
             return target
 
-        import requests
-
         if progress:
             progress(14, "开始下载视频到证据包目录")
         headers = {
@@ -271,13 +300,21 @@ class VideoEvidencePipeline:
             "Referer": (video.get("share_info") or {}).get("share_url") or "https://www.douyin.com/",
             "Accept": "*/*",
         }
-        response = requests.get(url, headers=headers, stream=True, timeout=120)
+        response = get_with_retries(
+            url,
+            headers=headers,
+            stream=True,
+            timeout=default_timeout_seconds("download"),
+            max_retries=default_max_retries("download"),
+            cancel_check=self.check_cancelled,
+        )
         response.raise_for_status()
         total = int(response.headers.get("content-length") or 0)
         downloaded = 0
         last_percent = -1
         with target.open("wb") as file:
             for chunk in response.iter_content(chunk_size=1024 * 512):
+                self.check_cancelled()
                 if chunk:
                     file.write(chunk)
                     downloaded += len(chunk)
@@ -302,7 +339,7 @@ class VideoEvidencePipeline:
             str(video_path),
         ]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=30, check=True)
+            completed = self.run_command_capture(command, timeout=30, check=True)
             data = json.loads(completed.stdout or "{}")
             return float((data.get("format") or {}).get("duration") or 0)
         except Exception:
@@ -668,7 +705,7 @@ class VideoEvidencePipeline:
             "-",
         ]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=180)
+            completed = self.run_command_capture(command, timeout=180)
         except Exception:
             return []
         text = "\n".join([completed.stderr or "", completed.stdout or ""])
@@ -696,7 +733,7 @@ class VideoEvidencePipeline:
             "-",
         ]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=180)
+            completed = self.run_command_capture(command, timeout=180)
         except Exception:
             return []
         return self.parse_showinfo_times(
@@ -863,6 +900,7 @@ class VideoEvidencePipeline:
         output_dir.mkdir(parents=True, exist_ok=True)
         total = len(segments)
         for index, segment in enumerate(segments, start=1):
+            self.check_cancelled()
             frames = segment.get("keyframes") or []
             if not frames:
                 continue
@@ -924,10 +962,49 @@ class VideoEvidencePipeline:
         return path.exists() and path.is_file() and path.stat().st_size > 0
 
     def run_command(self, command: list[str], error_message: str, *, timeout: int = 300) -> None:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        completed = self.run_command_capture(command, timeout=timeout)
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()
             raise RuntimeError(f"{error_message}: {detail[:800]}")
+
+    def run_command_capture(self, command: list[str], *, timeout: int = 300, check: bool = False) -> subprocess.CompletedProcess:
+        started = time.monotonic()
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            while True:
+                self.check_cancelled()
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                    if check and completed.returncode != 0:
+                        raise subprocess.CalledProcessError(completed.returncode, command, output=stdout, stderr=stderr)
+                    return completed
+                if timeout and time.monotonic() - started > timeout:
+                    self.terminate_process(process)
+                    stdout, stderr = process.communicate()
+                    raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+                time.sleep(0.25)
+        except BaseException:
+            if process.poll() is None:
+                self.terminate_process(process)
+                process.communicate()
+            raise
+
+    def terminate_process(self, process: subprocess.Popen) -> None:
+        try:
+            if os.name == "nt":
+                process.terminate()
+            else:
+                process.send_signal(signal.SIGTERM)
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=3)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
 
     def author_name(self, video: dict[str, Any]) -> str:
         author = video.get("author") or {}

@@ -20,9 +20,9 @@ from backend.app.task_store import (
     save_analysis_archive,
     update_task,
 )
+from backend.app.ai_video_analysis_runner import AiVideoAnalysisRunner
 from backend.app.ai_video_comment_service import (
     collect_comments_for_ai_task,
-    merge_comment_context_into_result,
     merge_comment_state_into_payload,
     merge_comment_state_into_task_result,
 )
@@ -45,7 +45,6 @@ from backend.app.video_analysis_queue import (
     delete_ai_video_job,
     enqueue_ai_video_job,
     get_ai_video_job,
-    list_ai_model_runs,
     queue_stats,
     queue_snapshot,
     retry_ai_video_job,
@@ -94,6 +93,106 @@ class AiVideoConfigPayload(BaseModel):
     analysis_prompt: str = Field(default=DEFAULT_ANALYSIS_PROMPT)
 
 
+AI_VIDEO_CONFIG_SCHEMA: list[dict[str, Any]] = [
+    {
+        "name": "pipeline_mode",
+        "label": "拆解流程",
+        "type": "select",
+        "default": "evidence",
+        "options": [
+            {"value": "evidence", "label": "证据包优先：转写 + 关键帧 + 分段拆解"},
+            {"value": "auto", "label": "自动：证据包失败时回退直接视频分析"},
+            {"value": "direct", "label": "直接视频分析：跳过转写流程"},
+        ],
+        "section": "pipeline",
+    },
+    {"name": "output_dir", "label": "输出目录", "type": "text", "default": "./data/runtime/ai_video_analysis", "section": "pipeline"},
+    {
+        "name": "transcriber",
+        "label": "转写器",
+        "type": "select",
+        "default": "auto",
+        "options": [
+            {"value": "auto", "label": "自动选择"},
+            {"value": "faster_whisper", "label": "faster-whisper"},
+            {"value": "openai_whisper", "label": "openai-whisper"},
+            {"value": "doubao_file_asr", "label": "Doubao file ASR 2.0"},
+        ],
+        "section": "asr",
+    },
+    {"name": "transcribe_model", "label": "Whisper 模型", "type": "text", "default": "small", "placeholder": "small / medium", "section": "asr"},
+    {"name": "transcribe_language", "label": "转写语言", "type": "text", "default": "zh", "placeholder": "zh", "section": "asr"},
+    {
+        "name": "transcribe_device",
+        "label": "转写设备",
+        "type": "select",
+        "default": "cpu",
+        "options": [{"value": "cpu", "label": "cpu"}, {"value": "cuda", "label": "cuda"}, {"value": "auto", "label": "auto"}],
+        "section": "asr",
+    },
+    {
+        "name": "transcribe_compute_type",
+        "label": "计算精度",
+        "type": "select",
+        "default": "int8",
+        "options": [{"value": "int8", "label": "int8"}, {"value": "float16", "label": "float16"}, {"value": "float32", "label": "float32"}],
+        "section": "asr",
+    },
+    {
+        "name": "asr_upload_mode",
+        "label": "Doubao ASR upload mode",
+        "type": "select",
+        "default": "url",
+        "options": [{"value": "url", "label": "url: publish audio, then let Volcengine pull it"}, {"value": "base64", "label": "base64: direct audio payload"}],
+        "hint": "Recording-file ASR 2.0 should use url for normal 10-minute videos. Use base64 only with a direct-upload endpoint and small audio.",
+        "section": "asr",
+    },
+    {
+        "name": "asr_publisher",
+        "label": "ASR audio publisher",
+        "type": "select",
+        "default": "local",
+        "options": [{"value": "local", "label": "local: public backend directory"}, {"value": "tos", "label": "tos: Volcengine TOS pre-signed URL"}],
+        "hint": "TOS bucket, endpoint, region, AK and SK are read from backend environment variables only.",
+        "section": "asr",
+    },
+    {"name": "asr_public_base_url", "label": "Local ASR public URL", "type": "text", "default": "", "placeholder": "https://your-domain/api/tools/ai-video-analysis/public", "section": "asr"},
+    {"name": "asr_public_dir", "label": "Local ASR public directory", "type": "text", "default": "", "placeholder": "./data/runtime/ai_video_analysis/public_asr_audio", "section": "asr"},
+    {
+        "name": "summary_provider",
+        "label": "Global summary provider",
+        "type": "select",
+        "default": "",
+        "options": [{"value": "", "label": "same as segment model"}, {"value": "deepseek", "label": "DeepSeek"}],
+        "hint": "Segment vision analysis still uses Gemini/Yunwu. This only controls the final global summary.",
+        "section": "model",
+    },
+    {"name": "summary_model", "label": "Global summary model", "type": "text", "default": "deepseek-v4-flash", "placeholder": "deepseek-v4-flash", "section": "model"},
+    {
+        "name": "summary_fallback_provider",
+        "label": "Summary fallback",
+        "type": "select",
+        "default": "vision",
+        "options": [{"value": "vision", "label": "fallback to segment model"}, {"value": "none", "label": "fail if summary provider fails"}],
+        "section": "model",
+    },
+    {"name": "segment_seconds", "label": "分段秒数", "type": "number", "default": 90, "min": 30, "max": 600, "section": "segmentation"},
+    {"name": "silent_segment_seconds", "label": "无语音视觉切段秒数", "type": "number", "default": 6, "min": 2, "max": 30, "hint": "适合 AI 小动物、音乐卡点、纯画面视频。无转写文本时按这个秒数切割。", "section": "segmentation"},
+    {"name": "keyframe_interval_seconds", "label": "关键帧间隔秒数", "type": "number", "default": 30, "min": 5, "max": 300, "section": "segmentation"},
+    {"name": "max_segments", "label": "最多 AI 拆解片段", "type": "number", "default": 18, "min": 1, "max": 100, "section": "segmentation"},
+    {"name": "max_concurrent_tasks", "label": "最大并发任务数", "type": "number", "default": 3, "min": 1, "max": 3, "hint": "普通 CPU 建议保持 1。多任务会同时占用 Whisper、FFmpeg 和 API 调用。", "section": "queue"},
+    {"name": "grid_columns", "label": "网格列数", "type": "number", "default": 3, "min": 1, "max": 6, "section": "frames"},
+    {"name": "grid_max_frames", "label": "每段最多关键帧", "type": "number", "default": 9, "min": 1, "max": 24, "section": "frames"},
+    {"name": "grid_cell_width", "label": "网格单格宽度", "type": "number", "default": 320, "min": 120, "max": 960, "section": "frames"},
+    {"name": "grid_cell_height", "label": "网格单格高度", "type": "number", "default": 180, "min": 90, "max": 720, "section": "frames"},
+    {"name": "resume_enabled", "label": "启用断点续跑：逐步复用已完成的音频、转写、关键帧、分段拆解和全局汇总", "type": "boolean", "default": True, "wide": True, "section": "pipeline"},
+    {"name": "highlight_screenshots", "label": "让 AI 标注爆点截图时间，并自动截取对应画面", "type": "boolean", "default": True, "wide": True, "section": "frames"},
+    {"name": "ffmpeg_binary", "label": "FFmpeg", "type": "text", "default": "ffmpeg", "placeholder": "ffmpeg 或绝对路径", "section": "runtime"},
+    {"name": "ffprobe_binary", "label": "FFprobe", "type": "text", "default": "ffprobe", "placeholder": "ffprobe 或绝对路径", "section": "runtime"},
+    {"name": "analysis_prompt", "label": "拆解提示词模板", "type": "textarea", "default": DEFAULT_ANALYSIS_PROMPT, "rows": 12, "placeholder": "可使用变量：{desc}、{author}", "hint": "可使用变量：{desc} 视频描述，{author} 作者。建议要求模型严格返回 JSON。", "section": "prompt", "wide": True},
+]
+
+
 class RemakeExportPayload(BaseModel):
     run_id: str = Field(default="")
     task_id: str = Field(default="")
@@ -128,15 +227,6 @@ def adapter() -> AiVideoAnalysisAdapter:
 
 def video_title(video: dict[str, Any]) -> str:
     return str(video.get("desc") or video.get("title") or video.get("aweme_id") or video.get("id") or "未命名视频")
-
-
-def attach_model_runs(task_id: str, result: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(result, dict):
-        return result
-    runs = list_ai_model_runs(task_id)
-    if not runs:
-        return result
-    return {**result, "model_runs": runs}
 
 
 def _resolve_repo_path(value: str | Path) -> Path:
@@ -282,50 +372,14 @@ def run_breakdown_task(task_id: str, video: dict[str, Any], provider: str | None
         semaphore.acquire()
         acquired = True
         report(5, "后台任务已启动")
-        task = get_task(task_id) or {}
-        if task:
-            comment_state, patched_video = collect_comments_for_ai_task(task, progress=report)
-            payload = merge_comment_state_into_payload(task.get("payload") or {}, video=patched_video, comment_state=comment_state)
-            update_task(task_id, payload_json=payload)
-            video = patched_video or video
-            if comment_state.get("status") == "failed":
-                report(30, f"评论数据获取失败，继续拆解：{comment_state.get('error') or 'unknown'}")
-            elif comment_state.get("status") == "done":
-                report(
-                    30,
-                    f"评论数据已补全：评论 {comment_state.get('comment_saved_count') or 0} 条 / 回复 {comment_state.get('reply_saved_count') or 0} 条",
-                )
-            else:
-                report(30, "评论数据跳过，继续拆解")
-        else:
-            comment_state = {"status": "skipped", "reason": "task_not_found"}
-
-        def analysis_report(progress: int, message: str) -> None:
-            report(30 + int(max(0, min(100, progress)) * 0.7), message)
-
-        job = adapter().create_job(video=video, provider=provider, job_id=task_id, progress=analysis_report)
-        if not get_task(task_id):
-            return
-        result = attach_model_runs(task_id, job.get("result") or {})
-        result = merge_comment_context_into_result(result, video=video, comment_state=comment_state)
-        update_task(
-            task_id,
-            status="done" if job.get("status") == "done" else "running",
-            progress=100 if job.get("status") == "done" else 70,
-            message="拆解完成" if job.get("status") == "done" else "等待外部模型继续处理",
-            provider=job.get("provider", provider or ""),
-            result_json=result,
-            error=None,
+        result_job = AiVideoAnalysisRunner(adapter_factory=adapter).run(
+            task_id=task_id,
+            video=video,
+            provider=provider,
+            progress=report,
         )
-        if job.get("status") == "done":
-            persist_analysis_result(
-                task_id=task_id,
-                video=video,
-                result=result,
-                provider=job.get("provider", provider or ""),
-                job_path=job.get("job_path") or "",
-            )
-            update_target_task_by_ai_task_id({"id": task_id, "status": "done", "result": result, "error": ""})
+        if result_job.status == "task_missing":
+            return
     except Exception as exc:
         traceback.print_exc()
         update_task(
@@ -487,6 +541,11 @@ def job_evidence(task_id: str) -> dict[str, Any]:
             "audio_url": f"/api/tools/ai-video-analysis/jobs/{task_id}/evidence-file?kind=audio" if audio_file else "",
         },
     }
+
+
+@router.get("/config/schema")
+def get_config_schema() -> dict[str, Any]:
+    return {"fields": AI_VIDEO_CONFIG_SCHEMA}
 
 
 @router.get("/jobs/{task_id}/evidence-file")

@@ -2276,6 +2276,57 @@ h1 {
   min-width: 0;
 }
 
+.queue-task-runtime-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
+  gap: 12px;
+}
+
+.queue-section-head.compact {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.queue-chunk-list,
+.queue-artifact-list {
+  display: grid;
+  gap: 8px;
+}
+
+.queue-chunk-row,
+.queue-artifact-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.queue-chunk-row > div {
+  display: grid;
+  min-width: 120px;
+}
+
+.queue-chunk-row strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.queue-chunk-row span,
+.queue-artifact-row span {
+  overflow-wrap: anywhere;
+}
+
+.queue-error-text {
+  color: #be123c;
+}
+
 .task-detail-modal {
   display: grid;
   gap: 16px;
@@ -5030,6 +5081,10 @@ textarea {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 14px;
+}
+
+.settings-schema-group {
+  display: contents;
 }
 
 .douyin-settings-form label,
