@@ -16,6 +16,27 @@
 - AI 视频拆解里的评论采集是一个独立步骤，失败不阻断拆解
 - 评论失败会在任务中心保留状态，并支持再次获取
 
+## 数据库
+
+当前运行时只使用 PostgreSQL，不再依赖 SQLite。
+
+### 需要配置的环境变量
+
+```env
+DATABASE_URL=
+CORE_TASK_DATABASE_URL=
+TASK_AUDIT_DATABASE_URL=
+AI_VIDEO_QUEUE_DATABASE_URL=
+TIKTOK_TARGET_DATABASE_URL=
+TIKTOK_TARGET_CACHE_DATABASE_URL=
+SHORT_VIDEO_ANALYSIS_DATABASE_URL=
+ARCHIVE_DATABASE_URL=
+MEDIA_DATABASE_URL=
+POSTGRES_SCHEMA=
+```
+
+如果你不想拆多库，也可以先让这些变量都指向同一个 PostgreSQL DSN，再逐步拆分。
+
 统一错误落盘目录：
 
 ```text
@@ -64,7 +85,7 @@ data/runtime/error/<namespace>/<YYYYMMDD>/*.json
 
 - 前端：Vite + React
 - 后端：FastAPI
-- 数据存储：SQLite
+- 数据存储：PostgreSQL
 - 集成方式：`integrations/` 适配层
 - 运行环境：Windows 优先，部分剪映能力仅支持 Windows
 
@@ -151,6 +172,13 @@ AI_PROMPT_REVERSE_OUTPUT_DIR=./data/runtime/ai_prompt_reverse
 FFMPEG_BINARY=ffmpeg
 FFPROBE_BINARY=ffprobe
 LOCAL_VIDEO_MODEL_ENDPOINT=
+```
+
+如果要做旧 SQLite 数据迁移，可运行：
+
+```powershell
+python scripts/migrate_sqlite_to_postgres.py --dry-run
+python scripts/migrate_sqlite_to_postgres.py --bootstrap --truncate --verify
 ```
 
 说明：
@@ -316,7 +344,7 @@ POST /api/tools/runninghub-tts/sync/{task_id}
 
 ### 任务中心
 
-任务由后端写入 SQLite，前端可轮询任务状态。相关路由在 `backend/app/routes/tasks.py`。
+任务由后端写入 PostgreSQL，前端可轮询任务状态。相关路由在 `backend/app/routes/tasks.py`。
 
 ### RunningHub TTS 参数说明
 
@@ -420,7 +448,7 @@ data/runtime/
 - 下载的视频素材
 - AI 拆解任务产物
 - AI 反推任务产物
-- SQLite 任务库
+- PostgreSQL 任务库
 
 这些内容属于运行时数据，不建议提交到仓库。
 

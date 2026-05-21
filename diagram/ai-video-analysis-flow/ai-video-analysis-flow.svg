@@ -233,7 +233,7 @@
       <ellipse cx="180" cy="60" rx="180" ry="12" class="box-storage"/>
       <line x1="0" y1="12" x2="0" y2="60" stroke="#a78bfa" stroke-width="1.4"/>
       <line x1="360" y1="12" x2="360" y2="60" stroke="#a78bfa" stroke-width="1.4"/>
-      <text x="180" y="38" text-anchor="middle" class="box-title" font-size="15">short_video_analysis.sqlite3</text>
+      <text x="180" y="38" text-anchor="middle" class="box-title" font-size="15">short_video_analysis_db</text>
       <text x="180" y="56" text-anchor="middle" class="box-sub">analysis_runs / segments / formulas / remake_exports</text>
     </g>
 
@@ -243,7 +243,7 @@
       <ellipse cx="180" cy="60" rx="180" ry="12" class="box-storage"/>
       <line x1="0" y1="12" x2="0" y2="60" stroke="#a78bfa" stroke-width="1.4"/>
       <line x1="360" y1="12" x2="360" y2="60" stroke="#a78bfa" stroke-width="1.4"/>
-      <text x="180" y="38" text-anchor="middle" class="box-title" font-size="15">tiktok_targeting.sqlite3</text>
+      <text x="180" y="38" text-anchor="middle" class="box-title" font-size="15">tiktok_target_db</text>
       <text x="180" y="56" text-anchor="middle" class="box-sub">视频元数据 / 指标 / 评论快照 / 互动画像</text>
     </g>
   </g>

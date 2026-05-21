@@ -20,6 +20,7 @@ from backend.app.video_analysis_queue import (
 from integrations.ai_video_analysis.doubao_asr import normalize_doubao_asr_response
 from integrations.ai_video_analysis.adapter import AiVideoAnalysisAdapter
 from integrations.ai_video_analysis.analysis_runner import run_evidence_breakdown
+from integrations.ai_video_analysis.call_helpers import call_generate_text_hook
 from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
 from integrations.ai_video_analysis.model_gateway import normalized_usage, resolve_ai_video_provider_route, uses_openai_compatible_relay
 from integrations.ai_video_analysis.prompt_builder import segment_breakdown_prompt
@@ -27,6 +28,7 @@ from integrations.ai_video_analysis.result_normalizer import parse_model_json, p
 from integrations.ai_video_analysis.result_schema import validate_analysis_result, validate_segment_breakdown
 from integrations.ai_video_analysis.relay_clients import GeminiGenerateContentRelayClient, OpenAICompatibleRelayClient
 from integrations.ai_video_analysis.relay_clients import DeepSeekChatClient
+from tests.postgres_test_utils import isolated_postgres_schema
 
 
 class FakeRelayResponse:
@@ -75,7 +77,9 @@ class FakeGeminiRelaySession(FakeRelaySession):
 class AiVideoP2Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.old_db_path = task_store.DB_PATH
+        self.pg_schema = isolated_postgres_schema("ai_video_p2")
+        self.pg_schema.__enter__()
+        self.addCleanup(self.pg_schema.__exit__, None, None, None)
         self.old_env = {
             key: os.environ.get(key)
             for key in [
@@ -99,7 +103,6 @@ class AiVideoP2Tests(unittest.TestCase):
         }
 
     def tearDown(self):
-        task_store.DB_PATH = self.old_db_path
         for key, value in self.old_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -108,7 +111,6 @@ class AiVideoP2Tests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_analysis_task_model_runs_round_trip(self):
-        task_store.DB_PATH = Path(self.tmp.name) / "tasks.sqlite3"
         task_store.init_db()
         init_ai_video_queue_db()
         task_store.create_task(
@@ -369,6 +371,28 @@ class AiVideoP2Tests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             adapter._generate_global_summary_json("return json", action="summary")
 
+    def test_call_generate_text_hook_skips_unsupported_image_paths(self):
+        captured = {}
+
+        def hook(prompt, *, action, route=None):
+            captured["prompt"] = prompt
+            captured["action"] = action
+            captured["route"] = route
+            return "ok"
+
+        text = call_generate_text_hook(
+            hook,
+            "hello",
+            action="summary",
+            image_paths=["/tmp/a.png"],
+            route={"provider": "mock"},
+        )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(captured["prompt"], "hello")
+        self.assertEqual(captured["action"], "summary")
+        self.assertEqual(captured["route"], {"provider": "mock"})
+
     def test_prompt_engine_injects_genre_profile_into_segment_prompt(self):
         adapter = AiVideoAnalysisAdapter({"provider": "mock"})
         prompt = adapter._segment_breakdown_prompt(
@@ -505,7 +529,6 @@ class AiVideoP2Tests(unittest.TestCase):
 
     def test_adapter_records_evidence_artifacts_and_initial_chunks(self):
         root = Path(self.tmp.name)
-        task_store.DB_PATH = root / "tasks.sqlite3"
         task_store.init_db()
         init_ai_video_queue_db()
         video_path = root / "video.mp4"
@@ -550,7 +573,6 @@ class AiVideoP2Tests(unittest.TestCase):
 
     def test_analysis_runner_stops_after_segment_model_when_cancel_requested(self):
         root = Path(self.tmp.name)
-        task_store.DB_PATH = root / "tasks.sqlite3"
         task_store.init_db()
         init_ai_video_queue_db()
         evidence_dir = root / "task-cancel-runner"

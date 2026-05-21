@@ -1,10 +1,18 @@
 import { useState } from "react";
+import { ChevronDown, Trash2 } from "lucide-react";
 import { Badge } from "../../components/common/index";
 import { statusText, taskBoardStatuses } from "../../constants/appConfig";
 import { commentCollectionLabel, commentCollectionTone, preferredTaskStatus } from "../../utils/appUtils";
-import { ChevronDown } from "lucide-react";
 
-export function TaskStatusRow({ title, desc, groups, activeStatus, onChangeStatus, onOpenTask }) {
+export function TaskStatusRow({
+  title,
+  desc,
+  groups,
+  activeStatus,
+  onChangeStatus,
+  onOpenTask,
+  onDeleteTask,
+}) {
   const [expanded, setExpanded] = useState(false);
   const total = taskBoardStatuses.reduce((sum, [key]) => sum + (groups[key]?.length || 0), 0);
   const resolvedStatus = preferredTaskStatus(groups, activeStatus);
@@ -51,11 +59,15 @@ export function TaskStatusRow({ title, desc, groups, activeStatus, onChangeStatu
           <div className="task-row-list">
             {activeTasks.length ? (
               activeTasks.map((task) => (
-                <button className="task-list-row" key={task.id} type="button" onClick={() => onOpenTask(task)}>
-                  <div className="task-list-row-main">
+                <div className="task-list-row" key={task.id}>
+                  <button
+                    className="task-list-row-main task-list-row-open"
+                    type="button"
+                    onClick={() => onOpenTask(task)}
+                  >
                     <strong>{task.title}</strong>
                     <p>{task.message || `${title} 任务`}</p>
-                  </div>
+                  </button>
                   <div className="task-list-row-meta">
                     {task.commentCollection && (
                       <Badge status={commentCollectionTone(task.commentCollection)}>
@@ -65,8 +77,24 @@ export function TaskStatusRow({ title, desc, groups, activeStatus, onChangeStatu
                     <Badge status={task.status}>{statusText[task.status] || task.status}</Badge>
                     <span className="task-list-progress">{task.progress}%</span>
                     <span>{task.updated}</span>
+                    <div className="task-list-row-actions">
+                      {onDeleteTask && (
+                        <button
+                          className="text-button danger-text-button task-list-row-delete"
+                          type="button"
+                          aria-label={`删除任务 ${task.title}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onDeleteTask(task);
+                          }}
+                        >
+                          <Trash2 size={14} />
+                          删除
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </button>
+                </div>
               ))
             ) : (
               <div className="empty-result">{emptyText}</div>

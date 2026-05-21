@@ -11,7 +11,8 @@ from backend.app.task_store import (
     save_production_reverse_archive,
     save_prompt_reverse_archive,
 )
-from backend.app.video_analysis_queue import delete_ai_video_job, get_ai_video_job, list_ai_model_runs
+from backend.app.tiktok_target_store import clear_target_video_analysis_for_ai_task
+from backend.app.video_analysis_queue import cancel_ai_video_job, delete_ai_video_job, get_ai_video_job, list_ai_model_runs
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -117,9 +118,17 @@ def remove_task(task_id: str, delete_archives: bool = Query(default=True)) -> di
     if task and task.get("type") == "ai_video_analysis":
         job = get_ai_video_job(task_id)
         if job and job.get("status") in {"running", "claimed"}:
-            raise HTTPException(status_code=409, detail="AI video task is running. Cancel it before deleting.")
-        delete_ai_video_job(task_id)
+            cancel_ai_video_job(task_id)
+        delete_ai_video_job(task_id, allow_active=True)
     deleted = delete_task(task_id, delete_archives=delete_archives)
     if not deleted:
         raise HTTPException(status_code=404, detail="Task not found")
-    return {"status": "ok", "deleted": True, "task_id": task_id, "delete_archives": delete_archives}
+    target_video = clear_target_video_analysis_for_ai_task(task_id) if task and task.get("type") == "ai_video_analysis" else None
+    target_cleanup = bool(target_video and target_video.get("cleared_current_analysis"))
+    return {
+        "status": "ok",
+        "deleted": True,
+        "task_id": task_id,
+        "delete_archives": delete_archives,
+        "target_cleanup": target_cleanup,
+    }

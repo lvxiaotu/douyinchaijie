@@ -62,7 +62,7 @@
 已有能力：
 
 - `/api/tools/ai-video-analysis/jobs`：创建单个视频拆解任务。
-- `tasks.sqlite3`：保存通用任务、任务事件、拆解结果。
+- `tasks`（PostgreSQL）：保存通用任务、任务事件、拆解结果。
 - 通过 `AI_VIDEO_MAX_CONCURRENT_TASKS` 控制视频拆解并发。
 - 前端已有任务中心展示进行中、已完成、异常任务。
 
@@ -258,7 +258,7 @@ updated_at = excluded.updated_at
 
 任务完成后需要同步：
 
-- 从 `tasks.sqlite3` 读取 AI 拆解任务状态和结果。
+- 从 PostgreSQL 的 `tasks` 读取 AI 拆解任务状态和结果。
 - 更新 `tiktok_target_tasks.status/result_json/error`。
 - 更新 `tiktok_target_videos.analysis_status/analysis_result_json/analysis_task_id/analyzed_at`。
 

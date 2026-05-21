@@ -10,13 +10,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.app import short_video_analysis_store as store
+from tests.postgres_test_utils import isolated_postgres_schema
 
 
 class ShortVideoAnalysisStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.old_db_path = store.DB_PATH
-        store.DB_PATH = Path(self.tmp.name) / "short_video_analysis.sqlite3"
+        self.pg_schema = isolated_postgres_schema("short_video_analysis")
+        self.pg_schema.__enter__()
+        self.addCleanup(self.pg_schema.__exit__, None, None, None)
         self.old_env = {
             "SHORT_VIDEO_BASELINE_INTERACTION_RATE": os.environ.get("SHORT_VIDEO_BASELINE_INTERACTION_RATE"),
             "SHORT_VIDEO_BASELINE_KNOWLEDGE_INTERACTION_RATE": os.environ.get("SHORT_VIDEO_BASELINE_KNOWLEDGE_INTERACTION_RATE"),
@@ -31,7 +33,6 @@ class ShortVideoAnalysisStoreTests(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        store.DB_PATH = self.old_db_path
         gc.collect()
         self.tmp.cleanup()
 

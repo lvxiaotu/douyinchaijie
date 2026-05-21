@@ -6,6 +6,9 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+.codegraph/
+.cursor/
+logs/
 ffmpeg-*-essentials_build/
 data/runtime/
 _ref_*/

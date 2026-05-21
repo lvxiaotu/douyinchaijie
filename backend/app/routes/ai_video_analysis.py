@@ -39,7 +39,7 @@ from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeli
 from integrations.video_pipeline.script_schema import NaturalLanguageScriptRequest
 from backend.app.routes.video_script import generate_script_from_natural_language
 from backend.app.ai_provider_state import active_ai_provider
-from backend.app.tiktok_target_store import update_target_task_by_ai_task_id
+from backend.app.tiktok_target_store import clear_target_video_analysis_for_ai_task, update_target_task_by_ai_task_id
 from backend.app.video_analysis_queue import (
     cancel_ai_video_job,
     delete_ai_video_job,
@@ -823,18 +823,20 @@ def delete_job(
     if not job:
         raise HTTPException(status_code=404, detail="AI video queue job not found")
     if job.get("status") in {"running", "claimed"} and not allow_active:
-        cancelled = cancel_ai_video_job(task_id)
-        if cancelled and cancelled.get("status") in {"running", "claimed"}:
-            raise HTTPException(status_code=409, detail="Task is running. Cancel it first, then delete after it stops.")
+        cancel_ai_video_job(task_id)
+        allow_active = True
     deleted_job = delete_ai_video_job(task_id, allow_active=allow_active)
     if not deleted_job or not deleted_job.get("deleted"):
         raise HTTPException(status_code=404, detail="AI video queue job not found")
     deleted_task = delete_task(task_id, delete_archives=True) if delete_task_row else False
+    target_video = clear_target_video_analysis_for_ai_task(task_id) if delete_task_row else None
+    target_cleanup = bool(target_video and target_video.get("cleared_current_analysis"))
     return {
         "status": "ok",
         "deleted": True,
         "deleted_task": deleted_task,
         "task_id": task_id,
+        "target_cleanup": target_cleanup,
         "queue": queue_stats(task_id=task_id),
     }
 

@@ -1817,6 +1817,20 @@ h1 {
   text-align: left;
 }
 
+.task-list-row-open {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .task-list-row:hover {
   border-color: #bfdbfe;
   background: #f8fbff;
@@ -1854,6 +1868,27 @@ h1 {
 .task-list-row-meta {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.task-list-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.task-list-row-delete {
+  flex: 0 0 auto;
+  min-width: 74px;
+  white-space: nowrap;
+  box-shadow:
+    5px 6px 0 var(--app-shadow-color),
+    0 12px 20px rgba(220, 38, 38, 0.08),
+    inset 1px 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.task-list-row-archive {
+  flex: 0 0 auto;
 }
 
 .task-list-progress {

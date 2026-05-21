@@ -608,6 +608,7 @@ export function App() {
                 activeStatus={activeAnalysisStatus}
                 onChangeStatus={setActiveAnalysisStatus}
                 onOpenTask={(task) => openTaskRecord("analysis", "AI 视频拆解", task)}
+                onDeleteTask={handleDeleteAnalysisTask}
               />
               <TaskStatusRow
                 title="AI 提示词反推"
@@ -616,6 +617,7 @@ export function App() {
                 activeStatus={activePromptStatus}
                 onChangeStatus={setActivePromptStatus}
                 onOpenTask={(task) => openTaskRecord("prompt", "AI 提示词反推", task)}
+                onDeleteTask={handleDeletePromptReverseTask}
               />
               <TaskStatusRow
                 title="AI 制作方式反推"
@@ -624,6 +626,7 @@ export function App() {
                 activeStatus={activeProductionStatus}
                 onChangeStatus={setActiveProductionStatus}
                 onOpenTask={(task) => openTaskRecord("production", "AI 制作方式反推", task)}
+                onDeleteTask={handleDeleteProductionReverseTask}
               />
               <TaskStatusRow
                 title="一句话转素材"
@@ -632,6 +635,7 @@ export function App() {
                 activeStatus={activeTextToAssetsStatus}
                 onChangeStatus={setActiveTextToAssetsStatus}
                 onOpenTask={(task) => openTaskRecord("text_to_assets", "一句话转素材", task)}
+                onDeleteTask={handleDeleteTextToAssetsTask}
               />
             </div>
           </section>

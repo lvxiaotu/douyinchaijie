@@ -4,13 +4,13 @@ import json
 import os
 import socket
 import time
-from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from backend.app.task_store import connect, load_json
+from backend.app.postgres_store import ensure_columns, pg_connection, run_once
+from backend.app.task_store import get_task_summary, load_json
 from backend.app.video_task_limiter import video_task_concurrency_limit
 
 ACTIVE_STATUSES = {"claimed", "running"}
@@ -18,6 +18,16 @@ CLAIMABLE_STATUSES = {"queued", "retry_waiting", "stale_requeued"}
 TERMINAL_STATUSES = {"done", "failed_final", "cancelled"}
 AI_MODEL_RUN_COLUMNS = {
     "meta_json": "meta_json TEXT NOT NULL DEFAULT '{}'",
+    "deleted_at": "deleted_at INTEGER",
+}
+AI_VIDEO_JOB_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
+}
+AI_VIDEO_ARTIFACT_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
+}
+AI_VIDEO_CHUNK_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
 }
 
 
@@ -27,10 +37,8 @@ class AiVideoTaskCancelled(RuntimeError):
         self.task_id = task_id
 
 
-@contextmanager
 def queue_connection():
-    with connect() as connection:
-        yield connection
+    return pg_connection("ai_video_queue")
 
 
 def now_ts() -> int:
@@ -41,14 +49,14 @@ def worker_host_id() -> str:
     return socket.gethostname() or "local"
 
 
-def ensure_columns(connection: Any, table: str, columns: dict[str, str]) -> None:
-    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
-    for column, definition in columns.items():
-        if column not in existing:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
-
-
 def init_ai_video_queue_db() -> None:
+    def initialize() -> None:
+        _init_ai_video_queue_db()
+
+    run_once("ai_video_queue", initialize)
+
+
+def _init_ai_video_queue_db() -> None:
     with queue_connection() as connection:
         connection.execute(
             """
@@ -68,7 +76,7 @@ def init_ai_video_queue_db() -> None:
                 locked_at INTEGER,
                 heartbeat_at INTEGER,
                 retry_after INTEGER,
-                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                cancel_requested BOOLEAN NOT NULL DEFAULT false,
                 error_code TEXT NOT NULL DEFAULT '',
                 error_message TEXT NOT NULL DEFAULT '',
                 stage_state_json TEXT NOT NULL DEFAULT '{}',
@@ -90,6 +98,7 @@ def init_ai_video_queue_db() -> None:
             ON ai_video_jobs(status, locked_at, heartbeat_at)
             """
         )
+        ensure_columns(connection, "ai_video_jobs", AI_VIDEO_JOB_COLUMNS)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_video_artifacts (
@@ -111,6 +120,7 @@ def init_ai_video_queue_db() -> None:
             ON ai_video_artifacts(task_id, type)
             """
         )
+        ensure_columns(connection, "ai_video_artifacts", AI_VIDEO_ARTIFACT_COLUMNS)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_video_chunks (
@@ -138,6 +148,7 @@ def init_ai_video_queue_db() -> None:
             ON ai_video_chunks(task_id, chunk_index)
             """
         )
+        ensure_columns(connection, "ai_video_chunks", AI_VIDEO_CHUNK_COLUMNS)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_model_runs (
@@ -173,6 +184,7 @@ def init_ai_video_queue_db() -> None:
 
 def row_to_ai_video_job(row: Any) -> dict[str, Any]:
     job = dict(row)
+    job["deleted"] = bool(job.get("deleted_at"))
     job["cancel_requested"] = bool(job.get("cancel_requested"))
     job["stage_state"] = load_json(job.pop("stage_state_json", "{}"), {})
     job["metrics"] = load_json(job.pop("metrics_json", "{}"), {})
@@ -192,14 +204,28 @@ def row_to_ai_video_queue_item(row: Any, *, position: int | None = None) -> dict
     return item
 
 
+def _attach_task_snapshot(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    task = get_task_summary(str(item.get("task_id") or ""))
+    item["task_title"] = task.get("title") if task else ""
+    item["task_message"] = task.get("message") if task else ""
+    item["task_status"] = task.get("status") if task else ""
+    item["task_progress"] = task.get("progress") if task else 0
+    item["task_provider"] = task.get("provider") if task else ""
+    item["task_updated_at"] = task.get("updated_at") if task else None
+    return item
+
+
 def row_to_ai_video_artifact(row: Any) -> dict[str, Any]:
     artifact = dict(row)
+    artifact["deleted"] = bool(artifact.get("deleted_at"))
     artifact["meta"] = load_json(artifact.pop("meta_json", "{}"), {})
     return artifact
 
 
 def row_to_ai_video_chunk(row: Any) -> dict[str, Any]:
     chunk = dict(row)
+    chunk["deleted"] = bool(chunk.get("deleted_at"))
     chunk["meta"] = load_json(chunk.pop("meta_json", "{}"), {})
     return chunk
 
@@ -242,7 +268,7 @@ def record_ai_video_artifact(
             """
             SELECT *
             FROM ai_video_artifacts
-            WHERE task_id = ? AND type = ? AND uri = ?
+            WHERE task_id = %s AND type = %s AND uri = %s AND deleted_at IS NULL
             LIMIT 1
             """,
             (task_id, type, uri),
@@ -254,8 +280,8 @@ def record_ai_video_artifact(
             connection.execute(
                 """
                 UPDATE ai_video_artifacts
-                SET checksum = ?, size_bytes = ?, meta_json = ?, updated_at = ?
-                WHERE id = ?
+                SET checksum = %s, size_bytes = %s, meta_json = %s, updated_at = %s
+                WHERE id = %s
                 """,
                 (digest or "", size, json.dumps(merged_meta, ensure_ascii=False), now, artifact_id),
             )
@@ -265,11 +291,11 @@ def record_ai_video_artifact(
                 INSERT INTO ai_video_artifacts (
                     id, task_id, type, uri, checksum, size_bytes, meta_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (artifact_id, task_id, type, uri, digest or "", size, json.dumps(merged_meta, ensure_ascii=False), now, now),
             )
-        row = connection.execute("SELECT * FROM ai_video_artifacts WHERE id = ?", (artifact_id,)).fetchone()
+        row = connection.execute("SELECT * FROM ai_video_artifacts WHERE id = %s", (artifact_id,)).fetchone()
     return row_to_ai_video_artifact(row) if row else {"id": artifact_id}
 
 
@@ -280,7 +306,8 @@ def list_ai_video_artifacts(task_id: str) -> list[dict[str, Any]]:
             """
             SELECT *
             FROM ai_video_artifacts
-            WHERE task_id = ?
+            WHERE task_id = %s
+              AND deleted_at IS NULL
             ORDER BY created_at ASC, type ASC
             """,
             (task_id,),
@@ -314,7 +341,7 @@ def upsert_ai_video_chunk(
             """
             SELECT *
             FROM ai_video_chunks
-            WHERE task_id = ? AND chunk_index = ?
+            WHERE task_id = %s AND chunk_index = %s AND deleted_at IS NULL
             LIMIT 1
             """,
             (task_id, index),
@@ -329,18 +356,18 @@ def upsert_ai_video_chunk(
             connection.execute(
                 """
                 UPDATE ai_video_chunks
-                SET start_time = ?,
-                    end_time = ?,
-                    status = ?,
-                    transcript = ?,
-                    frame_count = ?,
-                    grid_uri = ?,
-                    vision_result_uri = ?,
-                    attempts = ?,
-                    error_message = ?,
-                    meta_json = ?,
-                    updated_at = ?
-                WHERE id = ?
+                SET start_time = %s,
+                    end_time = %s,
+                    status = %s,
+                    transcript = %s,
+                    frame_count = %s,
+                    grid_uri = %s,
+                    vision_result_uri = %s,
+                    attempts = %s,
+                    error_message = %s,
+                    meta_json = %s,
+                    updated_at = %s
+                WHERE id = %s
                 """,
                 (
                     float(start_time or existing["start_time"] or 0),
@@ -365,7 +392,7 @@ def upsert_ai_video_chunk(
                     frame_count, grid_uri, vision_result_uri, attempts, error_message,
                     meta_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     chunk_id,
@@ -385,7 +412,7 @@ def upsert_ai_video_chunk(
                     now,
                 ),
             )
-        row = connection.execute("SELECT * FROM ai_video_chunks WHERE id = ?", (chunk_id,)).fetchone()
+        row = connection.execute("SELECT * FROM ai_video_chunks WHERE id = %s", (chunk_id,)).fetchone()
     return row_to_ai_video_chunk(row) if row else {"id": chunk_id}
 
 
@@ -396,7 +423,8 @@ def list_ai_video_chunks(task_id: str) -> list[dict[str, Any]]:
             """
             SELECT *
             FROM ai_video_chunks
-            WHERE task_id = ?
+            WHERE task_id = %s
+              AND deleted_at IS NULL
             ORDER BY chunk_index ASC
             """,
             (task_id,),
@@ -437,7 +465,7 @@ def enqueue_ai_video_job(
     with queue_connection() as connection:
         connection.execute(
             """
-            INSERT OR REPLACE INTO ai_video_jobs (
+            INSERT INTO ai_video_jobs (
                 task_id, status, stage, priority, provider, video_fingerprint,
                 source_url, duration, progress, attempts, max_attempts,
                 locked_by, locked_at, heartbeat_at, retry_after, cancel_requested,
@@ -445,29 +473,47 @@ def enqueue_ai_video_job(
                 created_at, updated_at
             )
             VALUES (
-                ?,
-                COALESCE((SELECT status FROM ai_video_jobs WHERE task_id = ?), 'queued'),
+                %s,
                 'queued',
-                ?, ?, ?, ?, ?,
+                'queued',
+                %s, %s, %s, %s, %s,
                 0,
-                COALESCE((SELECT attempts FROM ai_video_jobs WHERE task_id = ?), 0),
-                ?,
-                '', NULL, NULL, NULL, 0, '', '', '{}', '{}',
-                COALESCE((SELECT created_at FROM ai_video_jobs WHERE task_id = ?), ?),
-                ?
+                0,
+                %s,
+                '', NULL, NULL, NULL, false, '', '', '{}', '{}',
+                %s,
+                %s
             )
+            ON CONFLICT(task_id) DO UPDATE SET
+                status = 'queued',
+                stage = 'queued',
+                priority = excluded.priority,
+                provider = excluded.provider,
+                video_fingerprint = excluded.video_fingerprint,
+                source_url = excluded.source_url,
+                duration = excluded.duration,
+                progress = 0,
+                max_attempts = excluded.max_attempts,
+                locked_by = '',
+                locked_at = NULL,
+                heartbeat_at = NULL,
+                retry_after = NULL,
+                cancel_requested = false,
+                error_code = '',
+                error_message = '',
+                stage_state_json = '{}',
+                metrics_json = '{}',
+                deleted_at = NULL,
+                updated_at = excluded.updated_at
             """,
             (
-                task_id,
                 task_id,
                 int(priority),
                 provider,
                 video_fingerprint(video),
                 video_source_url(video),
                 float(video.get("duration") or video.get("duration_seconds") or 0),
-                task_id,
                 max(1, attempts_limit),
-                task_id,
                 now,
                 now,
             ),
@@ -478,7 +524,7 @@ def enqueue_ai_video_job(
 def get_ai_video_job(task_id: str) -> dict[str, Any] | None:
     init_ai_video_queue_db()
     with queue_connection() as connection:
-        row = connection.execute("SELECT * FROM ai_video_jobs WHERE task_id = ?", (task_id,)).fetchone()
+        row = connection.execute("SELECT * FROM ai_video_jobs WHERE task_id = %s AND deleted_at IS NULL", (task_id,)).fetchone()
     return row_to_ai_video_job(row) if row else None
 
 
@@ -497,13 +543,13 @@ def raise_if_ai_video_cancelled(task_id: str) -> None:
 def active_job_count(connection: Any | None = None) -> int:
     if connection is not None:
         row = connection.execute(
-            "SELECT COUNT(*) AS count FROM ai_video_jobs WHERE status IN ('claimed', 'running')"
+            "SELECT COUNT(*) AS count FROM ai_video_jobs WHERE status IN ('claimed', 'running') AND deleted_at IS NULL"
         ).fetchone()
         return int(row["count"] if row else 0)
     init_ai_video_queue_db()
     with queue_connection() as owned_connection:
         row = owned_connection.execute(
-            "SELECT COUNT(*) AS count FROM ai_video_jobs WHERE status IN ('claimed', 'running')"
+            "SELECT COUNT(*) AS count FROM ai_video_jobs WHERE status IN ('claimed', 'running') AND deleted_at IS NULL"
         ).fetchone()
     return int(row["count"] if row else 0)
 
@@ -513,54 +559,44 @@ def claim_next_ai_video_job(worker_id: str) -> dict[str, Any] | None:
     now = now_ts()
     limit = video_task_concurrency_limit()
     with queue_connection() as connection:
-        connection.execute("BEGIN IMMEDIATE")
         active = active_job_count(connection)
         if active >= limit:
-            connection.rollback()
             return None
 
         row = connection.execute(
             """
-            SELECT *
-            FROM ai_video_jobs
-            WHERE status IN ('queued', 'retry_waiting', 'stale_requeued')
-              AND cancel_requested = 0
-              AND attempts < max_attempts
-              AND (retry_after IS NULL OR retry_after <= ?)
-            ORDER BY priority ASC, created_at ASC
-            LIMIT 1
-            """,
-            (now,),
-        ).fetchone()
-        if not row:
-            connection.rollback()
-            return None
-
-        task_id = row["task_id"]
-        cursor = connection.execute(
-            """
-            UPDATE ai_video_jobs
+            WITH next_job AS (
+                SELECT task_id
+                FROM ai_video_jobs
+                WHERE status IN ('queued', 'retry_waiting', 'stale_requeued')
+                  AND cancel_requested = false
+                  AND deleted_at IS NULL
+                  AND attempts < max_attempts
+                  AND (retry_after IS NULL OR retry_after <= %s)
+                ORDER BY priority ASC, created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE ai_video_jobs AS job
             SET status = 'claimed',
                 stage = 'claimed',
-                attempts = attempts + 1,
-                locked_by = ?,
-                locked_at = ?,
-                heartbeat_at = ?,
+                attempts = job.attempts + 1,
+                locked_by = %s,
+                locked_at = %s,
+                heartbeat_at = %s,
                 retry_after = NULL,
                 error_code = '',
                 error_message = '',
-                updated_at = ?
-            WHERE task_id = ?
-              AND status IN ('queued', 'retry_waiting', 'stale_requeued')
-              AND cancel_requested = 0
+                updated_at = %s
+            FROM next_job
+            WHERE job.task_id = next_job.task_id
+            RETURNING job.*
             """,
-            (worker_id, now, now, now, task_id),
-        )
-        if cursor.rowcount == 0:
-            connection.rollback()
+            (now, worker_id, now, now, now),
+        ).fetchone()
+        if not row:
             return None
-        connection.commit()
-    return get_ai_video_job(task_id)
+    return row_to_ai_video_job(row)
 
 
 def update_ai_video_job(
@@ -595,10 +631,10 @@ def update_ai_video_job(
     if metrics is not None:
         updates["metrics_json"] = json.dumps(metrics, ensure_ascii=False)
 
-    assignments = ", ".join(f"{key} = ?" for key in updates)
+    assignments = ", ".join(f"{key} = %s" for key in updates)
     values = list(updates.values()) + [task_id]
     with queue_connection() as connection:
-        cursor = connection.execute(f"UPDATE ai_video_jobs SET {assignments} WHERE task_id = ?", values)
+        cursor = connection.execute(f"UPDATE ai_video_jobs SET {assignments} WHERE task_id = %s", values)
     return get_ai_video_job(task_id) if cursor.rowcount else None
 
 
@@ -609,8 +645,8 @@ def heartbeat_ai_video_job(task_id: str, worker_id: str) -> None:
         connection.execute(
             """
             UPDATE ai_video_jobs
-            SET heartbeat_at = ?, locked_by = ?, updated_at = ?
-            WHERE task_id = ? AND status IN ('claimed', 'running')
+            SET heartbeat_at = %s, locked_by = %s, updated_at = %s
+            WHERE task_id = %s AND status IN ('claimed', 'running')
             """,
             (now, worker_id, now, task_id),
         )
@@ -623,7 +659,7 @@ def complete_ai_video_job(task_id: str, *, stage: str = "done") -> dict[str, Any
             """
             UPDATE ai_video_jobs
             SET status = 'done',
-                stage = ?,
+                stage = %s,
                 progress = 100,
                 locked_by = '',
                 locked_at = NULL,
@@ -631,8 +667,8 @@ def complete_ai_video_job(task_id: str, *, stage: str = "done") -> dict[str, Any
                 retry_after = NULL,
                 error_code = '',
                 error_message = '',
-                updated_at = ?
-            WHERE task_id = ?
+                updated_at = %s
+            WHERE task_id = %s
             """,
             (stage, now, task_id),
         )
@@ -663,16 +699,16 @@ def fail_ai_video_job(
         connection.execute(
             """
             UPDATE ai_video_jobs
-            SET status = ?,
+            SET status = %s,
                 stage = 'failed',
                 locked_by = '',
                 locked_at = NULL,
                 heartbeat_at = NULL,
-                retry_after = ?,
-                error_code = ?,
-                error_message = ?,
-                updated_at = ?
-            WHERE task_id = ?
+                retry_after = %s,
+                error_code = %s,
+                error_message = %s,
+                updated_at = %s
+            WHERE task_id = %s
             """,
             (status, retry_after, error_code, error_message[:2000], now, task_id),
         )
@@ -692,11 +728,11 @@ def cancel_ai_video_job(task_id: str) -> dict[str, Any] | None:
             connection.execute(
                 """
                 UPDATE ai_video_jobs
-                SET cancel_requested = 1,
+                SET cancel_requested = true,
                     error_code = 'CANCEL_REQUESTED',
                     error_message = 'Cancellation requested; running task will stop at the next safe checkpoint.',
-                    updated_at = ?
-                WHERE task_id = ?
+                    updated_at = %s
+                WHERE task_id = %s
                 """,
                 (now, task_id),
             )
@@ -707,15 +743,15 @@ def cancel_ai_video_job(task_id: str) -> dict[str, Any] | None:
                 UPDATE ai_video_jobs
                 SET status = 'cancelled',
                     stage = 'cancelled',
-                    cancel_requested = 1,
+                    cancel_requested = true,
                     locked_by = '',
                     locked_at = NULL,
                     heartbeat_at = NULL,
                     retry_after = NULL,
                     error_code = 'CANCELLED',
                     error_message = 'Cancelled before execution.',
-                    updated_at = ?
-                WHERE task_id = ?
+                    updated_at = %s
+                WHERE task_id = %s
                 """,
                 (now, task_id),
             )
@@ -729,11 +765,22 @@ def delete_ai_video_job(task_id: str, *, allow_active: bool = False) -> dict[str
         return None
     if current["status"] in ACTIVE_STATUSES and not allow_active:
         return {**current, "deleted": False, "delete_blocked": True}
+    deleted_at = now_ts()
     with queue_connection() as connection:
-        connection.execute("DELETE FROM ai_video_artifacts WHERE task_id = ?", (task_id,))
-        connection.execute("DELETE FROM ai_video_chunks WHERE task_id = ?", (task_id,))
-        connection.execute("DELETE FROM ai_model_runs WHERE task_id = ?", (task_id,))
-        cursor = connection.execute("DELETE FROM ai_video_jobs WHERE task_id = ?", (task_id,))
+        connection.execute("UPDATE ai_video_artifacts SET deleted_at = %s, updated_at = %s WHERE task_id = %s AND deleted_at IS NULL", (deleted_at, deleted_at, task_id))
+        connection.execute("UPDATE ai_video_chunks SET deleted_at = %s, updated_at = %s WHERE task_id = %s AND deleted_at IS NULL", (deleted_at, deleted_at, task_id))
+        connection.execute("UPDATE ai_model_runs SET deleted_at = %s, updated_at = %s WHERE task_id = %s AND deleted_at IS NULL", (deleted_at, deleted_at, task_id))
+        cursor = connection.execute(
+            """
+            UPDATE ai_video_jobs
+            SET deleted_at = %s,
+                status = CASE WHEN status IN ('done', 'failed_final', 'cancelled') THEN status ELSE 'cancelled' END,
+                stage = 'deleted',
+                updated_at = %s
+            WHERE task_id = %s AND deleted_at IS NULL
+            """,
+            (deleted_at, deleted_at, task_id),
+        )
     return {**current, "deleted": cursor.rowcount > 0, "delete_blocked": False}
 
 
@@ -755,11 +802,11 @@ def retry_ai_video_job(task_id: str) -> dict[str, Any] | None:
                 locked_at = NULL,
                 heartbeat_at = NULL,
                 retry_after = NULL,
-                cancel_requested = 0,
+                cancel_requested = false,
                 error_code = '',
                 error_message = '',
-                updated_at = ?
-            WHERE task_id = ?
+                updated_at = %s
+            WHERE task_id = %s
             """,
             (now, task_id),
         )
@@ -783,10 +830,11 @@ def requeue_stale_ai_video_jobs(stale_seconds: int | None = None) -> int:
                 retry_after = NULL,
                 error_code = 'STALE_LOCK',
                 error_message = 'Recovered stale worker lock.',
-                updated_at = ?
+                updated_at = %s
             WHERE status IN ('claimed', 'running')
-              AND (heartbeat_at IS NULL OR heartbeat_at < ?)
-              AND cancel_requested = 0
+              AND (heartbeat_at IS NULL OR heartbeat_at < %s)
+              AND cancel_requested = false
+              AND deleted_at IS NULL
             """,
             (now, cutoff),
         )
@@ -804,10 +852,10 @@ def queue_position(task_id: str) -> int | None:
             SELECT COUNT(*) AS count
             FROM ai_video_jobs
             WHERE status IN ('queued', 'retry_waiting', 'stale_requeued')
-              AND cancel_requested = 0
+              AND cancel_requested = false
               AND (
-                priority < ?
-                OR (priority = ? AND created_at <= ?)
+                priority < %s
+                OR (priority = %s AND created_at <= %s)
               )
             """,
             (current["priority"], current["priority"], current["created_at"]),
@@ -824,129 +872,46 @@ def queue_snapshot(*, task_id: str | None = None, backlog_limit: int = 20) -> di
     backlog_limit = max(1, min(int(backlog_limit or 20), 100))
     with queue_connection() as connection:
         rows = connection.execute(
-            "SELECT status, COUNT(*) AS count FROM ai_video_jobs GROUP BY status"
+            "SELECT status, COUNT(*) AS count FROM ai_video_jobs WHERE deleted_at IS NULL GROUP BY status"
         ).fetchall()
         workers = connection.execute(
             """
-            SELECT
-                j.task_id,
-                j.status,
-                j.stage,
-                j.progress,
-                j.locked_by,
-                j.locked_at,
-                j.heartbeat_at,
-                j.priority,
-                j.attempts,
-                j.max_attempts,
-                j.created_at,
-                j.updated_at,
-                j.error_code,
-                j.error_message,
-                t.title AS task_title,
-                t.message AS task_message,
-                t.status AS task_status,
-                t.progress AS task_progress,
-                t.provider AS task_provider,
-                t.updated_at AS task_updated_at
-            FROM ai_video_jobs j
-            LEFT JOIN tasks t ON t.id = j.task_id
-            WHERE j.status IN ('claimed', 'running')
-            ORDER BY j.locked_at ASC
+            SELECT *
+            FROM ai_video_jobs
+            WHERE status IN ('claimed', 'running')
+              AND deleted_at IS NULL
+            ORDER BY locked_at ASC
             """
         ).fetchall()
         backlog = connection.execute(
             """
-            SELECT
-                j.task_id,
-                j.status,
-                j.stage,
-                j.priority,
-                j.progress,
-                j.attempts,
-                j.max_attempts,
-                j.retry_after,
-                j.locked_by,
-                j.locked_at,
-                j.heartbeat_at,
-                j.created_at,
-                j.updated_at,
-                j.error_code,
-                j.error_message,
-                t.title AS task_title,
-                t.message AS task_message,
-                t.status AS task_status,
-                t.progress AS task_progress,
-                t.provider AS task_provider,
-                t.updated_at AS task_updated_at
-            FROM ai_video_jobs j
-            LEFT JOIN tasks t ON t.id = j.task_id
-            WHERE j.status IN ('queued', 'retry_waiting', 'stale_requeued')
-              AND j.cancel_requested = 0
-            ORDER BY j.priority ASC, j.created_at ASC
-            LIMIT ?
+            SELECT *
+            FROM ai_video_jobs
+            WHERE status IN ('queued', 'retry_waiting', 'stale_requeued')
+              AND cancel_requested = false
+              AND deleted_at IS NULL
+            ORDER BY priority ASC, created_at ASC
+            LIMIT %s
             """,
             (backlog_limit,),
         ).fetchall()
         failed_recent = connection.execute(
             """
-            SELECT
-                j.task_id,
-                j.status,
-                j.stage,
-                j.priority,
-                j.progress,
-                j.attempts,
-                j.max_attempts,
-                j.retry_after,
-                j.locked_by,
-                j.locked_at,
-                j.heartbeat_at,
-                j.created_at,
-                j.updated_at,
-                j.error_code,
-                j.error_message,
-                t.title AS task_title,
-                t.message AS task_message,
-                t.status AS task_status,
-                t.progress AS task_progress,
-                t.provider AS task_provider,
-                t.updated_at AS task_updated_at
-            FROM ai_video_jobs j
-            LEFT JOIN tasks t ON t.id = j.task_id
-            WHERE j.status = 'failed_final'
-            ORDER BY j.updated_at DESC
+            SELECT *
+            FROM ai_video_jobs
+            WHERE status = 'failed_final'
+              AND deleted_at IS NULL
+            ORDER BY updated_at DESC
             LIMIT 20
             """
         ).fetchall()
         done_recent = connection.execute(
             """
-            SELECT
-                j.task_id,
-                j.status,
-                j.stage,
-                j.priority,
-                j.progress,
-                j.attempts,
-                j.max_attempts,
-                j.retry_after,
-                j.locked_by,
-                j.locked_at,
-                j.heartbeat_at,
-                j.created_at,
-                j.updated_at,
-                j.error_code,
-                j.error_message,
-                t.title AS task_title,
-                t.message AS task_message,
-                t.status AS task_status,
-                t.progress AS task_progress,
-                t.provider AS task_provider,
-                t.updated_at AS task_updated_at
-            FROM ai_video_jobs j
-            LEFT JOIN tasks t ON t.id = j.task_id
-            WHERE j.status = 'done'
-            ORDER BY j.updated_at DESC
+            SELECT *
+            FROM ai_video_jobs
+            WHERE status = 'done'
+              AND deleted_at IS NULL
+            ORDER BY updated_at DESC
             LIMIT 20
             """
         ).fetchall()
@@ -955,6 +920,7 @@ def queue_snapshot(*, task_id: str | None = None, backlog_limit: int = 20) -> di
             SELECT MIN(created_at) AS oldest
             FROM ai_video_jobs
             WHERE status IN ('queued', 'retry_waiting', 'stale_requeued')
+              AND deleted_at IS NULL
             """
         ).fetchone()
     counts = {row["status"]: int(row["count"]) for row in rows}
@@ -970,10 +936,10 @@ def queue_snapshot(*, task_id: str | None = None, backlog_limit: int = 20) -> di
         "cancelled": counts.get("cancelled", 0),
         "counts": counts,
         "oldest_queued_at": oldest["oldest"] if oldest else None,
-        "workers": [row_to_ai_video_queue_item(row) for row in workers],
-        "backlog": [row_to_ai_video_queue_item(row, position=index + 1) for index, row in enumerate(backlog)],
-        "failed_recent": [row_to_ai_video_queue_item(row) for row in failed_recent],
-        "done_recent": [row_to_ai_video_queue_item(row) for row in done_recent],
+        "workers": [row_to_ai_video_queue_item(_attach_task_snapshot(row)) for row in workers],
+        "backlog": [row_to_ai_video_queue_item(_attach_task_snapshot(row), position=index + 1) for index, row in enumerate(backlog)],
+        "failed_recent": [row_to_ai_video_queue_item(_attach_task_snapshot(row)) for row in failed_recent],
+        "done_recent": [row_to_ai_video_queue_item(_attach_task_snapshot(row)) for row in done_recent],
     }
     if task_id:
         result["task_id"] = task_id
@@ -1013,7 +979,7 @@ def record_ai_model_run(
                 input_uri, output_uri, status, latency_ms, input_tokens,
                 output_tokens, cost_estimate, error_message, meta_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 run_id,
@@ -1036,12 +1002,13 @@ def record_ai_model_run(
                 now,
             ),
         )
-        row = connection.execute("SELECT * FROM ai_model_runs WHERE id = ?", (run_id,)).fetchone()
+        row = connection.execute("SELECT * FROM ai_model_runs WHERE id = %s", (run_id,)).fetchone()
     return row_to_ai_model_run(row) if row else {"id": run_id}
 
 
 def row_to_ai_model_run(row: Any) -> dict[str, Any]:
     run = dict(row)
+    run["deleted"] = bool(run.get("deleted_at"))
     run["meta"] = load_json(run.pop("meta_json", "{}"), {})
     return run
 
@@ -1053,7 +1020,8 @@ def list_ai_model_runs(task_id: str) -> list[dict[str, Any]]:
             """
             SELECT *
             FROM ai_model_runs
-            WHERE task_id = ?
+            WHERE task_id = %s
+              AND deleted_at IS NULL
             ORDER BY created_at ASC
             """,
             (task_id,),

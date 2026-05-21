@@ -17,6 +17,7 @@ from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeli
 from integrations.ai_video_analysis.http_policy import get_with_retries
 from backend.app import short_video_analysis_store
 from backend.app.routes.ai_video_analysis import RemakeExportPayload, save_remake_export_route
+from tests.postgres_test_utils import isolated_postgres_schema
 
 
 class FakeAsrResponse:
@@ -142,6 +143,9 @@ class FlakyDownloadSession:
 class AiVideoP3Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.pg_schema = isolated_postgres_schema("ai_video_p3")
+        self.pg_schema.__enter__()
+        self.addCleanup(self.pg_schema.__exit__, None, None, None)
         self.old_env = {
             key: os.environ.get(key)
             for key in [
@@ -300,29 +304,24 @@ class AiVideoP3Tests(unittest.TestCase):
         self.assertEqual(status["errors"], [])
 
     def test_remake_export_route_persists_export(self):
-        old_db = short_video_analysis_store.DB_PATH
-        short_video_analysis_store.DB_PATH = Path(self.tmp.name) / "short_video_analysis.sqlite3"
-        try:
-            short_video_analysis_store.init_db()
-            payload = RemakeExportPayload(
-                run_id="run-1",
-                task_id="run-1",
-                title="demo",
-                genre="knowledge",
-                target_genre="beauty",
-                markdown="# demo",
-                result={"summary": "source"},
-                rewritten={"script": "rewrite"},
-                export_type="cross_genre_rewrite",
-            )
+        short_video_analysis_store.init_db()
+        payload = RemakeExportPayload(
+            run_id="run-1",
+            task_id="run-1",
+            title="demo",
+            genre="knowledge",
+            target_genre="beauty",
+            markdown="# demo",
+            result={"summary": "source"},
+            rewritten={"script": "rewrite"},
+            export_type="cross_genre_rewrite",
+        )
 
-            response = save_remake_export_route(payload)
+        response = save_remake_export_route(payload)
 
-            self.assertEqual(response["status"], "ok")
-            self.assertEqual(response["export"]["target_genre"], "beauty")
-            self.assertEqual(response["export"]["rewritten"]["script"], "rewrite")
-        finally:
-            short_video_analysis_store.DB_PATH = old_db
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["export"]["target_genre"], "beauty")
+        self.assertEqual(response["export"]["rewritten"]["script"], "rewrite")
 
     def test_doubao_base64_validation_requires_direct_url(self):
         config = DoubaoAsrConfig(

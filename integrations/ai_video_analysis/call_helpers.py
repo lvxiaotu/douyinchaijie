@@ -18,6 +18,10 @@ def call_generate_text_hook(
         sig = None
     if sig is not None:
         params = sig.parameters
+        kwargs: dict[str, Any] = {"action": action}
+        if "image_paths" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
+            kwargs["image_paths"] = image_paths
         if "route" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
-            return hook(prompt, action=action, image_paths=image_paths, route=route)
-    return hook(prompt, action=action, image_paths=image_paths)
+            kwargs["route"] = route
+        return hook(prompt, **kwargs)
+    return hook(prompt, action=action)

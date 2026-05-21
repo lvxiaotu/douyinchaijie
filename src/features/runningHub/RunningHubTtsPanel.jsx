@@ -398,6 +398,15 @@ export function RunningHubTtsPanel() {
         activeStatus={activeTaskStatus}
         onChangeStatus={setActiveTaskStatus}
         onOpenTask={openTaskRecord}
+        onDeleteTask={async (taskItem) => {
+          try {
+            await deleteTask(taskItem.id);
+            await refreshRunningHubTtsTasks();
+            setSelectedTaskRecord((current) => (current?.task?.id === taskItem.id ? null : current));
+          } catch (err) {
+            setError(err.message || String(err));
+          }
+        }}
       />
       <TaskRecordModal
         record={selectedTaskRecord}

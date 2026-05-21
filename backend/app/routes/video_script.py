@@ -158,7 +158,7 @@ def delete_script(project_id: str) -> dict:
     deleted_draft_record = delete_jianying_draft(f"script-{project_id}")
     with connect() as connection:
         rows = connection.execute(
-            "SELECT id FROM tasks WHERE type = ? AND payload_json LIKE ?",
+            "SELECT id FROM tasks WHERE type = %s AND payload_json LIKE %s",
             ("video_script", f"%{project_id}%"),
         ).fetchall()
     deleted_tasks = []

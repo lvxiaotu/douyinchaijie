@@ -2,17 +2,14 @@
 
 import hashlib
 import json
-import sqlite3
 import time
 import re
 from collections import Counter
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = ROOT / "data" / "runtime" / "tiktok_targeting.sqlite3"
+from backend.app.postgres_store import ensure_columns, pg_connection, placeholders, run_once
+
 CHINA_TZ = timezone(timedelta(hours=8))
 
 GENRE_ALIASES = {
@@ -275,6 +272,11 @@ TARGET_SET_COLUMNS = {
     "keyword": "keyword TEXT NOT NULL DEFAULT ''",
     "filters_json": "filters_json TEXT NOT NULL DEFAULT '{}'",
     "video_strategy_json": "video_strategy_json TEXT NOT NULL DEFAULT '{}'",
+    "deleted_at": "deleted_at INTEGER",
+}
+
+TARGET_SET_USER_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
 }
 
 TARGET_VIDEO_COLUMNS = {
@@ -295,6 +297,7 @@ TARGET_VIDEO_COLUMNS = {
     "share_like_ratio": "share_like_ratio REAL",
     "engagement_score": "engagement_score REAL",
     "engagement_rate": "engagement_rate REAL",
+    "description": "description TEXT NOT NULL DEFAULT ''",
     "metrics_json": "metrics_json TEXT NOT NULL DEFAULT '{}'",
     "comment_snapshot_status": "comment_snapshot_status TEXT NOT NULL DEFAULT 'none'",
     "comment_snapshot_at": "comment_snapshot_at INTEGER",
@@ -306,12 +309,22 @@ TARGET_VIDEO_COLUMNS = {
     "analysis_task_id": "analysis_task_id TEXT NOT NULL DEFAULT ''",
     "analysis_result_json": "analysis_result_json TEXT NOT NULL DEFAULT '{}'",
     "analyzed_at": "analyzed_at INTEGER",
+    "deleted_at": "deleted_at INTEGER",
 }
 
 TARGET_TASK_COLUMNS = {
     "strategy": "strategy TEXT NOT NULL DEFAULT ''",
     "retry_count": "retry_count INTEGER NOT NULL DEFAULT 0",
     "synced_at": "synced_at INTEGER",
+    "deleted_at": "deleted_at INTEGER",
+}
+
+TARGET_VIDEO_COMMENT_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
+}
+
+TARGET_VIDEO_INTERACTION_INSIGHT_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
 }
 
 TARGET_USER_VIDEO_PAGE_COLUMNS = {
@@ -320,11 +333,11 @@ TARGET_USER_VIDEO_PAGE_COLUMNS = {
     "user_id": "user_id TEXT NOT NULL DEFAULT ''",
     "sec_user_id": "sec_user_id TEXT NOT NULL DEFAULT ''",
     "unique_id": "unique_id TEXT NOT NULL DEFAULT ''",
-    "max_cursor": "max_cursor INTEGER NOT NULL DEFAULT 0",
+    "max_cursor": "max_cursor BIGINT NOT NULL DEFAULT 0",
     "count": "count INTEGER NOT NULL DEFAULT 0",
     "sort_type": "sort_type INTEGER NOT NULL DEFAULT 0",
     "filter_type": "filter_type INTEGER",
-    "next_cursor": "next_cursor INTEGER",
+    "next_cursor": "next_cursor BIGINT",
     "has_more": "has_more INTEGER NOT NULL DEFAULT 0",
     "item_count": "item_count INTEGER NOT NULL DEFAULT 0",
     "request_json": "request_json TEXT NOT NULL DEFAULT '{}'",
@@ -371,25 +384,30 @@ TARGET_VIDEO_COMMENT_PAGE_COLUMNS = {
 }
 
 
-@contextmanager
-def connect() -> Iterator[sqlite3.Connection]:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH, timeout=30.0)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA busy_timeout = 30000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        yield connection
-        connection.commit()
-    finally:
-        connection.close()
+def connect():
+    return pg_connection("tiktok_target")
 
 
-def ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
-    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
-    for name, definition in columns.items():
-        if name not in existing:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+def cache_connection():
+    return pg_connection("tiktok_target_cache")
+
+
+def ensure_bigint_column(connection, table: str, column: str) -> None:
+    row = connection.execute(
+        """
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = %s
+          AND column_name = %s
+        """,
+        (table, column),
+    ).fetchone()
+    if row and str(row["data_type"] or "").lower() == "bigint":
+        return
+    connection.execute(
+        f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT USING COALESCE({column}, 0)::BIGINT"
+    )
 
 
 def _cache_key(payload: dict[str, Any]) -> str:
@@ -446,6 +464,13 @@ def build_video_comment_page_cache_key(
 
 
 def init_db() -> None:
+    def initialize() -> None:
+        _init_db()
+
+    run_once("tiktok_target_store", initialize)
+
+
+def _init_db() -> None:
     with connect() as connection:
         connection.execute(
             """
@@ -495,7 +520,7 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 aweme_id TEXT NOT NULL DEFAULT '',
-                desc TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
                 cover_url TEXT NOT NULL DEFAULT '',
                 play_url TEXT NOT NULL DEFAULT '',
                 download_url TEXT NOT NULL DEFAULT '',
@@ -547,6 +572,7 @@ def init_db() -> None:
                 source_json TEXT NOT NULL DEFAULT '{}',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
+                deleted_at INTEGER,
                 UNIQUE(video_id, comment_id)
             )
             """
@@ -568,10 +594,38 @@ def init_db() -> None:
                 raw_ai_json TEXT NOT NULL DEFAULT '{}',
                 analyzed_at INTEGER,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                deleted_at INTEGER
             )
             """
         )
+        ensure_columns(connection, "tiktok_target_users", TARGET_USER_COLUMNS)
+        ensure_columns(connection, "tiktok_target_sets", TARGET_SET_COLUMNS)
+        ensure_columns(connection, "tiktok_target_set_users", TARGET_SET_USER_COLUMNS)
+        ensure_columns(connection, "tiktok_target_videos", TARGET_VIDEO_COLUMNS)
+        ensure_columns(connection, "tiktok_target_tasks", TARGET_TASK_COLUMNS)
+        ensure_columns(connection, "tiktok_target_video_comments", TARGET_VIDEO_COMMENT_COLUMNS)
+        ensure_columns(connection, "tiktok_target_video_interaction_insights", TARGET_VIDEO_INTERACTION_INSIGHT_COLUMNS)
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_users_keyword ON tiktok_target_users(keyword, status)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_user ON tiktok_target_videos(user_id, selected)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_set ON tiktok_target_videos(set_id, selected)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_metrics ON tiktok_target_videos(set_id, engagement_score DESC, digg_count DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_tasks_status ON tiktok_target_tasks(status, created_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_tasks_video ON tiktok_target_tasks(video_id, status)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_comments_video ON tiktok_target_video_comments(video_id, level, rank_index)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_comments_parent ON tiktok_target_video_comments(video_id, parent_comment_id)")
+        connection.execute(
+            """
+            UPDATE tiktok_target_users
+            SET recent_update_at = COALESCE(NULLIF(recent_update_at, 0), NULLIF(searched_at, 0), created_at),
+                last_post_at = COALESCE(NULLIF(last_post_at, 0), NULLIF(searched_at, 0), created_at)
+            WHERE recent_update_at IS NULL
+               OR recent_update_at = 0
+               OR last_post_at IS NULL
+               OR last_post_at = 0
+            """
+        )
+    with cache_connection() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS tiktok_target_user_video_pages (
@@ -581,11 +635,11 @@ def init_db() -> None:
                 user_id TEXT NOT NULL DEFAULT '',
                 sec_user_id TEXT NOT NULL DEFAULT '',
                 unique_id TEXT NOT NULL DEFAULT '',
-                max_cursor INTEGER NOT NULL DEFAULT 0,
+                max_cursor BIGINT NOT NULL DEFAULT 0,
                 count INTEGER NOT NULL DEFAULT 0,
                 sort_type INTEGER NOT NULL DEFAULT 0,
                 filter_type INTEGER,
-                next_cursor INTEGER,
+                next_cursor BIGINT,
                 has_more INTEGER NOT NULL DEFAULT 0,
                 item_count INTEGER NOT NULL DEFAULT 0,
                 request_json TEXT NOT NULL DEFAULT '{}',
@@ -599,6 +653,8 @@ def init_db() -> None:
             )
             """
         )
+        ensure_bigint_column(connection, "tiktok_target_user_video_pages", "max_cursor")
+        ensure_bigint_column(connection, "tiktok_target_user_video_pages", "next_cursor")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS tiktok_target_user_search_pages (
@@ -646,21 +702,9 @@ def init_db() -> None:
             )
             """
         )
-        ensure_columns(connection, "tiktok_target_users", TARGET_USER_COLUMNS)
-        ensure_columns(connection, "tiktok_target_sets", TARGET_SET_COLUMNS)
-        ensure_columns(connection, "tiktok_target_videos", TARGET_VIDEO_COLUMNS)
-        ensure_columns(connection, "tiktok_target_tasks", TARGET_TASK_COLUMNS)
         ensure_columns(connection, "tiktok_target_user_video_pages", TARGET_USER_VIDEO_PAGE_COLUMNS)
         ensure_columns(connection, "tiktok_target_user_search_pages", TARGET_USER_SEARCH_PAGE_COLUMNS)
         ensure_columns(connection, "tiktok_target_video_comment_pages", TARGET_VIDEO_COMMENT_PAGE_COLUMNS)
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_users_keyword ON tiktok_target_users(keyword, status)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_user ON tiktok_target_videos(user_id, selected)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_set ON tiktok_target_videos(set_id, selected)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_metrics ON tiktok_target_videos(set_id, engagement_score DESC, digg_count DESC)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_tasks_status ON tiktok_target_tasks(status, created_at)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_tasks_video ON tiktok_target_tasks(video_id, status)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_comments_video ON tiktok_target_video_comments(video_id, level, rank_index)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_comments_parent ON tiktok_target_video_comments(video_id, parent_comment_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_user ON tiktok_target_user_video_pages(user_id, sec_user_id, unique_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_cache ON tiktok_target_user_video_pages(cache_key)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_cursor ON tiktok_target_user_video_pages(user_id, max_cursor, count)")
@@ -668,17 +712,6 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_search_pages_keyword ON tiktok_target_user_search_pages(keyword, cursor)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_video_comment_pages_cache ON tiktok_target_video_comment_pages(cache_key)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_video_comment_pages_video ON tiktok_target_video_comment_pages(video_id, page_kind, cursor)")
-        connection.execute(
-            """
-            UPDATE tiktok_target_users
-            SET recent_update_at = COALESCE(NULLIF(recent_update_at, 0), NULLIF(searched_at, 0), created_at),
-                last_post_at = COALESCE(NULLIF(last_post_at, 0), NULLIF(searched_at, 0), created_at)
-            WHERE recent_update_at IS NULL
-               OR recent_update_at = 0
-               OR last_post_at IS NULL
-               OR last_post_at = 0
-            """
-        )
 
 
 def now() -> int:
@@ -871,7 +904,7 @@ def derive_video_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     return metrics
 
 
-def row_to_target_user(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_target_user(row: Any) -> dict[str, Any]:
     user = dict(row)
     user["verified"] = bool(user.get("verified"))
     user["is_private"] = bool(user.get("is_private"))
@@ -879,15 +912,18 @@ def row_to_target_user(row: sqlite3.Row) -> dict[str, Any]:
     return user
 
 
-def row_to_target_set(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_target_set(row: Any) -> dict[str, Any]:
     target_set = dict(row)
+    target_set["deleted"] = bool(target_set.get("deleted_at"))
     target_set["filters"] = load_json(target_set.pop("filters_json", "{}"), {})
     target_set["video_strategy"] = load_json(target_set.pop("video_strategy_json", "{}"), {})
     return target_set
 
 
-def row_to_target_video(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_target_video(row: Any) -> dict[str, Any]:
     video = dict(row)
+    video["deleted"] = bool(video.get("deleted_at"))
+    video["desc"] = video.pop("description", video.get("desc", ""))
     video["selected"] = bool(video.get("selected"))
     video["is_top"] = bool(video.get("is_top"))
     video["source_json"] = load_json(video.get("source_json"), {})
@@ -896,13 +932,14 @@ def row_to_target_video(row: sqlite3.Row) -> dict[str, Any]:
     return video
 
 
-def row_to_target_task(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_target_task(row: Any) -> dict[str, Any]:
     task = dict(row)
+    task["deleted"] = bool(task.get("deleted_at"))
     task["result"] = load_json(task.pop("result_json", "{}"), {})
     return task
 
 
-def row_to_target_user_video_page(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_target_user_video_page(row: Any) -> dict[str, Any]:
     page = dict(row)
     page["request"] = load_json(page.pop("request_json", "{}"), {})
     page["items"] = load_json(page.pop("items_json", "[]"), [])
@@ -913,7 +950,7 @@ def row_to_target_user_video_page(row: sqlite3.Row) -> dict[str, Any]:
     return page
 
 
-def row_to_target_user_search_page(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_target_user_search_page(row: Any) -> dict[str, Any]:
     page = dict(row)
     page["request"] = load_json(page.pop("request_json", "{}"), {})
     page["items"] = load_json(page.pop("items_json", "[]"), [])
@@ -923,7 +960,7 @@ def row_to_target_user_search_page(row: sqlite3.Row) -> dict[str, Any]:
     return page
 
 
-def row_to_target_video_comment_page(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_target_video_comment_page(row: Any) -> dict[str, Any]:
     page = dict(row)
     page["request"] = load_json(page.pop("request_json", "{}"), {})
     page["items"] = load_json(page.pop("items_json", "[]"), [])
@@ -933,16 +970,18 @@ def row_to_target_video_comment_page(row: sqlite3.Row) -> dict[str, Any]:
     return page
 
 
-def row_to_target_comment(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_target_comment(row: Any) -> dict[str, Any]:
     comment = dict(row)
+    comment["deleted"] = bool(comment.get("deleted_at"))
     comment["is_pinned"] = bool(comment.get("is_pinned"))
     comment["is_author"] = bool(comment.get("is_author"))
     comment["source_json"] = load_json(comment.get("source_json"), {})
     return comment
 
 
-def row_to_interaction_insights(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_interaction_insights(row: Any) -> dict[str, Any]:
     insights = dict(row)
+    insights["deleted"] = bool(insights.get("deleted_at"))
     for key, fallback in {
         "keyword_counts_json": {},
         "symbol_counts_json": {},
@@ -1095,7 +1134,7 @@ def _count_keywords(texts: list[str], *, genre: str = "") -> dict[str, int]:
 def _count_symbols(texts: list[str]) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for text in texts:
-        for symbol in re.findall(r"[#@\uFF01!\uFF1F?\u2764\u2665\U0001F495\U0001F496\u2728\U0001F64F]+", text):
+        for symbol in re.findall(r"[#@\uFF01!\uFF1F%s\u2764\u2665\U0001F495\U0001F496\u2728\U0001F64F]+", text):
             counts[symbol] += 1
     return dict(counts.most_common(30))
 
@@ -1237,7 +1276,7 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                 id, keyword, sec_user_id, unique_id, nickname, follower_count, like_count,
                 recent_update_at, verified, status, source_json, created_at, updated_at,
                 avatar_url, signature, aweme_count, following_count, is_private, last_post_at, searched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 keyword = excluded.keyword,
                 sec_user_id = excluded.sec_user_id,
@@ -1287,7 +1326,7 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 def get_target_user(user_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM tiktok_target_users WHERE id = ?", (user_id,)).fetchone()
+        row = connection.execute("SELECT * FROM tiktok_target_users WHERE id = %s", (user_id,)).fetchone()
     return row_to_target_user(row) if row else None
 
 
@@ -1301,13 +1340,13 @@ def get_target_user_by_identifiers(
     conditions = []
     values: list[Any] = []
     if user_id:
-        conditions.append("id = ?")
+        conditions.append("id = %s")
         values.append(user_id)
     if sec_user_id:
-        conditions.append("sec_user_id = ?")
+        conditions.append("sec_user_id = %s")
         values.append(sec_user_id)
     if unique_id:
-        conditions.append("unique_id = ?")
+        conditions.append("unique_id = %s")
         values.append(unique_id)
     if not conditions:
         return None
@@ -1320,9 +1359,9 @@ def get_target_user_by_identifiers(
 
 def get_target_user_search_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
     init_db()
-    with connect() as connection:
+    with cache_connection() as connection:
         row = connection.execute(
-            "SELECT * FROM tiktok_target_user_search_pages WHERE cache_key = ?",
+            "SELECT * FROM tiktok_target_user_search_pages WHERE cache_key = %s",
             (cache_key,),
         ).fetchone()
     return row_to_target_user_search_page(row) if row else None
@@ -1382,14 +1421,14 @@ def upsert_target_user_search_page(
         douyin_user_fans=douyin_user_fans,
         douyin_user_type=douyin_user_type,
     )
-    with connect() as connection:
+    with cache_connection() as connection:
         connection.execute(
             """
             INSERT INTO tiktok_target_user_search_pages (
                 id, cache_key, source, keyword, cursor, count, search_id, douyin_user_fans,
                 douyin_user_type, request_json, items_json, raw_json, pagination_json,
                 normalized_json, fetched_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(cache_key) DO UPDATE SET
                 source = excluded.source,
                 keyword = excluded.keyword,
@@ -1431,9 +1470,9 @@ def upsert_target_user_search_page(
 
 def get_target_video_comment_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
     init_db()
-    with connect() as connection:
+    with cache_connection() as connection:
         row = connection.execute(
-            "SELECT * FROM tiktok_target_video_comment_pages WHERE cache_key = ?",
+            "SELECT * FROM tiktok_target_video_comment_pages WHERE cache_key = %s",
             (cache_key,),
         ).fetchone()
     return row_to_target_video_comment_page(row) if row else None
@@ -1497,14 +1536,14 @@ def upsert_target_video_comment_page(
         cursor=cursor,
         count=count,
     )
-    with connect() as connection:
+    with cache_connection() as connection:
         connection.execute(
             """
             INSERT INTO tiktok_target_video_comment_pages (
                 id, cache_key, source, video_id, aweme_id, item_id, comment_id, page_kind,
                 cursor, count, request_json, items_json, raw_json, pagination_json,
                 normalized_json, fetched_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(cache_key) DO UPDATE SET
                 source = excluded.source,
                 video_id = excluded.video_id,
@@ -1548,9 +1587,9 @@ def upsert_target_video_comment_page(
 
 def get_target_user_video_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
     init_db()
-    with connect() as connection:
+    with cache_connection() as connection:
         row = connection.execute(
-            "SELECT * FROM tiktok_target_user_video_pages WHERE cache_key = ?",
+            "SELECT * FROM tiktok_target_user_video_pages WHERE cache_key = %s",
             (cache_key,),
         ).fetchone()
     return row_to_target_user_video_page(row) if row else None
@@ -1616,14 +1655,14 @@ def upsert_target_user_video_page(
         sort_type=sort_type,
         filter_type=filter_type,
     )
-    with connect() as connection:
+    with cache_connection() as connection:
         connection.execute(
             """
             INSERT INTO tiktok_target_user_video_pages (
                 id, cache_key, source, user_id, sec_user_id, unique_id, max_cursor, count,
                 sort_type, filter_type, next_cursor, has_more, item_count, request_json, items_json,
                 raw_json, pagination_json, normalized_json, fetched_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(cache_key) DO UPDATE SET
                 source = excluded.source,
                 user_id = excluded.user_id,
@@ -1675,17 +1714,21 @@ def list_target_users(status: str | None = None, limit: int = 200, set_id: str |
     init_db()
     values: list[Any] = []
     if set_id:
-        query = """
-            SELECT u.*
-            FROM tiktok_target_users u
-            JOIN tiktok_target_set_users su ON su.user_id = u.id
-            WHERE su.set_id = ?
-        """
-        values.append(set_id)
+        with connect() as connection:
+            link_rows = connection.execute(
+            "SELECT user_id FROM tiktok_target_set_users WHERE set_id = %s AND deleted_at IS NULL ORDER BY created_at DESC LIMIT %s",
+                (set_id, limit),
+            ).fetchall()
+        user_ids = [str(row["user_id"]) for row in link_rows]
+        if not user_ids:
+            return []
+        id_placeholders = placeholders(len(user_ids))
+        query = f"SELECT * FROM tiktok_target_users WHERE id IN ({id_placeholders})"
+        values.extend(user_ids)
         if status:
-            query += " AND u.status = ?"
+            query += " AND status = %s"
             values.append(status)
-        query += " ORDER BY u.updated_at DESC LIMIT ?"
+        query += " ORDER BY updated_at DESC LIMIT %s"
         values.append(limit)
         with connect() as connection:
             rows = connection.execute(query, values).fetchall()
@@ -1693,9 +1736,9 @@ def list_target_users(status: str | None = None, limit: int = 200, set_id: str |
 
     query = "SELECT * FROM tiktok_target_users"
     if status:
-        query += " WHERE status = ?"
+        query += " WHERE status = %s"
         values.append(status)
-    query += " ORDER BY updated_at DESC LIMIT ?"
+    query += " ORDER BY updated_at DESC LIMIT %s"
     values.append(limit)
     with connect() as connection:
         rows = connection.execute(query, values).fetchall()
@@ -1719,13 +1762,15 @@ def create_target_set(
             INSERT INTO tiktok_target_sets (
                 id, name, note, status, created_at, updated_at, keyword, filters_json, video_strategy_json
             )
-            VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, 'draft', %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 note = excluded.note,
                 keyword = excluded.keyword,
                 filters_json = excluded.filters_json,
                 video_strategy_json = excluded.video_strategy_json,
+                status = CASE WHEN tiktok_target_sets.status = 'deleted' THEN excluded.status ELSE tiktok_target_sets.status END,
+                deleted_at = NULL,
                 updated_at = excluded.updated_at
             """,
             (
@@ -1745,7 +1790,7 @@ def create_target_set(
 def get_target_set(set_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM tiktok_target_sets WHERE id = ?", (set_id,)).fetchone()
+        row = connection.execute("SELECT * FROM tiktok_target_sets WHERE id = %s AND deleted_at IS NULL", (set_id,)).fetchone()
     return row_to_target_set(row) if row else None
 
 
@@ -1774,10 +1819,10 @@ def update_target_set(
         updates["video_strategy_json"] = json.dumps(video_strategy, ensure_ascii=False)
     if status is not None:
         updates["status"] = status
-    assignments = ", ".join(f"{key} = ?" for key in updates)
+    assignments = ", ".join(f"{key} = %s" for key in updates)
     values = list(updates.values()) + [set_id]
     with connect() as connection:
-        cursor = connection.execute(f"UPDATE tiktok_target_sets SET {assignments} WHERE id = ?", values)
+        cursor = connection.execute(f"UPDATE tiktok_target_sets SET {assignments} WHERE id = %s", values)
     if cursor.rowcount == 0:
         return None
     return get_target_set(set_id)
@@ -1785,51 +1830,96 @@ def update_target_set(
 
 def delete_target_set(set_id: str) -> bool:
     init_db()
+    deleted_at = now()
     with connect() as connection:
-        video_rows = connection.execute("SELECT id FROM tiktok_target_videos WHERE set_id = ?", (set_id,)).fetchall()
-        video_ids = [row["id"] for row in video_rows]
-        for video_id in video_ids:
-            connection.execute("DELETE FROM tiktok_target_video_comments WHERE video_id = ?", (video_id,))
-            connection.execute("DELETE FROM tiktok_target_video_interaction_insights WHERE video_id = ?", (video_id,))
-        connection.execute("DELETE FROM tiktok_target_set_users WHERE set_id = ?", (set_id,))
-        connection.execute("DELETE FROM tiktok_target_tasks WHERE set_id = ?", (set_id,))
-        connection.execute("DELETE FROM tiktok_target_videos WHERE set_id = ?", (set_id,))
-        cursor = connection.execute("DELETE FROM tiktok_target_sets WHERE id = ?", (set_id,))
+        connection.execute(
+            """
+            UPDATE tiktok_target_video_comments
+            SET deleted_at = %s, updated_at = %s
+            WHERE deleted_at IS NULL
+              AND video_id IN (SELECT id FROM tiktok_target_videos WHERE set_id = %s)
+            """,
+            (deleted_at, deleted_at, set_id),
+        )
+        connection.execute(
+            """
+            UPDATE tiktok_target_video_interaction_insights
+            SET deleted_at = %s, updated_at = %s
+            WHERE deleted_at IS NULL
+              AND video_id IN (SELECT id FROM tiktok_target_videos WHERE set_id = %s)
+            """,
+            (deleted_at, deleted_at, set_id),
+        )
+        connection.execute(
+            "UPDATE tiktok_target_tasks SET deleted_at = %s, status = 'deleted', updated_at = %s WHERE set_id = %s AND deleted_at IS NULL",
+            (deleted_at, deleted_at, set_id),
+        )
+        connection.execute(
+            "UPDATE tiktok_target_videos SET deleted_at = %s, updated_at = %s WHERE set_id = %s AND deleted_at IS NULL",
+            (deleted_at, deleted_at, set_id),
+        )
+        cursor = connection.execute(
+            "UPDATE tiktok_target_sets SET deleted_at = %s, status = 'deleted', updated_at = %s WHERE id = %s AND deleted_at IS NULL",
+            (deleted_at, deleted_at, set_id),
+        )
     return cursor.rowcount > 0
 
 
 def list_target_sets(limit: int = 100) -> list[dict[str, Any]]:
     init_db()
     with connect() as connection:
-        rows = connection.execute(
-            """
-            WITH user_counts AS (
-                SELECT set_id, COUNT(*) AS user_count
-                FROM tiktok_target_set_users
-                GROUP BY set_id
-            ),
-            video_counts AS (
-                SELECT
-                    set_id,
-                    COUNT(*) AS video_count,
-                    SUM(CASE WHEN analysis_status = 'done' THEN 1 ELSE 0 END) AS analyzed_count
-                FROM tiktok_target_videos
-                GROUP BY set_id
-            )
-            SELECT
-                s.*,
-                COALESCE(u.user_count, 0) AS user_count,
-                COALESCE(v.video_count, 0) AS video_count,
-                COALESCE(v.analyzed_count, 0) AS analyzed_count
-            FROM tiktok_target_sets s
-            LEFT JOIN user_counts u ON u.set_id = s.id
-            LEFT JOIN video_counts v ON v.set_id = s.id
-            ORDER BY s.updated_at DESC
-            LIMIT ?
-            """,
+        set_rows = connection.execute(
+            "SELECT * FROM tiktok_target_sets WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
-    return [row_to_target_set(row) for row in rows]
+    if not set_rows:
+        return []
+
+    set_ids = [str(row["id"]) for row in set_rows]
+    id_placeholders = placeholders(len(set_ids))
+    with connect() as connection:
+        user_count_rows = connection.execute(
+            f"""
+            SELECT set_id, COUNT(*) AS user_count
+            FROM tiktok_target_set_users
+            WHERE set_id IN ({id_placeholders})
+              AND deleted_at IS NULL
+            GROUP BY set_id
+            """,
+            set_ids,
+        ).fetchall()
+        video_count_rows = connection.execute(
+            f"""
+            SELECT
+                set_id,
+                COUNT(*) AS video_count,
+                SUM(CASE WHEN analysis_status = 'done' THEN 1 ELSE 0 END) AS analyzed_count
+            FROM tiktok_target_videos
+            WHERE set_id IN ({id_placeholders})
+              AND deleted_at IS NULL
+            GROUP BY set_id
+            """,
+            set_ids,
+        ).fetchall()
+
+    user_counts = {str(row["set_id"]): int(row["user_count"] or 0) for row in user_count_rows}
+    video_counts = {
+        str(row["set_id"]): {
+            "video_count": int(row["video_count"] or 0),
+            "analyzed_count": int(row["analyzed_count"] or 0),
+        }
+        for row in video_count_rows
+    }
+    result = []
+    for row in set_rows:
+        item = dict(row)
+        set_id = str(item["id"])
+        counts = video_counts.get(set_id, {})
+        item["user_count"] = user_counts.get(set_id, 0)
+        item["video_count"] = counts.get("video_count", 0)
+        item["analyzed_count"] = counts.get("analyzed_count", 0)
+        result.append(row_to_target_set(item))
+    return result
 
 
 def get_target_set_detail(set_id: str) -> dict[str, Any] | None:
@@ -1847,7 +1937,11 @@ def add_user_to_target_set(set_id: str, user_id: str) -> dict[str, Any]:
     current = now()
     with connect() as connection:
         connection.execute(
-            "INSERT OR IGNORE INTO tiktok_target_set_users (id, set_id, user_id, created_at) VALUES (?, ?, ?, ?)",
+            """
+            INSERT INTO tiktok_target_set_users (id, set_id, user_id, created_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT(set_id, user_id) DO UPDATE SET deleted_at = NULL
+            """,
             (f'{set_id}:{user_id}', set_id, user_id, current),
         )
     return {"set_id": set_id, "user_id": user_id}
@@ -1855,10 +1949,11 @@ def add_user_to_target_set(set_id: str, user_id: str) -> dict[str, Any]:
 
 def remove_user_from_target_set(set_id: str, user_id: str) -> bool:
     init_db()
+    current = now()
     with connect() as connection:
         cursor = connection.execute(
-            "DELETE FROM tiktok_target_set_users WHERE set_id = ? AND user_id = ?",
-            (set_id, user_id),
+            "UPDATE tiktok_target_set_users SET deleted_at = %s WHERE set_id = %s AND user_id = %s AND deleted_at IS NULL",
+            (current, set_id, user_id),
         )
     return cursor.rowcount > 0
 
@@ -1899,18 +1994,18 @@ def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) ->
     with connect() as connection:
         connection.execute(
             """
-            INSERT INTO tiktok_target_videos (
-                id, user_id, aweme_id, desc, cover_url, play_url, download_url, source_json,
+            INSERT INTO tiktok_target_videos AS target (
+                id, user_id, aweme_id, description, cover_url, play_url, download_url, source_json,
                 selected, created_at, updated_at, set_id, create_time, digg_count, comment_count,
                 share_count, collect_count, play_count, publish_hour, publish_weekday, publish_date,
                 publish_hour_bucket, like_collect_ratio, collect_like_ratio, comment_like_ratio,
                 share_like_ratio, engagement_score, engagement_rate, metrics_json, is_top,
                 selection_strategy, analysis_status, analysis_task_id, analysis_result_json, analyzed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 user_id = excluded.user_id,
                 aweme_id = excluded.aweme_id,
-                desc = excluded.desc,
+                description = excluded.description,
                 cover_url = excluded.cover_url,
                 play_url = excluded.play_url,
                 download_url = excluded.download_url,
@@ -1936,14 +2031,15 @@ def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) ->
                 engagement_rate = excluded.engagement_rate,
                 metrics_json = excluded.metrics_json,
                 is_top = excluded.is_top,
-                selection_strategy = COALESCE(NULLIF(excluded.selection_strategy, ''), selection_strategy),
-                analysis_status = COALESCE(NULLIF(excluded.analysis_status, ''), analysis_status),
-                analysis_task_id = COALESCE(NULLIF(excluded.analysis_task_id, ''), analysis_task_id),
+                selection_strategy = COALESCE(NULLIF(excluded.selection_strategy, ''), target.selection_strategy),
+                analysis_status = COALESCE(NULLIF(excluded.analysis_status, ''), target.analysis_status),
+                analysis_task_id = COALESCE(NULLIF(excluded.analysis_task_id, ''), target.analysis_task_id),
                 analysis_result_json = CASE
                     WHEN excluded.analysis_result_json IS NOT NULL AND excluded.analysis_result_json != '{}' THEN excluded.analysis_result_json
-                    ELSE analysis_result_json
+                    ELSE target.analysis_result_json
                 END,
-                analyzed_at = COALESCE(excluded.analyzed_at, analyzed_at)
+                analyzed_at = COALESCE(excluded.analyzed_at, target.analyzed_at),
+                deleted_at = NULL
             """,
             (
                 video_id,
@@ -1989,7 +2085,7 @@ def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) ->
 def get_target_video(video_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM tiktok_target_videos WHERE id = ?", (video_id,)).fetchone()
+        row = connection.execute("SELECT * FROM tiktok_target_videos WHERE id = %s AND deleted_at IS NULL", (video_id,)).fetchone()
     return row_to_target_video(row) if row else None
 
 
@@ -1999,8 +2095,9 @@ def resolve_target_video(video_id_or_aweme_id: str) -> dict[str, Any] | None:
         row = connection.execute(
             """
             SELECT * FROM tiktok_target_videos
-            WHERE id = ? OR aweme_id = ?
-            ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, updated_at DESC
+            WHERE (id = %s OR aweme_id = %s)
+              AND deleted_at IS NULL
+            ORDER BY CASE WHEN id = %s THEN 0 ELSE 1 END, updated_at DESC
             LIMIT 1
             """,
             (video_id_or_aweme_id, video_id_or_aweme_id, video_id_or_aweme_id),
@@ -2020,22 +2117,23 @@ def list_target_videos(
     conditions = []
     values: list[Any] = []
     if set_id:
-        conditions.append("set_id = ?")
+        conditions.append("set_id = %s")
         values.append(set_id)
     if user_id:
-        conditions.append("user_id = ?")
+        conditions.append("user_id = %s")
         values.append(user_id)
     if selected is not None:
-        conditions.append("selected = ?")
+        conditions.append("selected = %s")
         values.append(1 if selected else 0)
     if analysis_status:
-        conditions.append("analysis_status = ?")
+        conditions.append("analysis_status = %s")
         values.append(analysis_status)
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    conditions.append("deleted_at IS NULL")
+    where = f"WHERE {' AND '.join(conditions)}"
     values.append(limit)
     with connect() as connection:
         rows = connection.execute(
-            f"SELECT * FROM tiktok_target_videos {where} ORDER BY selected DESC, digg_count DESC, create_time DESC LIMIT ?",
+            f"SELECT * FROM tiktok_target_videos {where} ORDER BY selected DESC, digg_count DESC, create_time DESC LIMIT %s",
             values,
         ).fetchall()
     return [row_to_target_video(row) for row in rows]
@@ -2072,7 +2170,10 @@ def replace_target_video_comments(
     genre = infer_interaction_genre(video, comments=normalized)
     insights = build_interaction_insights(video_id, aweme_id, normalized, raw_ai=raw_ai, genre=genre)
     with connect() as connection:
-        connection.execute("DELETE FROM tiktok_target_video_comments WHERE video_id = ?", (video_id,))
+        connection.execute(
+            "UPDATE tiktok_target_video_comments SET deleted_at = %s, updated_at = %s WHERE video_id = %s AND deleted_at IS NULL",
+            (current, current, video_id),
+        )
         for item in normalized:
             connection.execute(
                 """
@@ -2080,8 +2181,8 @@ def replace_target_video_comments(
                     id, video_id, aweme_id, comment_id, parent_comment_id, reply_to_comment_id,
                     user_id, sec_uid, unique_id, nickname, text, digg_count, reply_count,
                     create_time, is_pinned, is_author, rank_index, level, source_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, deleted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(video_id, comment_id) DO UPDATE SET
                     aweme_id = excluded.aweme_id,
                     parent_comment_id = excluded.parent_comment_id,
@@ -2099,6 +2200,7 @@ def replace_target_video_comments(
                     rank_index = excluded.rank_index,
                     level = excluded.level,
                     source_json = excluded.source_json,
+                    deleted_at = NULL,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -2123,6 +2225,7 @@ def replace_target_video_comments(
                     json.dumps(item.get("source_json") or item, ensure_ascii=False),
                     current,
                     current,
+                    None,
                 ),
             )
         connection.execute(
@@ -2132,7 +2235,7 @@ def replace_target_video_comments(
                 keyword_counts_json, symbol_counts_json, emotion_profile_json,
                 creator_reply_tactics_json, top_comments_json, pinned_comments_json,
                 author_replies_json, raw_ai_json, analyzed_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(video_id) DO UPDATE SET
                 aweme_id = excluded.aweme_id,
                 comment_count_saved = excluded.comment_count_saved,
@@ -2146,6 +2249,7 @@ def replace_target_video_comments(
                 author_replies_json = excluded.author_replies_json,
                 raw_ai_json = excluded.raw_ai_json,
                 analyzed_at = excluded.analyzed_at,
+                deleted_at = NULL,
                 updated_at = excluded.updated_at
             """,
             (
@@ -2169,12 +2273,12 @@ def replace_target_video_comments(
         connection.execute(
             """
             UPDATE tiktok_target_videos
-            SET comment_snapshot_status = ?,
-                comment_snapshot_at = ?,
-                comment_saved_count = ?,
-                reply_saved_count = ?,
-                updated_at = ?
-            WHERE id = ?
+            SET comment_snapshot_status = %s,
+                comment_snapshot_at = %s,
+                comment_saved_count = %s,
+                reply_saved_count = %s,
+                updated_at = %s
+            WHERE id = %s
             """,
             (
                 status,
@@ -2190,11 +2294,11 @@ def replace_target_video_comments(
 
 def get_target_video_comments(video_id: str, *, include_replies: bool = True, limit: int = 500) -> list[dict[str, Any]]:
     init_db()
-    query = "SELECT * FROM tiktok_target_video_comments WHERE video_id = ?"
+    query = "SELECT * FROM tiktok_target_video_comments WHERE video_id = %s AND deleted_at IS NULL"
     values: list[Any] = [video_id]
     if not include_replies:
         query += " AND level = 1"
-    query += " ORDER BY level ASC, rank_index ASC, digg_count DESC LIMIT ?"
+    query += " ORDER BY level ASC, rank_index ASC, digg_count DESC LIMIT %s"
     values.append(limit)
     with connect() as connection:
         rows = connection.execute(query, values).fetchall()
@@ -2205,7 +2309,7 @@ def get_target_video_interaction_insights(video_id: str) -> dict[str, Any] | Non
     init_db()
     with connect() as connection:
         row = connection.execute(
-            "SELECT * FROM tiktok_target_video_interaction_insights WHERE video_id = ?",
+            "SELECT * FROM tiktok_target_video_interaction_insights WHERE video_id = %s AND deleted_at IS NULL",
             (video_id,),
         ).fetchone()
     return row_to_interaction_insights(row) if row else None
@@ -2232,11 +2336,11 @@ def mark_target_video_comment_snapshot(video_id: str, status: str, error: str = 
         cursor = connection.execute(
             """
             UPDATE tiktok_target_videos
-            SET comment_snapshot_status = ?,
-                comment_snapshot_at = ?,
-                metrics_json = json_set(COALESCE(NULLIF(metrics_json, ''), '{}'), '$.comment_snapshot_error', ?),
-                updated_at = ?
-            WHERE id = ?
+            SET comment_snapshot_status = %s,
+                comment_snapshot_at = %s,
+                metrics_json = jsonb_set(COALESCE(NULLIF(metrics_json, '')::jsonb, '{}'::jsonb), '{comment_snapshot_error}', to_jsonb(%s::text), true)::text,
+                updated_at = %s
+            WHERE id = %s
             """,
             (status, current, error, current, video_id),
         )
@@ -2260,12 +2364,12 @@ def update_target_video_analysis(
         cursor = connection.execute(
             """
             UPDATE tiktok_target_videos
-            SET analysis_status = ?,
-                analysis_task_id = COALESCE(NULLIF(?, ''), analysis_task_id),
-                analysis_result_json = ?,
-                analyzed_at = COALESCE(?, analyzed_at),
-                updated_at = ?
-            WHERE id = ?
+            SET analysis_status = %s,
+                analysis_task_id = COALESCE(NULLIF(%s, ''), analysis_task_id),
+                analysis_result_json = %s,
+                analyzed_at = COALESCE(%s, analyzed_at),
+                updated_at = %s
+            WHERE id = %s
             """,
             (
                 status,
@@ -2285,7 +2389,10 @@ def clear_target_video_analysis(video_id: str) -> dict[str, Any] | None:
     init_db()
     current = now()
     with connect() as connection:
-        task_cursor = connection.execute("DELETE FROM tiktok_target_tasks WHERE video_id = ?", (video_id,))
+        task_cursor = connection.execute(
+            "UPDATE tiktok_target_tasks SET deleted_at = %s, status = 'deleted', updated_at = %s WHERE video_id = %s AND deleted_at IS NULL",
+            (current, current, video_id),
+        )
         cursor = connection.execute(
             """
             UPDATE tiktok_target_videos
@@ -2293,8 +2400,8 @@ def clear_target_video_analysis(video_id: str) -> dict[str, Any] | None:
                 analysis_task_id = '',
                 analysis_result_json = '{}',
                 analyzed_at = NULL,
-                updated_at = ?
-            WHERE id = ?
+                updated_at = %s
+            WHERE id = %s
             """,
             (current, video_id),
         )
@@ -2326,7 +2433,7 @@ def create_target_task(
                 id, set_id, user_id, video_id, task_id, status, result_json, error,
                 created_at, updated_at, strategy, retry_count, synced_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, '{}', '', ?, ?, ?, 0, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, '{}', '', %s, %s, %s, 0, %s)
             ON CONFLICT(id) DO UPDATE SET
                 set_id = excluded.set_id,
                 user_id = excluded.user_id,
@@ -2334,6 +2441,7 @@ def create_target_task(
                 task_id = excluded.task_id,
                 status = excluded.status,
                 strategy = excluded.strategy,
+                deleted_at = NULL,
                 updated_at = excluded.updated_at,
                 synced_at = excluded.synced_at
             """,
@@ -2346,17 +2454,17 @@ def create_target_task(
 def get_target_task(target_task_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM tiktok_target_tasks WHERE id = ?", (target_task_id,)).fetchone()
+        row = connection.execute("SELECT * FROM tiktok_target_tasks WHERE id = %s AND deleted_at IS NULL", (target_task_id,)).fetchone()
     return row_to_target_task(row) if row else None
 
 
 def find_target_task_for_video(video_id: str, statuses: set[str] | None = None) -> dict[str, Any] | None:
     init_db()
     values: list[Any] = [video_id]
-    query = "SELECT * FROM tiktok_target_tasks WHERE video_id = ?"
+    query = "SELECT * FROM tiktok_target_tasks WHERE video_id = %s AND deleted_at IS NULL"
     if statuses:
-        placeholders = ",".join("?" for _ in statuses)
-        query += f" AND status IN ({placeholders})"
+        status_placeholders = placeholders(len(statuses))
+        query += f" AND status IN ({status_placeholders})"
         values.extend(sorted(statuses))
     query += " ORDER BY created_at DESC LIMIT 1"
     with connect() as connection:
@@ -2368,10 +2476,49 @@ def find_target_task_for_ai_task(ai_task_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
         row = connection.execute(
-            "SELECT * FROM tiktok_target_tasks WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM tiktok_target_tasks WHERE task_id = %s AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
             (ai_task_id,),
         ).fetchone()
     return row_to_target_task(row) if row else None
+
+
+def clear_target_video_analysis_for_ai_task(ai_task_id: str) -> dict[str, Any] | None:
+    init_db()
+    current = now()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM tiktok_target_tasks WHERE task_id = %s AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+            (ai_task_id,),
+        ).fetchone()
+        if not row:
+            return None
+        video_id = str(row["video_id"] or "")
+        if not video_id:
+            return None
+        task_cursor = connection.execute(
+            "UPDATE tiktok_target_tasks SET deleted_at = %s, status = 'deleted', updated_at = %s WHERE task_id = %s AND deleted_at IS NULL",
+            (current, current, ai_task_id),
+        )
+        video_cursor = connection.execute(
+            """
+            UPDATE tiktok_target_videos
+            SET analysis_status = 'none',
+                analysis_task_id = '',
+                analysis_result_json = '{}',
+                analyzed_at = NULL,
+                updated_at = %s
+            WHERE id = %s
+              AND (analysis_task_id = %s OR COALESCE(analysis_task_id, '') = '')
+            """,
+            (current, video_id, ai_task_id),
+        )
+        deleted_target_task_count = task_cursor.rowcount
+        cleared_current_analysis = video_cursor.rowcount > 0
+    video = get_target_video(video_id)
+    if video is not None:
+        video["deleted_target_task_count"] = deleted_target_task_count
+        video["cleared_current_analysis"] = cleared_current_analysis
+    return video
 
 
 def list_target_tasks(
@@ -2385,19 +2532,20 @@ def list_target_tasks(
     conditions = []
     values: list[Any] = []
     if set_id:
-        conditions.append("set_id = ?")
+        conditions.append("set_id = %s")
         values.append(set_id)
     if video_id:
-        conditions.append("video_id = ?")
+        conditions.append("video_id = %s")
         values.append(video_id)
     if status:
-        conditions.append("status = ?")
+        conditions.append("status = %s")
         values.append(status)
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    conditions.append("deleted_at IS NULL")
+    where = f"WHERE {' AND '.join(conditions)}"
     values.append(limit)
     with connect() as connection:
         rows = connection.execute(
-            f"SELECT * FROM tiktok_target_tasks {where} ORDER BY created_at DESC LIMIT ?",
+            f"SELECT * FROM tiktok_target_tasks {where} ORDER BY created_at DESC LIMIT %s",
             values,
         ).fetchall()
     return [row_to_target_task(row) for row in rows]
@@ -2414,12 +2562,12 @@ def update_target_task_from_ai_task(target_task_id: str, ai_task: dict[str, Any]
         cursor = connection.execute(
             """
             UPDATE tiktok_target_tasks
-            SET status = ?,
-                result_json = ?,
-                error = ?,
-                updated_at = ?,
-                synced_at = ?
-            WHERE id = ?
+            SET status = %s,
+                result_json = %s,
+                error = %s,
+                updated_at = %s,
+                synced_at = %s
+            WHERE id = %s
             """,
             (
                 status,
@@ -2430,7 +2578,7 @@ def update_target_task_from_ai_task(target_task_id: str, ai_task: dict[str, Any]
                 target_task_id,
             ),
         )
-        row = connection.execute("SELECT * FROM tiktok_target_tasks WHERE id = ?", (target_task_id,)).fetchone()
+        row = connection.execute("SELECT * FROM tiktok_target_tasks WHERE id = %s AND deleted_at IS NULL", (target_task_id,)).fetchone()
     if cursor.rowcount == 0 or not row:
         return None
     target_task = row_to_target_task(row)

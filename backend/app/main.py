@@ -20,14 +20,11 @@ from .routes.douyin_target import router as douyin_target_router
 from .routes.tasks import router as tasks_router
 from .routes.text_to_assets import router as text_to_assets_router
 from .routes.video_script import router as video_script_router
-from .task_store import init_db
-from .video_analysis_queue import init_ai_video_queue_db
+from .postgres_store import close_all_postgres_pools, init_all_postgres_databases
 from .video_analysis_worker import coordinator as ai_video_coordinator
 from integrations.ai_video_analysis.audio_publication import configured_public_dir
 
 app = FastAPI(title="Personal Ops Workbench API")
-init_db()
-init_ai_video_queue_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,6 +46,11 @@ def workbench():
 
 
 @app.on_event("startup")
+def bootstrap_databases() -> None:
+    init_all_postgres_databases()
+
+
+@app.on_event("startup")
 def start_workers() -> None:
     ai_video_coordinator.start()
 
@@ -56,6 +58,7 @@ def start_workers() -> None:
 @app.on_event("shutdown")
 def stop_workers() -> None:
     ai_video_coordinator.stop()
+    close_all_postgres_pools()
 
 
 app.include_router(douyin_router)

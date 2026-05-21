@@ -15,20 +15,19 @@ from backend.app import short_video_analysis_store
 from backend.app import tiktok_target_store
 from backend.app import video_analysis_queue
 from backend.app.routes import ai_video_analysis as ai_video_route
+from backend.app.routes.tasks import remove_task
 from backend.app.routes.douyin_target import delete_video_analysis
+from backend.app.routes.douyin_target import enqueue_analysis, EnqueueAnalysisRequest
 from backend.app.video_analysis_worker import coordinator
+from tests.postgres_test_utils import isolated_postgres_schema
 
 
 class AiVideoQueueTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.old_db_path = task_store.DB_PATH
-        self.old_analysis_db_path = short_video_analysis_store.DB_PATH
-        self.old_target_db_path = tiktok_target_store.DB_PATH
+        self.pg_schema = isolated_postgres_schema("ai_video_queue")
+        self.pg_schema.__enter__()
         self.old_limit = os.environ.get("AI_VIDEO_MAX_CONCURRENT_TASKS")
-        task_store.DB_PATH = Path(self.tmp.name) / "tasks.sqlite3"
-        short_video_analysis_store.DB_PATH = Path(self.tmp.name) / "short_video_analysis.sqlite3"
-        tiktok_target_store.DB_PATH = Path(self.tmp.name) / "tiktok_targeting.sqlite3"
         os.environ["AI_VIDEO_MAX_CONCURRENT_TASKS"] = "3"
         task_store.init_db()
         video_analysis_queue.init_ai_video_queue_db()
@@ -36,14 +35,12 @@ class AiVideoQueueTests(unittest.TestCase):
         tiktok_target_store.init_db()
 
     def tearDown(self):
-        task_store.DB_PATH = self.old_db_path
-        short_video_analysis_store.DB_PATH = self.old_analysis_db_path
-        tiktok_target_store.DB_PATH = self.old_target_db_path
         if self.old_limit is None:
             os.environ.pop("AI_VIDEO_MAX_CONCURRENT_TASKS", None)
         else:
             os.environ["AI_VIDEO_MAX_CONCURRENT_TASKS"] = self.old_limit
         gc.collect()
+        self.pg_schema.__exit__(None, None, None)
         self.tmp.cleanup()
 
     def create_task_and_job(self, index: int):
@@ -118,6 +115,36 @@ class AiVideoQueueTests(unittest.TestCase):
         self.assertFalse(deleted["deleted"])
         self.assertTrue(deleted["delete_blocked"])
         self.assertIsNotNone(video_analysis_queue.get_ai_video_job("video-task-1"))
+
+    def test_remove_running_analysis_task_cancels_and_deletes(self):
+        self.create_task_and_job(1)
+        video_analysis_queue.claim_next_ai_video_job("worker-1")
+
+        deleted = remove_task("video-task-1", delete_archives=True)
+
+        self.assertTrue(deleted["deleted"])
+        self.assertIsNone(task_store.get_task("video-task-1"))
+        self.assertIsNone(video_analysis_queue.get_ai_video_job("video-task-1"))
+
+    def test_claim_race_keeps_job_unique_under_concurrency(self):
+        self.create_task_and_job(1)
+
+        claimed = []
+
+        def claim(index: int):
+            job = video_analysis_queue.claim_next_ai_video_job(f"race-{index}")
+            if job:
+                claimed.append(job["task_id"])
+
+        import threading
+
+        threads = [threading.Thread(target=claim, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(claimed.count("video-task-1"), 1)
 
     def test_queue_snapshot_includes_backlog_and_workers(self):
         for index in range(4):
@@ -353,6 +380,98 @@ class AiVideoQueueTests(unittest.TestCase):
         self.assertIsNone(video_analysis_queue.get_ai_video_job("video-delete-task"))
         self.assertEqual(dataset["comment_count"], 1)
         self.assertEqual(dataset["video"]["comment_snapshot_status"], "done")
+
+    def test_delete_analysis_task_clears_target_state_so_video_can_be_requeued(self):
+        tiktok_target_store.create_target_video(
+            "target-requeue-aweme",
+            "user-1",
+            {
+                "aweme_id": "target-requeue-aweme",
+                "desc": "Requeue after delete",
+                "set_id": "set-1",
+                "digg_count": 100,
+                "comment_count": 2,
+                "share_count": 1,
+                "collect_count": 8,
+                "selected": True,
+            },
+        )
+        tiktok_target_store.create_target_task(
+            "target-requeue-task",
+            set_id="set-1",
+            user_id="user-1",
+            video_id="target-requeue-aweme",
+            ai_task_id="video-requeue-task",
+            status="done",
+        )
+        task_store.create_task(
+            task_id="video-requeue-task",
+            task_type="ai_video_analysis",
+            title="Requeue after delete",
+            provider="mock",
+            payload={
+                "video": {
+                    "aweme_id": "target-requeue-aweme",
+                    "douyin_target_context": {"video_id": "target-requeue-aweme"},
+                },
+                "douyin_target": {"video_id": "target-requeue-aweme"},
+            },
+        )
+        task_store.update_task("video-requeue-task", status="done", result_json={"summary": "done"})
+        video_analysis_queue.enqueue_ai_video_job(
+            task_id="video-requeue-task",
+            video={"aweme_id": "target-requeue-aweme"},
+            provider="mock",
+        )
+        video_analysis_queue.complete_ai_video_job("video-requeue-task")
+
+        deleted = remove_task("video-requeue-task", delete_archives=True)
+        video = tiktok_target_store.get_target_video("target-requeue-aweme")
+
+        self.assertTrue(deleted["deleted"])
+        self.assertTrue(deleted["target_cleanup"])
+        self.assertEqual(video["analysis_status"], "none")
+        self.assertEqual(video["analysis_task_id"], "")
+        self.assertIsNone(tiktok_target_store.find_target_task_for_video("target-requeue-aweme", {"pending", "running", "done"}))
+
+        enqueued = enqueue_analysis(EnqueueAnalysisRequest(video_ids=["target-requeue-aweme"]))
+
+        self.assertEqual(enqueued["count"], 1)
+        self.assertEqual(enqueued["skipped"], [])
+        self.assertIsNotNone(tiktok_target_store.find_target_task_for_video("target-requeue-aweme", {"pending", "running", "done"}))
+
+    def test_enqueue_clears_stale_target_task_when_generic_task_was_deleted(self):
+        tiktok_target_store.create_target_video(
+            "target-stale-aweme",
+            "user-1",
+            {
+                "aweme_id": "target-stale-aweme",
+                "desc": "Stale target task",
+                "set_id": "set-1",
+                "digg_count": 100,
+                "comment_count": 2,
+                "share_count": 1,
+                "collect_count": 8,
+                "selected": True,
+            },
+        )
+        tiktok_target_store.create_target_task(
+            "target-stale-task",
+            set_id="set-1",
+            user_id="user-1",
+            video_id="target-stale-aweme",
+            ai_task_id="missing-generic-task",
+            status="done",
+        )
+
+        enqueued = enqueue_analysis(EnqueueAnalysisRequest(video_ids=["target-stale-aweme"]))
+
+        self.assertEqual(enqueued["count"], 1)
+        self.assertEqual(enqueued["skipped"], [])
+        self.assertIsNone(tiktok_target_store.get_target_task("target-stale-task"))
+        next_task = tiktok_target_store.find_target_task_for_video("target-stale-aweme", {"pending", "running", "done"})
+        self.assertIsNotNone(next_task)
+        self.assertNotEqual(next_task["task_id"], "missing-generic-task")
 
 
 if __name__ == "__main__":

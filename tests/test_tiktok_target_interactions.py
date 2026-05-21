@@ -9,17 +9,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.app import tiktok_target_store as store
+from tests.postgres_test_utils import isolated_postgres_schema
 
 
 class TiktokTargetInteractionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.old_db_path = store.DB_PATH
-        store.DB_PATH = Path(self.tmp.name) / "tiktok_targeting.sqlite3"
+        self.pg_schema = isolated_postgres_schema("tiktok_target")
+        self.pg_schema.__enter__()
+        self.addCleanup(self.pg_schema.__exit__, None, None, None)
         store.init_db()
 
     def tearDown(self):
-        store.DB_PATH = self.old_db_path
         gc.collect()
         self.tmp.cleanup()
 

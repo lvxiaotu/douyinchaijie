@@ -20,12 +20,15 @@ from backend.app.video_analysis_queue import (
     upsert_ai_video_chunk,
 )
 from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
+from tests.postgres_test_utils import isolated_postgres_schema
 
 
 class AiVideoEvidenceP1Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.old_db_path = task_store.DB_PATH
+        self.pg_schema = isolated_postgres_schema("ai_video_evidence")
+        self.pg_schema.__enter__()
+        self.addCleanup(self.pg_schema.__exit__, None, None, None)
         self.old_env = {
             key: os.environ.get(key)
             for key in [
@@ -40,12 +43,10 @@ class AiVideoEvidenceP1Tests(unittest.TestCase):
                 "AI_VIDEO_FRAME_EXTRACT_MODE",
             ]
         }
-        task_store.DB_PATH = Path(self.tmp.name) / "tasks.sqlite3"
         task_store.init_db()
         init_ai_video_queue_db()
 
     def tearDown(self):
-        task_store.DB_PATH = self.old_db_path
         for key, value in self.old_env.items():
             if value is None:
                 os.environ.pop(key, None)

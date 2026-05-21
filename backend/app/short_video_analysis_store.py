@@ -2,17 +2,13 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import time
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
+from backend.app.postgres_store import pg_connection, run_once
 from integrations.ai_video_analysis.result_schema import validate_analysis_result
 
-ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = ROOT / "data" / "runtime" / "short_video_analysis.sqlite3"
 CHINA_TZ = timezone(timedelta(hours=8))
 
 DEFAULT_BASELINE_THRESHOLDS = {
@@ -34,18 +30,8 @@ PROPERTY_TAG_RULES = {
 }
 
 
-@contextmanager
-def connect() -> Iterator[sqlite3.Connection]:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH, timeout=30.0)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA busy_timeout = 30000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        yield connection
-        connection.commit()
-    finally:
-        connection.close()
+def connect():
+    return pg_connection("short_video_analysis")
 
 
 def load_json(value: Any, fallback: Any) -> Any:
@@ -108,6 +94,13 @@ def now() -> int:
 
 
 def init_db() -> None:
+    def initialize() -> None:
+        _init_db()
+
+    run_once("short_video_analysis_store", initialize)
+
+
+def _init_db() -> None:
     with connect() as connection:
         connection.execute(
             """
@@ -248,32 +241,32 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_short_video_remake_exports_genre ON short_video_remake_exports(genre, target_genre, updated_at)")
 
 
-def row_to_video(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_video(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["raw"] = load_json(item.pop("raw_json"), {})
     return item
 
 
-def row_to_metric(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_metric(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["property_tags"] = load_json(item.pop("property_tags_json"), [])
     item["raw"] = load_json(item.pop("raw_json"), {})
     return item
 
 
-def row_to_run(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_run(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["result"] = load_json(item.pop("result_json"), {})
     return item
 
 
-def row_to_segment(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_segment(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["raw"] = load_json(item.pop("raw_json"), {})
     return item
 
 
-def row_to_formula(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_formula(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["visual_blueprint"] = load_json(item.pop("visual_blueprint_json"), {})
     item["risk"] = load_json(item.pop("risk_json"), {})
@@ -281,7 +274,7 @@ def row_to_formula(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
-def row_to_remake_export(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_remake_export(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["source"] = load_json(item.pop("source_json"), {})
     item["rewritten"] = load_json(item.pop("rewritten_json"), {})
@@ -392,7 +385,7 @@ def upsert_video(video: dict[str, Any], *, genre: str = "") -> dict[str, Any]:
                 id, platform, source_id, source_url, author_id, author_name, title,
                 description, genre, publish_time, publish_hour, publish_weekday,
                 cover_url, video_url, local_video_path, raw_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(platform, source_id) DO UPDATE SET
                 source_url = excluded.source_url,
                 author_id = excluded.author_id,
@@ -447,7 +440,7 @@ def save_metric_snapshot(video_id: str, video: dict[str, Any]) -> dict[str, Any]
                 id, video_id, like_count, comment_count, share_count, collect_count,
                 play_count, interaction_rate, save_rate, share_rate, engagement_score,
                 engagement_rate, property_tags_json, raw_json, captured_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 snapshot_id,
@@ -533,7 +526,7 @@ def save_analysis_run(
             INSERT INTO short_video_analysis_runs (
                 id, video_id, task_id, provider, model_summary, genre, status,
                 evidence_path, job_path, result_json, markdown_report, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'done', %s, %s, %s, %s, %s, %s)
             ON CONFLICT(task_id) DO UPDATE SET
                 video_id = excluded.video_id,
                 provider = excluded.provider,
@@ -584,7 +577,7 @@ def save_segments(*, run_id: str, video_id: str, result: dict[str, Any]) -> list
                     id, run_id, video_id, segment_id, start_seconds, end_seconds,
                     time_range, transcript, visual_style, audio_pacing,
                     narrative_technique, retention_mechanism, raw_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(run_id, segment_id) DO UPDATE SET
                     start_seconds = excluded.start_seconds,
                     end_seconds = excluded.end_seconds,
@@ -633,7 +626,7 @@ def save_formula(*, run_id: str, video_id: str, genre: str, result: dict[str, An
                 id, video_id, run_id, genre, formula_name, generic_formula, hook_template,
                 script_template, cta_template, visual_blueprint_json, risk_json,
                 raw_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 genre = excluded.genre,
                 formula_name = excluded.formula_name,
@@ -691,35 +684,35 @@ def persist_analysis_result(
 def get_video(video_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM short_video_items WHERE id = ?", (video_id,)).fetchone()
+        row = connection.execute("SELECT * FROM short_video_items WHERE id = %s", (video_id,)).fetchone()
     return row_to_video(row) if row else None
 
 
 def get_metric_snapshot(snapshot_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM short_video_metric_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+        row = connection.execute("SELECT * FROM short_video_metric_snapshots WHERE id = %s", (snapshot_id,)).fetchone()
     return row_to_metric(row) if row else None
 
 
 def get_analysis_run(run_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM short_video_analysis_runs WHERE id = ?", (run_id,)).fetchone()
+        row = connection.execute("SELECT * FROM short_video_analysis_runs WHERE id = %s", (run_id,)).fetchone()
     return row_to_run(row) if row else None
 
 
 def get_segment(segment_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM short_video_analysis_segments WHERE id = ?", (segment_id,)).fetchone()
+        row = connection.execute("SELECT * FROM short_video_analysis_segments WHERE id = %s", (segment_id,)).fetchone()
     return row_to_segment(row) if row else None
 
 
 def get_formula(formula_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM short_video_formula_library WHERE id = ?", (formula_id,)).fetchone()
+        row = connection.execute("SELECT * FROM short_video_formula_library WHERE id = %s", (formula_id,)).fetchone()
     return row_to_formula(row) if row else None
 
 
@@ -728,21 +721,21 @@ def get_analysis_dataset(run_id: str) -> dict[str, Any] | None:
     if not run:
         return None
     with connect() as connection:
-        video_row = connection.execute("SELECT * FROM short_video_items WHERE id = ?", (run["video_id"],)).fetchone()
+        video_row = connection.execute("SELECT * FROM short_video_items WHERE id = %s", (run["video_id"],)).fetchone()
         metric_rows = connection.execute(
-            "SELECT * FROM short_video_metric_snapshots WHERE video_id = ? ORDER BY captured_at DESC LIMIT 20",
+            "SELECT * FROM short_video_metric_snapshots WHERE video_id = %s ORDER BY captured_at DESC LIMIT 20",
             (run["video_id"],),
         ).fetchall()
         segment_rows = connection.execute(
-            "SELECT * FROM short_video_analysis_segments WHERE run_id = ? ORDER BY start_seconds ASC",
+            "SELECT * FROM short_video_analysis_segments WHERE run_id = %s ORDER BY start_seconds ASC",
             (run_id,),
         ).fetchall()
         formula_row = connection.execute(
-            "SELECT * FROM short_video_formula_library WHERE run_id = ? ORDER BY updated_at DESC LIMIT 1",
+            "SELECT * FROM short_video_formula_library WHERE run_id = %s ORDER BY updated_at DESC LIMIT 1",
             (run_id,),
         ).fetchone()
         export_rows = connection.execute(
-            "SELECT * FROM short_video_remake_exports WHERE run_id = ? ORDER BY updated_at DESC LIMIT 20",
+            "SELECT * FROM short_video_remake_exports WHERE run_id = %s ORDER BY updated_at DESC LIMIT 20",
             (run_id,),
         ).fetchall()
     return {
@@ -782,7 +775,7 @@ def save_remake_export(
                 id, run_id, video_id, task_id, title, genre, target_genre,
                 export_type, markdown, source_json, rewritten_json, status,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 export_id,
@@ -801,7 +794,7 @@ def save_remake_export(
                 current,
             ),
         )
-        row = connection.execute("SELECT * FROM short_video_remake_exports WHERE id = ?", (export_id,)).fetchone()
+        row = connection.execute("SELECT * FROM short_video_remake_exports WHERE id = %s", (export_id,)).fetchone()
     return row_to_remake_export(row) if row else {"id": export_id}
 
 
@@ -811,12 +804,12 @@ def list_remake_exports(*, run_id: str = "", limit: int = 100) -> list[dict[str,
     with connect() as connection:
         if run_id:
             rows = connection.execute(
-                "SELECT * FROM short_video_remake_exports WHERE run_id = ? ORDER BY updated_at DESC LIMIT ?",
+                "SELECT * FROM short_video_remake_exports WHERE run_id = %s ORDER BY updated_at DESC LIMIT %s",
                 (run_id, limit),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT * FROM short_video_remake_exports ORDER BY updated_at DESC LIMIT ?",
+                "SELECT * FROM short_video_remake_exports ORDER BY updated_at DESC LIMIT %s",
                 (limit,),
             ).fetchall()
     return [row_to_remake_export(row) for row in rows]

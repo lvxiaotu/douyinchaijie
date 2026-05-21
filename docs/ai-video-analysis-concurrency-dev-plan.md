@@ -10,13 +10,13 @@
 - 每个视频任务可以断点恢复、失败重试、复用缓存。
 - 任务进入队列后立即返回前端，不在 API 请求里跑完整拆解。
 - 抽帧、ASR、Vision、总结等步骤都产生可追溯 evidence artifact。
-- 后续可以从本地 SQLite 队列平滑升级到 Redis/Celery/Temporal。
+- 后续可以从 PostgreSQL 持久队列平滑升级到 Redis/Celery/Temporal。
 
 当前项目已有基础：
 
 - 后端：FastAPI，入口位于 `backend/app/main.py`。
 - AI 视频拆解路由：`backend/app/routes/ai_video_analysis.py`。
-- 任务存储：`backend/app/task_store.py`，当前使用 SQLite。
+- 任务存储：`backend/app/task_store.py`，当前使用 PostgreSQL。
 - 并发限制器：`backend/app/video_task_limiter.py`。
 - Evidence pipeline：`integrations/ai_video_analysis/evidence_pipeline.py`。
 - AI adapter：`integrations/ai_video_analysis/adapter.py`。
@@ -26,7 +26,7 @@
 
 ### 2.1 第一版不引入重型外部队列
 
-第一版使用 SQLite 做持久化任务队列，新增一个常驻 worker coordinator：
+第一版使用 PostgreSQL 做持久化任务队列，新增一个常驻 worker coordinator：
 
 ```text
 API 请求
@@ -41,7 +41,7 @@ API 请求
   -> 完成后释放 active slot
 ```
 
-这样能最小化改造风险，并贴合当前项目的 SQLite 和本地文件 artifact 结构。
+这样能最小化改造风险，并贴合当前项目的 PostgreSQL 和本地文件 artifact 结构。
 
 ### 2.2 并发限制含义
 
@@ -95,8 +95,8 @@ AI_VIDEO_GLOBAL_VISION_CONCURRENCY=6
 ```mermaid
 flowchart TD
   A[前端提交视频或批量视频] --> B[FastAPI API]
-  B --> C[(SQLite tasks)]
-  B --> D[(SQLite ai_video_jobs)]
+  B --> C[(PostgreSQL tasks)]
+  B --> D[(PostgreSQL ai_video_jobs)]
   B --> E[立即返回 task]
 
   F[VideoAnalysisCoordinator] --> G{active jobs < 3?}
@@ -343,7 +343,7 @@ def queue_stats() -> dict:
     ...
 ```
 
-SQLite 原子认领建议使用事务：
+PostgreSQL 原子认领建议使用事务：
 
 ```sql
 BEGIN IMMEDIATE;
@@ -1089,7 +1089,7 @@ AI 视频队列
 - 当前单条任务能创建、运行、归档。
 - 能定位 `analysis_evidence.json`。
 
-### Phase 1：SQLite 持久化队列
+### Phase 1：PostgreSQL 持久化队列
 
 目标：替换 BackgroundTasks，任务只入库，由 worker coordinator 执行。
 
@@ -1285,7 +1285,7 @@ active_jobs <= 3
 queued count 单调下降
 done + failed + cancelled + queued + running = total
 worker heartbeat 正常
-SQLite 无 locked database 高频错误
+PostgreSQL 无 locked database 高频错误
 ```
 
 ## 18. 上线顺序
@@ -1308,14 +1308,14 @@ SQLite 无 locked database 高频错误
 当出现以下任一情况，再升级 Redis/Celery 或 Temporal：
 
 - 需要多台 worker 机器横向扩容。
-- SQLite 写锁成为瓶颈。
+- PostgreSQL 写锁成为瓶颈。
 - ASR callback、长等待、取消、补偿事务变复杂。
 - 需要任务 DAG 可视化和强工作流语义。
 
 升级路径：
 
 ```text
-SQLite coordinator
+PostgreSQL coordinator
   -> Redis + RQ/Celery
   -> Temporal
 ```

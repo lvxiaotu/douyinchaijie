@@ -143,6 +143,17 @@ export function TextToAssetsPanel() {
         activeStatus={activeTaskStatus}
         onChangeStatus={setActiveTaskStatus}
         onOpenTask={openTaskRecord}
+        onDeleteTask={async (taskItem) => {
+          try {
+            await deleteTask(taskItem.id);
+            setTaskList((current) => current.filter((item) => item.id !== taskItem.id));
+            setSelectedTaskRecord((current) => (current?.task?.id === taskItem.id ? null : current));
+            setSelectedResultTask((current) => (current?.id === taskItem.id ? null : current));
+            await refreshTextToAssetsTasks();
+          } catch (err) {
+            setError(err.message || String(err));
+          }
+        }}
       />
       <TaskRecordModal
         record={selectedTaskRecord}

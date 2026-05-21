@@ -20,6 +20,7 @@ from backend.app.video_analysis_queue import delete_ai_video_job, enqueue_ai_vid
 from backend.app.tiktok_target_store import (
     add_user_to_target_set,
     clear_target_video_analysis,
+    clear_target_video_analysis_for_ai_task,
     create_target_set,
     create_target_task,
     create_target_video,
@@ -1128,8 +1129,12 @@ def enqueue_analysis(payload: EnqueueAnalysisRequest) -> dict[str, Any]:
     for target_video in target_videos:
         existing = find_target_task_for_video(target_video["id"], {"pending", "running", "done"})
         if existing and not payload.force:
-            skipped.append({"video_id": target_video["id"], "task_id": existing.get("task_id"), "status": existing.get("status")})
-            continue
+            existing_task_id = str(existing.get("task_id") or "")
+            if existing_task_id and get_task(existing_task_id) is None:
+                clear_target_video_analysis_for_ai_task(existing_task_id)
+            else:
+                skipped.append({"video_id": target_video["id"], "task_id": existing.get("task_id"), "status": existing.get("status")})
+                continue
 
         target_user = get_target_user(target_video.get("user_id") or "")
         analysis_video = _analysis_video_payload(target_video, target_user)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import traceback
 from typing import Any
 
@@ -22,6 +23,35 @@ from backend.app.video_analysis_queue import (
     worker_host_id,
 )
 from backend.app.video_task_limiter import video_task_concurrency_limit
+
+
+class ProgressWriteThrottler:
+    def __init__(self) -> None:
+        self.min_interval_seconds = float(os.getenv("AI_VIDEO_PROGRESS_WRITE_MIN_SECONDS", "2") or 2)
+        self.min_delta = int(os.getenv("AI_VIDEO_PROGRESS_WRITE_MIN_DELTA", "2") or 2)
+        self.last_written_at = 0.0
+        self.last_progress: int | None = None
+        self.last_message = ""
+
+    def should_write(self, progress: int, message: str, *, force: bool = False) -> bool:
+        progress = max(0, min(100, int(progress or 0)))
+        message = str(message or "")
+        if force or progress >= 100:
+            return True
+        if self.last_progress is None:
+            return True
+        if progress <= 5:
+            return progress != self.last_progress or message != self.last_message
+        if abs(progress - self.last_progress) >= self.min_delta:
+            return True
+        if message != self.last_message and (time.monotonic() - self.last_written_at) >= self.min_interval_seconds:
+            return True
+        return False
+
+    def mark_written(self, progress: int, message: str) -> None:
+        self.last_written_at = time.monotonic()
+        self.last_progress = max(0, min(100, int(progress or 0)))
+        self.last_message = str(message or "")
 
 
 class VideoAnalysisCoordinator:
@@ -148,6 +178,7 @@ class VideoAnalysisCoordinator:
         video = payload.get("video") or {}
         provider = job.get("provider") or task.get("provider") or active_ai_provider("mock")
         update_ai_video_job(task_id, status="running", stage="running", progress=max(1, int(job.get("progress") or 1)), worker_id=worker_id)
+        progress_throttler = ProgressWriteThrottler()
 
         heartbeat = JobHeartbeat(task_id=task_id, worker_id=worker_id, stop_event=self.stop_event)
         heartbeat.start()
@@ -158,16 +189,19 @@ class VideoAnalysisCoordinator:
                 return
 
             def report(progress: int, message: str) -> None:
-                current = update_ai_video_job(
-                    task_id,
-                    status="running",
-                    stage=message[:80] if message else "running",
-                    progress=progress,
-                    worker_id=worker_id,
-                )
-                if current and current.get("cancel_requested"):
-                    raise RuntimeError("AI_VIDEO_TASK_CANCELLED")
-                update_task(task_id, status="running", progress=progress, message=message)
+                force = progress >= 100 or "完成" in str(message or "") or "失败" in str(message or "")
+                if progress_throttler.should_write(progress, message, force=force):
+                    current = update_ai_video_job(
+                        task_id,
+                        status="running",
+                        stage=message[:80] if message else "running",
+                        progress=progress,
+                        worker_id=worker_id,
+                    )
+                    if current and current.get("cancel_requested"):
+                        raise RuntimeError("AI_VIDEO_TASK_CANCELLED")
+                    update_task(task_id, status="running", progress=progress, message=message)
+                    progress_throttler.mark_written(progress, message)
 
             report(5, "后台 worker 已认领 AI 视频拆解任务")
             result_job = AiVideoAnalysisRunner().run(

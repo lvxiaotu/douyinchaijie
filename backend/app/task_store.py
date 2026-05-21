@@ -1,28 +1,45 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Iterator
 
-ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = ROOT / "data" / "runtime" / "tasks.sqlite3"
+from backend.app.postgres_store import ensure_columns, pg_connection, placeholders, run_once, sync_sequence_to_max
+
+TASK_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
+}
+ARCHIVE_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
+}
+MEDIA_DRAFT_COLUMNS = {
+    "deleted_at": "deleted_at INTEGER",
+}
 
 
 @contextmanager
-def connect() -> Iterator[sqlite3.Connection]:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH, timeout=30.0)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA busy_timeout = 30000")
-        connection.execute("PRAGMA journal_mode = WAL")
+def connect() -> Iterator[Any]:
+    with pg_connection("core_task") as connection:
         yield connection
-        connection.commit()
-    finally:
-        connection.close()
+
+
+@contextmanager
+def audit_connection() -> Iterator[Any]:
+    with pg_connection("task_audit") as connection:
+        yield connection
+
+
+@contextmanager
+def archive_connection() -> Iterator[Any]:
+    with pg_connection("archive") as connection:
+        yield connection
+
+
+@contextmanager
+def media_connection() -> Iterator[Any]:
+    with pg_connection("media") as connection:
+        yield connection
 
 
 def load_json(value: Any, fallback: Any) -> Any:
@@ -37,6 +54,13 @@ def load_json(value: Any, fallback: Any) -> Any:
 
 
 def init_db() -> None:
+    def initialize() -> None:
+        _init_db()
+
+    run_once("task_store", initialize)
+
+
+def _init_db() -> None:
     with connect() as connection:
         connection.execute(
             """
@@ -56,6 +80,8 @@ def init_db() -> None:
             )
             """
         )
+        ensure_columns(connection, "tasks", TASK_COLUMNS)
+    with archive_connection() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS analysis_archives (
@@ -98,10 +124,14 @@ def init_db() -> None:
             )
             """
         )
+        ensure_columns(connection, "analysis_archives", ARCHIVE_COLUMNS)
+        ensure_columns(connection, "prompt_reverse_archives", ARCHIVE_COLUMNS)
+        ensure_columns(connection, "production_reverse_archives", ARCHIVE_COLUMNS)
+    with audit_connection() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS task_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 task_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT '',
                 progress INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +142,8 @@ def init_db() -> None:
             """
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, created_at)")
+        sync_sequence_to_max(connection, "task_events")
+    with media_connection() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS jianying_assets (
@@ -150,6 +182,7 @@ def init_db() -> None:
             )
             """
         )
+        ensure_columns(connection, "jianying_drafts", MEDIA_DRAFT_COLUMNS)
         connection.execute("CREATE INDEX IF NOT EXISTS idx_jianying_drafts_status ON jianying_drafts(status)")
         connection.execute(
             """
@@ -171,12 +204,13 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_jianying_templates_status ON jianying_templates(status)")
 
 
-def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_task(row: Any, *, include_events: bool = True) -> dict[str, Any]:
     task = dict(row)
+    task["deleted"] = bool(task.get("deleted_at"))
     task["payload"] = load_json(task.pop("payload_json"), {})
     result_json = task.pop("result_json")
     task["result"] = load_json(result_json, None) if result_json else None
-    task["events"] = list_task_events(task["id"], limit=200)
+    task["events"] = list_task_events(task["id"], limit=200) if include_events else []
     return task
 
 
@@ -226,8 +260,9 @@ def compact_task_payload(payload: Any) -> dict[str, Any]:
     return compact
 
 
-def row_to_task_summary(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_task_summary(row: Any) -> dict[str, Any]:
     task = dict(row)
+    task["deleted"] = bool(task.get("deleted_at"))
     task["payload"] = compact_task_payload(load_json(task.pop("payload_json"), {}))
     task.pop("result_json", None)
     task["result"] = None
@@ -235,7 +270,7 @@ def row_to_task_summary(row: sqlite3.Row) -> dict[str, Any]:
     return task
 
 
-def row_to_task_event(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_task_event(row: Any) -> dict[str, Any]:
     event = dict(row)
     detail_json = event.pop("detail_json")
     event["detail"] = json.loads(detail_json) if detail_json else None
@@ -252,11 +287,12 @@ def append_task_event(
 ) -> dict[str, Any] | None:
     init_db()
     now = int(time.time())
-    with connect() as connection:
-        cursor = connection.execute(
+    with audit_connection() as connection:
+        row = connection.execute(
             """
             INSERT INTO task_events (task_id, status, progress, message, detail_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
             """,
             (
                 task_id,
@@ -266,21 +302,20 @@ def append_task_event(
                 json.dumps(detail, ensure_ascii=False) if detail else None,
                 now,
             ),
-        )
-        row = connection.execute("SELECT * FROM task_events WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        ).fetchone()
     if message:
         print(f"[task-progress] {task_id} {progress}% {status or '-'} {message}", flush=True)
     return row_to_task_event(row) if row else None
 
 
 def list_task_events(task_id: str, limit: int = 100) -> list[dict[str, Any]]:
-    with connect() as connection:
+    with audit_connection() as connection:
         rows = connection.execute(
             """
             SELECT * FROM task_events
-            WHERE task_id = ?
+            WHERE task_id = %s
             ORDER BY created_at ASC, id ASC
-            LIMIT ?
+            LIMIT %s
             """,
             (task_id, limit),
         ).fetchall()
@@ -305,7 +340,7 @@ def create_task(
                 id, type, title, status, progress, message, provider,
                 payload_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 task_id,
@@ -336,10 +371,10 @@ def update_task(task_id: str, **updates: Any) -> dict[str, Any] | None:
         normalized[key] = value
     normalized["updated_at"] = int(time.time())
 
-    assignments = ", ".join(f"{key} = ?" for key in normalized)
+    assignments = ", ".join(f"{key} = %s" for key in normalized)
     values = list(normalized.values()) + [task_id]
     with connect() as connection:
-        cursor = connection.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", values)
+        cursor = connection.execute(f"UPDATE tasks SET {assignments} WHERE id = %s", values)
     if cursor.rowcount == 0:
         return None
     if {"status", "progress", "message", "error"} & set(normalized):
@@ -364,16 +399,16 @@ def list_tasks(
     with connect() as connection:
         if task_type:
             rows = connection.execute(
-                "SELECT * FROM tasks WHERE type = ? ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM tasks WHERE deleted_at IS NULL AND type = %s ORDER BY created_at DESC LIMIT %s",
                 (task_type, limit),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM tasks WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT %s",
                 (limit,),
             ).fetchall()
     if include_result or include_events:
-        tasks = [row_to_task(row) for row in rows]
+        tasks = [row_to_task(row, include_events=include_events) for row in rows]
         if not include_events:
             for task in tasks:
                 task["events"] = []
@@ -387,19 +422,45 @@ def list_tasks(
 def get_task(task_id: str) -> dict[str, Any] | None:
     init_db()
     with connect() as connection:
-        row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = connection.execute("SELECT * FROM tasks WHERE id = %s AND deleted_at IS NULL", (task_id,)).fetchone()
     return row_to_task(row) if row else None
+
+
+def get_task_summary(task_id: str) -> dict[str, Any] | None:
+    init_db()
+    with connect() as connection:
+        row = connection.execute("SELECT * FROM tasks WHERE id = %s AND deleted_at IS NULL", (task_id,)).fetchone()
+    return row_to_task(row, include_events=False) if row else None
 
 
 def delete_task(task_id: str, delete_archives: bool = True) -> bool:
     init_db()
+    deleted_at = int(time.time())
+    if delete_archives:
+        with archive_connection() as connection:
+            connection.execute(
+                "UPDATE analysis_archives SET deleted_at = %s, updated_at = %s WHERE task_id = %s OR id = %s",
+                (deleted_at, deleted_at, task_id, task_id),
+            )
+            connection.execute(
+                "UPDATE prompt_reverse_archives SET deleted_at = %s, updated_at = %s WHERE task_id = %s OR id = %s",
+                (deleted_at, deleted_at, task_id, task_id),
+            )
+            connection.execute(
+                "UPDATE production_reverse_archives SET deleted_at = %s, updated_at = %s WHERE task_id = %s OR id = %s",
+                (deleted_at, deleted_at, task_id, task_id),
+            )
     with connect() as connection:
-        if delete_archives:
-            connection.execute("DELETE FROM analysis_archives WHERE task_id = ? OR id = ?", (task_id, task_id))
-            connection.execute("DELETE FROM prompt_reverse_archives WHERE task_id = ? OR id = ?", (task_id, task_id))
-            connection.execute("DELETE FROM production_reverse_archives WHERE task_id = ? OR id = ?", (task_id, task_id))
-        connection.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
-        cursor = connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        cursor = connection.execute(
+            """
+            UPDATE tasks
+            SET deleted_at = %s,
+                status = CASE WHEN status IN ('done', 'failed', 'cancelled') THEN status ELSE 'cancelled' END,
+                updated_at = %s
+            WHERE id = %s AND deleted_at IS NULL
+            """,
+            (deleted_at, deleted_at, task_id),
+        )
     return cursor.rowcount > 0
 
 
@@ -414,22 +475,30 @@ def save_analysis_archive(
 ) -> dict[str, Any]:
     init_db()
     now = int(time.time())
-    with connect() as connection:
+    with archive_connection() as connection:
         connection.execute(
             """
-            INSERT OR REPLACE INTO analysis_archives (
+            INSERT INTO analysis_archives (
                 id, task_id, title, provider, video_json, result_json, created_at, updated_at
             )
             VALUES (
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                COALESCE((SELECT created_at FROM analysis_archives WHERE id = ?), ?),
-                ?
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
             )
+            ON CONFLICT(id) DO UPDATE SET
+                task_id = excluded.task_id,
+                title = excluded.title,
+                provider = excluded.provider,
+                video_json = excluded.video_json,
+                result_json = excluded.result_json,
+                deleted_at = NULL,
+                updated_at = excluded.updated_at
             """,
             (
                 archive_id,
@@ -438,7 +507,6 @@ def save_analysis_archive(
                 provider,
                 json.dumps(video, ensure_ascii=False),
                 json.dumps(result, ensure_ascii=False),
-                archive_id,
                 now,
                 now,
             ),
@@ -446,8 +514,9 @@ def save_analysis_archive(
     return get_analysis_archive(archive_id)
 
 
-def row_to_archive(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_archive(row: Any) -> dict[str, Any]:
     archive = dict(row)
+    archive["deleted"] = bool(archive.get("deleted_at"))
     archive["video"] = load_json(archive.pop("video_json"), {})
     archive["result"] = load_json(archive.pop("result_json"), {})
     return archive
@@ -478,8 +547,9 @@ def archive_result_summary(result: Any) -> dict[str, Any]:
     return compact
 
 
-def row_to_archive_summary(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_archive_summary(row: Any) -> dict[str, Any]:
     archive = dict(row)
+    archive["deleted"] = bool(archive.get("deleted_at"))
     archive["video"] = compact_task_payload({"video": load_json(archive.pop("video_json"), {})}).get("video", {})
     archive["result"] = archive_result_summary(load_json(archive.pop("result_json"), {}))
     return archive
@@ -487,9 +557,9 @@ def row_to_archive_summary(row: sqlite3.Row) -> dict[str, Any]:
 
 def list_analysis_archives(limit: int = 100, *, include_result: bool = True) -> list[dict[str, Any]]:
     init_db()
-    with connect() as connection:
+    with archive_connection() as connection:
         rows = connection.execute(
-            "SELECT * FROM analysis_archives ORDER BY updated_at DESC LIMIT ?",
+            "SELECT * FROM analysis_archives WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
     return [row_to_archive(row) if include_result else row_to_archive_summary(row) for row in rows]
@@ -497,8 +567,8 @@ def list_analysis_archives(limit: int = 100, *, include_result: bool = True) -> 
 
 def get_analysis_archive(archive_id: str) -> dict[str, Any] | None:
     init_db()
-    with connect() as connection:
-        row = connection.execute("SELECT * FROM analysis_archives WHERE id = ?", (archive_id,)).fetchone()
+    with archive_connection() as connection:
+        row = connection.execute("SELECT * FROM analysis_archives WHERE id = %s AND deleted_at IS NULL", (archive_id,)).fetchone()
     return row_to_archive(row) if row else None
 
 
@@ -513,22 +583,30 @@ def save_prompt_reverse_archive(
 ) -> dict[str, Any]:
     init_db()
     now = int(time.time())
-    with connect() as connection:
+    with archive_connection() as connection:
         connection.execute(
             """
-            INSERT OR REPLACE INTO prompt_reverse_archives (
+            INSERT INTO prompt_reverse_archives (
                 id, task_id, title, provider, video_json, result_json, created_at, updated_at
             )
             VALUES (
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                COALESCE((SELECT created_at FROM prompt_reverse_archives WHERE id = ?), ?),
-                ?
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
             )
+            ON CONFLICT(id) DO UPDATE SET
+                task_id = excluded.task_id,
+                title = excluded.title,
+                provider = excluded.provider,
+                video_json = excluded.video_json,
+                result_json = excluded.result_json,
+                deleted_at = NULL,
+                updated_at = excluded.updated_at
             """,
             (
                 archive_id,
@@ -537,7 +615,6 @@ def save_prompt_reverse_archive(
                 provider,
                 json.dumps(video, ensure_ascii=False),
                 json.dumps(result, ensure_ascii=False),
-                archive_id,
                 now,
                 now,
             ),
@@ -547,9 +624,9 @@ def save_prompt_reverse_archive(
 
 def list_prompt_reverse_archives(limit: int = 100, *, include_result: bool = True) -> list[dict[str, Any]]:
     init_db()
-    with connect() as connection:
+    with archive_connection() as connection:
         rows = connection.execute(
-            "SELECT * FROM prompt_reverse_archives ORDER BY updated_at DESC LIMIT ?",
+            "SELECT * FROM prompt_reverse_archives WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
     return [row_to_archive(row) if include_result else row_to_archive_summary(row) for row in rows]
@@ -557,8 +634,8 @@ def list_prompt_reverse_archives(limit: int = 100, *, include_result: bool = Tru
 
 def get_prompt_reverse_archive(archive_id: str) -> dict[str, Any] | None:
     init_db()
-    with connect() as connection:
-        row = connection.execute("SELECT * FROM prompt_reverse_archives WHERE id = ?", (archive_id,)).fetchone()
+    with archive_connection() as connection:
+        row = connection.execute("SELECT * FROM prompt_reverse_archives WHERE id = %s AND deleted_at IS NULL", (archive_id,)).fetchone()
     return row_to_archive(row) if row else None
 
 
@@ -573,22 +650,30 @@ def save_production_reverse_archive(
 ) -> dict[str, Any]:
     init_db()
     now = int(time.time())
-    with connect() as connection:
+    with archive_connection() as connection:
         connection.execute(
             """
-            INSERT OR REPLACE INTO production_reverse_archives (
+            INSERT INTO production_reverse_archives (
                 id, task_id, title, provider, video_json, result_json, created_at, updated_at
             )
             VALUES (
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                COALESCE((SELECT created_at FROM production_reverse_archives WHERE id = ?), ?),
-                ?
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
             )
+            ON CONFLICT(id) DO UPDATE SET
+                task_id = excluded.task_id,
+                title = excluded.title,
+                provider = excluded.provider,
+                video_json = excluded.video_json,
+                result_json = excluded.result_json,
+                deleted_at = NULL,
+                updated_at = excluded.updated_at
             """,
             (
                 archive_id,
@@ -597,7 +682,6 @@ def save_production_reverse_archive(
                 provider,
                 json.dumps(video, ensure_ascii=False),
                 json.dumps(result, ensure_ascii=False),
-                archive_id,
                 now,
                 now,
             ),
@@ -607,9 +691,9 @@ def save_production_reverse_archive(
 
 def list_production_reverse_archives(limit: int = 100, *, include_result: bool = True) -> list[dict[str, Any]]:
     init_db()
-    with connect() as connection:
+    with archive_connection() as connection:
         rows = connection.execute(
-            "SELECT * FROM production_reverse_archives ORDER BY updated_at DESC LIMIT ?",
+            "SELECT * FROM production_reverse_archives WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
     return [row_to_archive(row) if include_result else row_to_archive_summary(row) for row in rows]
@@ -617,12 +701,12 @@ def list_production_reverse_archives(limit: int = 100, *, include_result: bool =
 
 def get_production_reverse_archive(archive_id: str) -> dict[str, Any] | None:
     init_db()
-    with connect() as connection:
-        row = connection.execute("SELECT * FROM production_reverse_archives WHERE id = ?", (archive_id,)).fetchone()
+    with archive_connection() as connection:
+        row = connection.execute("SELECT * FROM production_reverse_archives WHERE id = %s AND deleted_at IS NULL", (archive_id,)).fetchone()
     return row_to_archive(row) if row else None
 
 
-def row_to_jianying_asset(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_jianying_asset(row: Any) -> dict[str, Any]:
     asset = dict(row)
     asset["meta"] = json.loads(asset.pop("meta_json") or "{}")
     return asset
@@ -632,7 +716,7 @@ def upsert_jianying_assets(assets: list[dict[str, Any]], *, source: str = "local
     init_db()
     now = int(time.time())
     saved_ids: list[str] = []
-    with connect() as connection:
+    with media_connection() as connection:
         for asset in assets:
             asset_id = str(asset.get("id") or "")
             if not asset_id:
@@ -644,7 +728,7 @@ def upsert_jianying_assets(assets: list[dict[str, Any]], *, source: str = "local
                     id, type, name, source, path, resource_id, effect_id,
                     duration, width, height, hash, status, meta_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(id) DO UPDATE SET
                     type = excluded.type,
                     name = excluded.name,
@@ -681,9 +765,9 @@ def upsert_jianying_assets(assets: list[dict[str, Any]], *, source: str = "local
             )
         if not saved_ids:
             return []
-        placeholders = ",".join("?" for _ in saved_ids)
+        id_placeholders = placeholders(len(saved_ids))
         rows = connection.execute(
-            f"SELECT * FROM jianying_assets WHERE id IN ({placeholders}) ORDER BY updated_at DESC",
+            f"SELECT * FROM jianying_assets WHERE id IN ({id_placeholders}) ORDER BY updated_at DESC",
             saved_ids,
         ).fetchall()
     return [row_to_jianying_asset(row) for row in rows]
@@ -700,19 +784,19 @@ def list_jianying_assets(
     conditions = []
     values: list[Any] = []
     if asset_type:
-        conditions.append("type = ?")
+        conditions.append("type = %s")
         values.append(asset_type)
     if source:
-        conditions.append("source = ?")
+        conditions.append("source = %s")
         values.append(source)
     if status:
-        conditions.append("status = ?")
+        conditions.append("status = %s")
         values.append(status)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     values.append(limit)
-    with connect() as connection:
+    with media_connection() as connection:
         rows = connection.execute(
-            f"SELECT * FROM jianying_assets {where} ORDER BY updated_at DESC LIMIT ?",
+            f"SELECT * FROM jianying_assets {where} ORDER BY updated_at DESC LIMIT %s",
             values,
         ).fetchall()
     return [row_to_jianying_asset(row) for row in rows]
@@ -723,10 +807,10 @@ def get_jianying_assets_by_ids(asset_ids: list[str]) -> list[dict[str, Any]]:
     normalized_ids = [asset_id for asset_id in asset_ids if asset_id]
     if not normalized_ids:
         return []
-    placeholders = ",".join("?" for _ in normalized_ids)
-    with connect() as connection:
+    id_placeholders = placeholders(len(normalized_ids))
+    with media_connection() as connection:
         rows = connection.execute(
-            f"SELECT * FROM jianying_assets WHERE id IN ({placeholders})",
+            f"SELECT * FROM jianying_assets WHERE id IN ({id_placeholders})",
             normalized_ids,
         ).fetchall()
     assets_by_id = {row["id"]: row_to_jianying_asset(row) for row in rows}
@@ -735,7 +819,7 @@ def get_jianying_assets_by_ids(asset_ids: list[str]) -> list[dict[str, Any]]:
 
 def jianying_asset_counts() -> dict[str, Any]:
     init_db()
-    with connect() as connection:
+    with media_connection() as connection:
         total = connection.execute("SELECT COUNT(*) AS count FROM jianying_assets").fetchone()["count"]
         by_type = connection.execute(
             "SELECT type, COUNT(*) AS count FROM jianying_assets GROUP BY type ORDER BY count DESC"
@@ -750,8 +834,9 @@ def jianying_asset_counts() -> dict[str, Any]:
     }
 
 
-def row_to_jianying_draft(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_jianying_draft(row: Any) -> dict[str, Any]:
     draft = dict(row)
+    draft["deleted"] = bool(draft.get("deleted_at"))
     draft["asset_report"] = json.loads(draft.pop("asset_report_json") or "{}")
     draft["meta"] = json.loads(draft.pop("meta_json") or "{}")
     return draft
@@ -769,13 +854,13 @@ def save_jianying_draft(
 ) -> dict[str, Any]:
     init_db()
     now = int(time.time())
-    with connect() as connection:
+    with media_connection() as connection:
         connection.execute(
             """
             INSERT INTO jianying_drafts (
                 id, name, draft_path, source, status, asset_report_json, meta_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 draft_path = excluded.draft_path,
@@ -783,6 +868,7 @@ def save_jianying_draft(
                 status = excluded.status,
                 asset_report_json = excluded.asset_report_json,
                 meta_json = excluded.meta_json,
+                deleted_at = NULL,
                 updated_at = excluded.updated_at
             """,
             (
@@ -802,15 +888,19 @@ def save_jianying_draft(
 
 def get_jianying_draft(draft_id: str) -> dict[str, Any] | None:
     init_db()
-    with connect() as connection:
-        row = connection.execute("SELECT * FROM jianying_drafts WHERE id = ?", (draft_id,)).fetchone()
+    with media_connection() as connection:
+        row = connection.execute("SELECT * FROM jianying_drafts WHERE id = %s AND deleted_at IS NULL", (draft_id,)).fetchone()
     return row_to_jianying_draft(row) if row else None
 
 
 def delete_jianying_draft(draft_id: str) -> bool:
     init_db()
-    with connect() as connection:
-        cursor = connection.execute("DELETE FROM jianying_drafts WHERE id = ?", (draft_id,))
+    deleted_at = int(time.time())
+    with media_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE jianying_drafts SET deleted_at = %s, status = 'deleted', updated_at = %s WHERE id = %s AND deleted_at IS NULL",
+            (deleted_at, deleted_at, draft_id),
+        )
     return cursor.rowcount > 0
 
 
@@ -819,18 +909,20 @@ def list_jianying_drafts(*, status: str | None = None, limit: int = 100) -> list
     values: list[Any] = []
     where = ""
     if status:
-        where = "WHERE status = ?"
+        where = "WHERE deleted_at IS NULL AND status = %s"
         values.append(status)
+    else:
+        where = "WHERE deleted_at IS NULL"
     values.append(limit)
-    with connect() as connection:
+    with media_connection() as connection:
         rows = connection.execute(
-            f"SELECT * FROM jianying_drafts {where} ORDER BY updated_at DESC LIMIT ?",
+            f"SELECT * FROM jianying_drafts {where} ORDER BY updated_at DESC LIMIT %s",
             values,
         ).fetchall()
     return [row_to_jianying_draft(row) for row in rows]
 
 
-def row_to_jianying_template(row: sqlite3.Row) -> dict[str, Any]:
+def row_to_jianying_template(row: Any) -> dict[str, Any]:
     template = dict(row)
     template["text_slots"] = json.loads(template.pop("text_slots_json") or "[]")
     template["media_slots"] = json.loads(template.pop("media_slots_json") or "[]")
@@ -854,14 +946,14 @@ def save_jianying_template(
 ) -> dict[str, Any]:
     init_db()
     now = int(time.time())
-    with connect() as connection:
+    with media_connection() as connection:
         connection.execute(
             """
             INSERT INTO jianying_templates (
                 id, name, template_path, text_slots_json, media_slots_json, audio_slots_json,
                 required_assets_json, status, meta_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 template_path = excluded.template_path,
@@ -892,8 +984,8 @@ def save_jianying_template(
 
 def get_jianying_template(template_id: str) -> dict[str, Any] | None:
     init_db()
-    with connect() as connection:
-        row = connection.execute("SELECT * FROM jianying_templates WHERE id = ?", (template_id,)).fetchone()
+    with media_connection() as connection:
+        row = connection.execute("SELECT * FROM jianying_templates WHERE id = %s", (template_id,)).fetchone()
     return row_to_jianying_template(row) if row else None
 
 
@@ -902,12 +994,12 @@ def list_jianying_templates(*, status: str | None = None, limit: int = 100) -> l
     values: list[Any] = []
     where = ""
     if status:
-        where = "WHERE status = ?"
+        where = "WHERE status = %s"
         values.append(status)
     values.append(limit)
-    with connect() as connection:
+    with media_connection() as connection:
         rows = connection.execute(
-            f"SELECT * FROM jianying_templates {where} ORDER BY updated_at DESC LIMIT ?",
+            f"SELECT * FROM jianying_templates {where} ORDER BY updated_at DESC LIMIT %s",
             values,
         ).fetchall()
     return [row_to_jianying_template(row) for row in rows]
