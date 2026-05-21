@@ -76,6 +76,7 @@ export function AiVideoSettingsPanel() {
   const [fields, setFields] = useState(FALLBACK_SCHEMA);
   const [values, setValues] = useState(() => defaultsFromFields(FALLBACK_SCHEMA));
   const [message, setMessage] = useState("");
+  const [saveDetail, setSaveDetail] = useState(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -116,12 +117,14 @@ export function AiVideoSettingsPanel() {
     setSaving(true);
     setError("");
     setMessage("");
+    setSaveDetail(null);
     try {
       const payload = {};
       for (const field of fields) {
         payload[field.name] = parseFieldValue(field, values[field.name]);
       }
-      await saveAiVideoConfig(payload);
+      const result = await saveAiVideoConfig(payload);
+      setSaveDetail(result?.worker_reconcile || null);
       setMessage("AI 视频拆解配置已保存。模型连接仍使用全局 AI 模型配置。");
     } catch (err) {
       setError(err.message || String(err));
@@ -152,6 +155,11 @@ export function AiVideoSettingsPanel() {
         </button>
       </form>
       {message && <div className="running-note">{message}</div>}
+      {saveDetail && (
+        <div className="running-note">
+          worker 目标 {saveDetail.target_thread_count ?? 0}，当前 {saveDetail.thread_count ?? 0}，已新增 {saveDetail.spawned ?? 0}。
+        </div>
+      )}
       {error && <div className="error-box">{error}</div>}
     </section>
   );

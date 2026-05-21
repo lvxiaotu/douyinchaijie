@@ -135,10 +135,10 @@
 
 ### TODO 5：清理 provider 分支和不可达代码
 
-- [ ] 梳理当前支持矩阵：`evidence + relay`、`direct + gemini relay`、`mock`。
-- [ ] 删除或隔离 `raise` 之后不可达的 official/native Gemini 代码。
-- [ ] 将 provider 判断集中到 `model_gateway.py`。
-- [ ] 将错误信息从“配置云雾/简单中转站”抽成统一配置诊断。
+- [x] 梳理当前支持矩阵：`evidence + relay`、`direct + gemini relay`、`mock`。
+- [x] 删除或隔离 `raise` 之后不可达的 official/native Gemini 代码。
+- [x] 将 provider 判断集中到 `model_gateway.py`。
+- [x] 将错误信息从“配置云雾/简单中转站”抽成统一配置诊断。
 
 验收标准：
 
@@ -146,12 +146,20 @@
 - direct/evidence 模式错误提示准确。
 - `validate_config()` 与实际调用路径一致。
 
+实施记录：
+
+- `integrations/ai_video_analysis/model_gateway.py` 新增 `AiVideoProviderRoute`，统一承载 provider、family、api_format、base_url、api_key 和 config_errors。
+- `integrations/ai_video_analysis/adapter.py` 已改为先取 route，再按 route.family 分支，去掉散落的 `_uses_*` 逻辑和 `_provider_placeholder`。
+- `integrations/ai_video_analysis/analysis_runner.py` 透传 route，确保分段/全局拆解和 fallback 使用同一条 provider 解析结果。
+- `backend/app/routes/ai_provider_config.py` 删除了不可达的 `test_gemini_official()` 死代码，并把 Gemini 测试入口收敛到 relay 流程。
+- 新增 `tests/test_ai_video_p2.py` 的 route 级测试，覆盖 gemini relay、openai-compatible relay、direct pipeline 配置错误。
+
 ### TODO 6：配置保存后支持 worker 扩缩容
 
-- [ ] 保存 `AI_VIDEO_MAX_CONCURRENT_TASKS` 后触发 worker reconcile。
-- [ ] 或新增 `/api/tools/ai-video-analysis/workers/restart`。
-- [ ] queue status 返回 configured limit 与实际 thread_count 的差异。
-- [ ] 前端配置页提示保存后是否需要重启 worker。
+- [x] 保存 `AI_VIDEO_MAX_CONCURRENT_TASKS` 后触发 worker reconcile。
+ - [x] 或新增 `/api/tools/ai-video-analysis/workers/restart`。
+- [x] queue status 返回 configured limit 与实际 thread_count 的差异。
+- [x] 前端配置页提示保存后是否需要重启 worker。
 
 验收标准：
 
@@ -204,12 +212,12 @@
 
 ### TODO 10：补齐测试覆盖
 
-- [ ] 配置保存后 worker 扩缩容测试。
+- [x] 配置保存后 worker 扩缩容测试。
 - [x] running job cancel 边界测试。
 - [x] artifact/chunk DB 写入测试。
 - [x] evidence JSON 包含完整 `evidence_path` 和 checkpoint 测试。
 - [x] fake-provider 端到端测试：入队 -> worker -> evidence -> model_runs -> dataset -> target sync。
-- [ ] 前端关键 hook 的请求成功/失败测试。
+- [x] 前端关键 hook 的请求成功/失败测试。
 
 验收标准：
 

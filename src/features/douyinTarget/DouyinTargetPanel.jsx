@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "../../components/common/index";
 import {
   createDouyinTargetSet,
@@ -83,7 +83,6 @@ function hasAnalysisRecord(video) {
 function busyLabel(busy) {
   const labels = {
     search: "正在持续搜索账号，直到达到目标数量或没有更多结果...",
-    "search-more": "正在加载下一页账号...",
     collect: "正在逐个账号采集作品，账号较多时会比较久，请保持页面打开...",
     enqueue: "正在加入 AI 拆解任务池...",
     sync: "正在同步拆解结果...",
@@ -123,9 +122,12 @@ function createSetDraft(keyword) {
   };
 }
 
-const InitialKeyword = "可爱";
+const InitialKeyword = "塔罗";
 const SearchPageSize = 20;
 const MaxContinuousSearchPages = 25;
+const MaxTargetAccountCount = 100000;
+const TrackedProgressLabels = new Set(["search", "search-more", "collect"]);
+const MaxOperationLogs = 60;
 
 function mergeUniqueUsers(current, incoming) {
   const seen = new Set(current.map(userId).filter(Boolean));
@@ -139,19 +141,10 @@ function mergeUniqueUsers(current, incoming) {
   return merged;
 }
 
-function appendSelectedUserIds(current, items) {
-  const next = new Set(current);
-  items.forEach((item) => {
-    const id = userId(item);
-    if (id) next.add(id);
-  });
-  return next;
-}
-
 function targetAccountCount(filters) {
   const count = Number(filters.targetAccountCount || 0);
   if (!Number.isFinite(count)) return SearchPageSize;
-  return Math.max(1, Math.min(Math.floor(count), 500));
+  return Math.max(1, Math.min(Math.floor(count), MaxTargetAccountCount));
 }
 
 function hasMoreSearchResults(result, items) {
@@ -161,12 +154,92 @@ function hasMoreSearchResults(result, items) {
   return items.length > 0;
 }
 
+function nextSearchCursor(result, fallbackCursor) {
+  const cursor = result?.next_cursor ?? result?.pagination?.cursor ?? result?.normalized?.cursor;
+  const number = Number(cursor);
+  if (!Number.isFinite(number) || number < 0) return null;
+  if (number === Number(fallbackCursor || 0)) return null;
+  return number;
+}
+
 function formatCollectErrors(errors = []) {
   const visible = errors.slice(0, 8);
   const names = visible.map((item) => item.nickname || item.user_id || "未命名账号").join("、");
   const suffix = errors.length > visible.length ? ` 等 ${errors.length} 个账号` : "";
   const firstDetail = errors.find((item) => item.error)?.error;
   return `部分账号采集失败 ${errors.length} 个：${names}${suffix}${firstDetail ? `。首个错误：${firstDetail}` : ""}`;
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function progressPercent(current, total) {
+  const resolvedTotal = Number(total || 0);
+  if (!Number.isFinite(resolvedTotal) || resolvedTotal <= 0) return 0;
+  return clampPercent((Number(current || 0) / resolvedTotal) * 100);
+}
+
+function timeLabel(date = new Date()) {
+  return date.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function createOperationLog(level, text) {
+  return {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    level,
+    text,
+    time: timeLabel(),
+  };
+}
+
+function DouyinOperationProgress({ operation }) {
+  const endRef = useRef(null);
+  const logs = operation?.logs || [];
+  const stats = operation?.stats || {};
+  const percent = clampPercent(operation?.percent ?? progressPercent(operation?.current, operation?.total));
+  const hasLogs = logs.length > 0;
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [logs.length]);
+
+  if (!operation || (!operation.running && !hasLogs)) return null;
+
+  return (
+    <section className={`target-operation-progress ${operation.running ? "is-running" : "is-finished"}`} aria-live="polite">
+      <div className="target-operation-head">
+        <div>
+          <span className="target-operation-kicker">{operation.type === "collect" ? "视频采集" : "账号搜索"}</span>
+          <h3>{operation.title || "执行进度"}</h3>
+          {operation.currentItem && <p>当前：{operation.currentItem}</p>}
+        </div>
+        <div className="target-operation-percent">{percent}%</div>
+      </div>
+      <div className="progress target-operation-bar" aria-label={`进度 ${percent}%`}>
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <div className="target-operation-stats">
+        {Object.entries(stats).map(([label, value]) => (
+          <div className="target-operation-stat" key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="target-operation-log" role="log" aria-label="执行日志">
+        {logs.map((item) => (
+          <div className={`target-operation-log-row ${item.level}`} key={item.id}>
+            <span>{item.time}</span>
+            <p>{item.text}</p>
+          </div>
+        ))}
+        <div ref={endRef} />
+      </div>
+    </section>
+  );
 }
 
 const FollowerRanges = [
@@ -294,9 +367,6 @@ export function DouyinTargetPanel() {
     sortBy: "likes",
   });
   const [searchResult, setSearchResult] = useState(null);
-  const [searchRequest, setSearchRequest] = useState(null);
-  const [searchPage, setSearchPage] = useState(0);
-  const [searchHasMore, setSearchHasMore] = useState(false);
   const [selectedUsers, setSelectedUsers] = useState(new Set());
   const [sets, setSets] = useState([]);
   const [activeSetId, setActiveSetId] = useState("");
@@ -311,6 +381,7 @@ export function DouyinTargetPanel() {
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [operation, setOperation] = useState(null);
 
   const users = searchResult?.items || [];
   const selectedCount = selectedUsers.size;
@@ -322,6 +393,7 @@ export function DouyinTargetPanel() {
   const visibleSetKeyword = isCreatingSet ? resolvedSetKeyword : setForm.keyword;
   const visibleSetName = isCreatingSet ? resolvedSetName : setForm.name;
   const busyText = busyLabel(busy);
+  const trackedOperation = operation && TrackedProgressLabels.has(operation.type) ? operation : null;
 
   const selectedSearchUsers = useMemo(
     () => users.filter((item) => selectedUsers.has(userId(item))),
@@ -329,6 +401,35 @@ export function DouyinTargetPanel() {
   );
 
   const searchPayload = useMemo(() => buildSearchPayload(filters), [filters]);
+
+  function startOperation(nextOperation) {
+    setOperation({
+      ...nextOperation,
+      state: nextOperation.state || "running",
+      logs: Array.isArray(nextOperation.logs) ? nextOperation.logs.slice(-MaxOperationLogs) : [],
+    });
+  }
+
+  function updateOperation(patch) {
+    setOperation((current) => {
+      if (!current) return current;
+      const nextPatch = typeof patch === "function" ? patch(current) : patch;
+      if (!nextPatch) return current;
+      return { ...current, ...nextPatch };
+    });
+  }
+
+  function appendOperationLog(level, text, patch = {}) {
+    setOperation((current) => {
+      if (!current) return current;
+      const nextPatch = typeof patch === "function" ? patch(current) : patch;
+      return {
+        ...current,
+        ...nextPatch,
+        logs: [...current.logs, createOperationLog(level, text)].slice(-MaxOperationLogs),
+      };
+    });
+  }
 
   async function loadSets(nextActiveSetId = activeSetId) {
     const data = await fetchDouyinTargetSets();
@@ -351,7 +452,9 @@ export function DouyinTargetPanel() {
   }
 
   useEffect(() => {
-    loadSets().catch(() => {});
+    loadSets().catch((err) => {
+      setError(err?.message || String(err));
+    });
   }, []);
 
   async function run(label, runner) {
@@ -363,6 +466,13 @@ export function DouyinTargetPanel() {
       return result;
     } catch (err) {
       setError(err.message || String(err));
+      if (TrackedProgressLabels.has(label)) {
+        const errorMessage = err.message || String(err);
+        appendOperationLog("error", errorMessage, {
+          state: "failed",
+          running: false,
+        });
+      }
       return null;
     } finally {
       setBusy("");
@@ -406,21 +516,61 @@ export function DouyinTargetPanel() {
     event.preventDefault();
     const request = { keyword, ...searchPayload };
     const targetCount = targetAccountCount(filters);
+    startOperation({
+      type: "search",
+      title: `搜索关键词「${request.keyword}」`,
+      running: true,
+      percent: 0,
+      current: 0,
+      total: targetCount,
+      currentItem: "准备请求第一页",
+      stats: {
+        "目标账号": targetCount,
+        "已命中": 0,
+        "已搜页数": 0,
+        "页上限": MaxContinuousSearchPages,
+      },
+      logs: [createOperationLog("info", `开始搜索关键词「${request.keyword}」`)],
+    });
     const result = await run("search", async () => {
       let page = 1;
+      let cursor = 0;
       let lastResult = null;
       let mergedItems = [];
       let hasMore = true;
       let loadedPages = 0;
 
       while (mergedItems.length < targetCount && hasMore && page <= MaxContinuousSearchPages) {
-        const pageResult = await searchDouyinTargets({ ...request, page, count: SearchPageSize });
+        const currentCursor = cursor;
+        const pageResult = await searchDouyinTargets({ ...request, page, cursor: currentCursor, count: SearchPageSize });
         const pageItems = pageResult.items || [];
         mergedItems = mergeUniqueUsers(mergedItems, pageItems).slice(0, targetCount);
         lastResult = pageResult;
         loadedPages = page;
-        hasMore = hasMoreSearchResults(pageResult, pageItems);
+        const nextCursor = nextSearchCursor(pageResult, currentCursor);
+        hasMore = hasMoreSearchResults(pageResult, pageItems) && nextCursor !== null;
+        updateOperation({
+          percent: progressPercent(mergedItems.length, targetCount),
+          current: mergedItems.length,
+          total: targetCount,
+          currentItem: `第 ${page} 页 / 累计 ${mergedItems.length}/${targetCount} 个账号`,
+          stats: {
+            "目标账号": targetCount,
+            "已命中": mergedItems.length,
+            "已搜页数": loadedPages,
+            "页上限": MaxContinuousSearchPages,
+          },
+        });
+        appendOperationLog(
+          "info",
+          `第 ${page} 页返回 ${pageItems.length} 个账号，累计 ${mergedItems.length}/${targetCount} 个候选`,
+          {
+            current: mergedItems.length,
+            total: targetCount,
+          },
+        );
         if (!hasMore) break;
+        cursor = nextCursor;
         page += 1;
       }
 
@@ -439,9 +589,6 @@ export function DouyinTargetPanel() {
     if (result) {
       const nextItems = result.items || [];
       setSearchResult(result);
-      setSearchRequest(request);
-      setSearchPage(result.loaded_pages || 1);
-      setSearchHasMore(hasMoreSearchResults(result, nextItems));
       setSelectedUsers(new Set(nextItems.map(userId).filter(Boolean)));
       if (!activeSetId) {
         setSetForm((current) => ({
@@ -456,31 +603,33 @@ export function DouyinTargetPanel() {
           ? `已持续搜索 ${result.loaded_pages || 1} 页，达到目标 ${nextItems.length}/${targetCount} 个候选账号`
           : `已搜索到 ${nextItems.length}/${targetCount} 个候选账号，暂无更多满足条件的账号`,
       );
-    }
-  }
-
-  async function handleLoadMoreSearch() {
-    if (!searchResult || busy) return;
-    const nextPage = searchPage + 1;
-    const request = searchRequest || { keyword, ...searchPayload };
-    const result = await run("search-more", () =>
-      searchDouyinTargets({ ...request, page: nextPage, count: SearchPageSize }),
-    );
-    if (result) {
-      const nextItems = result.items || [];
-      setSearchResult((current) => {
-        const mergedItems = mergeUniqueUsers(current?.items || [], nextItems);
-        return {
-          ...result,
-          items: mergedItems,
-          count: mergedItems.length,
-          loaded_count: mergedItems.length,
-        };
+      updateOperation({
+        running: false,
+        percent: 100,
+        current: nextItems.length,
+        total: targetCount,
+        currentItem: result.reached_target
+          ? `已达到目标 ${nextItems.length}/${targetCount} 个账号`
+          : `已完成搜索 ${nextItems.length}/${targetCount} 个账号`,
+        stats: {
+          "目标账号": targetCount,
+          "已命中": nextItems.length,
+          "已搜页数": result.loaded_pages || 1,
+          "页上限": MaxContinuousSearchPages,
+        },
       });
-      setSearchPage(nextPage);
-      setSearchHasMore(hasMoreSearchResults(result, nextItems));
-      setSelectedUsers((current) => appendSelectedUserIds(current, nextItems));
-      setMessage(`已加载第 ${nextPage} 页，新增 ${nextItems.length} 个候选账号`);
+      appendOperationLog(
+        "success",
+        result.reached_target
+          ? `搜索完成，已达到目标 ${nextItems.length}/${targetCount} 个账号`
+          : `搜索完成，已获得 ${nextItems.length}/${targetCount} 个账号`,
+        {
+          running: false,
+          percent: 100,
+          current: nextItems.length,
+          total: targetCount,
+        },
+      );
     }
   }
 
@@ -560,12 +709,99 @@ export function DouyinTargetPanel() {
       setError("请先选择或创建一个对标集合。");
       return;
     }
-    const result = await run("collect", () => collectDouyinTargetVideos({ setId: activeSetId, ...strategy }));
-    if (result) {
-      setMessage(`已采集并选中 ${result.count} 条对标视频`);
-      if (result.errors?.length) {
-        setError(formatCollectErrors(result.errors));
+    if (!activeUsers.length) {
+      setError("当前合集还没有账号，无法采集作品。");
+      return;
+    }
+    const totalUsers = activeUsers.length || 0;
+    startOperation({
+      type: "collect",
+      title: `采集合集「${activeSet?.name || activeSetId}」`,
+      running: true,
+      percent: 0,
+      current: 0,
+      total: totalUsers || 1,
+      currentItem: "准备开始采集",
+      stats: {
+        "目标账号": totalUsers,
+        "已采集": 0,
+        "已入库视频": 0,
+        "失败账号": 0,
+      },
+      logs: [createOperationLog("info", `开始采集 ${totalUsers} 个账号的作品`)],
+    });
+    const result = await run("collect", async () => {
+      let savedCount = 0;
+      const failedUsers = [];
+      let processedUsers = 0;
+      for (const user of activeUsers) {
+        const userTargetId = user.id || user.sec_user_id || user.sec_uid || user.uid || user.unique_id;
+        const label = user.nickname || user.unique_id || userTargetId;
+        updateOperation({
+          percent: progressPercent(processedUsers, totalUsers || 1),
+          current: processedUsers,
+          total: totalUsers || 1,
+          currentItem: `正在采集 ${label}`,
+          stats: {
+            "目标账号": totalUsers,
+            "已采集": processedUsers,
+            "已入库视频": savedCount,
+            "失败账号": failedUsers.length,
+          },
+        });
+        appendOperationLog("info", `开始采集账号：${label}`);
+        const userResult = await collectDouyinTargetVideos({
+          setId: activeSetId,
+          userIds: [userTargetId],
+          ...strategy,
+        });
+        processedUsers += 1;
+        const savedVideos = Number(userResult?.count || userResult?.videos?.length || 0);
+        savedCount += savedVideos;
+        const errors = Array.isArray(userResult?.errors) ? userResult.errors : [];
+        if (errors.length) {
+          failedUsers.push(...errors);
+          appendOperationLog("error", `${label} 采集失败：${errors[0]?.error || "未知错误"}`);
+        } else {
+          appendOperationLog("success", `${label} 采集完成，新增 ${savedVideos} 条视频`);
+        }
+        updateOperation({
+          percent: progressPercent(processedUsers, totalUsers || 1),
+          current: processedUsers,
+          total: totalUsers || 1,
+          currentItem: `已采集 ${processedUsers}/${totalUsers || 1} 个账号`,
+          stats: {
+            "目标账号": totalUsers,
+            "已采集": processedUsers,
+            "已入库视频": savedCount,
+            "失败账号": failedUsers.length,
+          },
+        });
       }
+      return { savedCount, failedUsers, processedUsers };
+    });
+    if (result) {
+      setMessage(`已采集并选中 ${result.savedCount} 条对标视频`);
+      if (result.failedUsers?.length) {
+        setError(formatCollectErrors(result.failedUsers));
+      }
+      updateOperation({
+        running: false,
+        percent: 100,
+        current: result.processedUsers,
+        total: totalUsers || 1,
+        currentItem: `采集完成：${result.savedCount} 条视频`,
+        stats: {
+          "目标账号": totalUsers,
+          "已采集": result.processedUsers,
+          "已入库视频": result.savedCount,
+          "失败账号": result.failedUsers?.length || 0,
+        },
+      });
+      appendOperationLog("success", `采集完成，共入库 ${result.savedCount} 条视频`, {
+        running: false,
+        percent: 100,
+      });
       await loadSets(activeSetId);
     }
   }
@@ -631,14 +867,14 @@ export function DouyinTargetPanel() {
         <form className="target-search-form" onSubmit={handleSearch}>
           <label className="wide-field">
             关键词
-            <input value={keyword} onChange={handleKeywordChange} placeholder="可爱、宠物、穿搭..." required />
+            <input value={keyword} onChange={handleKeywordChange} placeholder="塔罗、宠物、穿搭..." required />
           </label>
           <label>
             目标账号数
             <input
               type="number"
               min="1"
-              max="500"
+              max={MaxTargetAccountCount}
               value={filters.targetAccountCount}
               onChange={(event) => setFilters((current) => ({ ...current, targetAccountCount: event.target.value }))}
             />
@@ -712,6 +948,7 @@ export function DouyinTargetPanel() {
             <span>{busyText}</span>
           </div>
         )}
+        <DouyinOperationProgress operation={trackedOperation} />
         {message && <div className="running-note">{message}</div>}
         {error && <div className="error-box">{error}</div>}
 
@@ -948,11 +1185,9 @@ export function DouyinTargetPanel() {
           {!users.length && <div className="empty-result">输入关键词后开始搜索候选账号。</div>}
         </div>
         {searchResult && (
-          <div className="target-search-pagination">
-            <span>已展示 {users.length} 个候选账号{searchPage ? ` / 第 ${searchPage} 页` : ""}</span>
-            <button className="text-button" type="button" onClick={handleLoadMoreSearch} disabled={!searchHasMore || busy === "search-more"}>
-              {searchHasMore ? "下一页，展示更多" : "没有更多账号"}
-            </button>
+          <div className="target-search-pagination target-search-summary">
+            <span>已一次性展示 {users.length} 个候选账号{searchResult.loaded_pages ? ` / 已搜索 ${searchResult.loaded_pages} 页` : ""}</span>
+            <span>下滑列表查看全部</span>
           </div>
         )}
       </section>

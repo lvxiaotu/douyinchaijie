@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -13,6 +14,7 @@ from backend.app import task_store
 from backend.app import short_video_analysis_store
 from backend.app import tiktok_target_store
 from backend.app import video_analysis_queue
+from backend.app.routes import ai_video_analysis as ai_video_route
 from backend.app.routes.douyin_target import delete_video_analysis
 from backend.app.video_analysis_worker import coordinator
 
@@ -142,6 +144,63 @@ class AiVideoQueueTests(unittest.TestCase):
         self.assertIn("worker_enabled", snapshot)
         self.assertIn("worker_started", snapshot)
         self.assertIn("thread_count", snapshot)
+
+    def test_worker_reconcile_reports_target_and_delta(self):
+        old_started = coordinator.started
+        old_threads = list(coordinator.threads)
+        old_desired = coordinator.desired_thread_count
+        try:
+            with patch.object(coordinator, "enabled", return_value=True), patch.object(coordinator, "_compact_threads_locked") as compact_mock, patch.object(
+                coordinator, "_spawn_worker_thread", return_value=None
+            ) as spawn_mock:
+                coordinator.started = True
+                coordinator.desired_thread_count = 1
+                coordinator.threads = []
+                status = coordinator.reconcile(2)
+
+            self.assertEqual(status["target_thread_count"], 2)
+            self.assertEqual(status["thread_count_delta"], -2)
+            self.assertEqual(status["spawned"], 2)
+            compact_mock.assert_called()
+            self.assertEqual(spawn_mock.call_count, 2)
+        finally:
+            coordinator.threads = old_threads
+            coordinator.desired_thread_count = old_desired
+            coordinator.started = old_started
+
+    def test_save_config_triggers_worker_reconcile(self):
+        payload = ai_video_route.AiVideoConfigPayload(max_concurrent_tasks=2)
+
+        with patch.object(ai_video_route, "write_env_values") as write_env_values, patch.object(
+            ai_video_route.ai_video_coordinator, "reconcile", return_value={"target_thread_count": 2, "thread_count": 1, "thread_count_delta": -1, "spawned": 0}
+        ) as reconcile, patch.object(ai_video_route, "get_config", return_value={"max_concurrent_tasks": 2}):
+            result = ai_video_route.save_config(payload)
+
+        write_env_values.assert_called_once()
+        reconcile.assert_called_once_with(2)
+        self.assertEqual(result["worker_reconcile"]["target_thread_count"], 2)
+
+    def test_restart_workers_restarts_worker_runtime(self):
+        with patch.object(ai_video_route.ai_video_coordinator, "stop") as stop_mock, patch.object(
+            ai_video_route.ai_video_coordinator, "start"
+        ) as start_mock, patch.object(
+            ai_video_route.ai_video_coordinator,
+            "status",
+            return_value={
+                "worker_enabled": True,
+                "worker_started": True,
+                "thread_count": 2,
+                "worker_target_threads": 2,
+                "thread_count_delta": 0,
+            },
+        ) as status_mock:
+            result = ai_video_route.restart_workers()
+
+        stop_mock.assert_called_once()
+        start_mock.assert_called_once()
+        status_mock.assert_called_once()
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["worker_status"]["thread_count"], 2)
 
     def test_failed_jobs_show_up_in_recent_snapshot(self):
         self.create_task_and_job(1)

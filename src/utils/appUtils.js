@@ -667,9 +667,9 @@ export function archiveIdSet(archives) {
 
 export function groupTasksByStatus(tasks) {
   return {
-    running: tasks.filter((task) => !["done", "error"].includes(task.status)),
+    running: tasks.filter((task) => ["pending", "running", "claimed", "queued", "retry_waiting", "stale_requeued"].includes(task.status)),
     done: tasks.filter((task) => task.status === "done"),
-    error: tasks.filter((task) => task.status === "error"),
+    error: tasks.filter((task) => ["error", "failed", "failed_final"].includes(task.status)),
   };
 }
 

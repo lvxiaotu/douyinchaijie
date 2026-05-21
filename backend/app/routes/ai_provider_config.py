@@ -326,7 +326,7 @@ def test_config(payload: AiProviderConfigPayload) -> dict[str, Any]:
             payload.model = first_model(payload.models)
         if payload.provider == "gemini":
             payload.access_mode = "relay"
-            return test_gemini(payload)
+            return test_gemini_relay(payload)
         if payload.provider == "openai":
             payload.access_mode = "relay"
             if payload.api_format == "responses":
@@ -347,34 +347,6 @@ def test_config(payload: AiProviderConfigPayload) -> dict[str, Any]:
             "model": payload.model,
             "message": f"{type(exc).__name__}: {exc}",
         }
-
-
-def test_gemini(payload: AiProviderConfigPayload) -> dict[str, Any]:
-    return test_gemini_relay(payload)
-
-
-def test_gemini_official(payload: AiProviderConfigPayload) -> dict[str, Any]:
-    raise RuntimeError("Gemini official/native access is disabled. Use relay/Yunwu.")
-    if not payload.native_api_key:
-        raise ValueError("Missing native API key.")
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise RuntimeError("Missing dependency google-genai. Run: pip install -r requirements.txt") from exc
-
-    client = genai.Client(api_key=payload.native_api_key)
-    response = client.models.generate_content(
-        model=payload.model,
-        contents="Reply with exactly: ok",
-    )
-    return {
-        "ok": True,
-        "provider": payload.provider,
-        "access_mode": payload.access_mode,
-        "model": payload.model,
-        "message": "原生官方连接成功。",
-        "sample": (response.text or "").strip()[:200],
-    }
 
 
 def test_gemini_relay(payload: AiProviderConfigPayload) -> dict[str, Any]:

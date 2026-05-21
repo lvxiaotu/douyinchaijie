@@ -480,7 +480,8 @@ def save_config(payload: AiVideoConfigPayload) -> dict[str, Any]:
                 "AI_VIDEO_ANALYSIS_PROMPT": payload.analysis_prompt,
             }
         )
-        return {"status": "ok", "config": get_config()}
+        worker_reconcile = ai_video_coordinator.reconcile(payload.max_concurrent_tasks)
+        return {"status": "ok", "config": get_config(), "worker_reconcile": worker_reconcile}
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -758,10 +759,30 @@ def create_breakdown_job(payload: BreakdownRequest) -> dict[str, Any]:
 @router.get("/queue/status")
 def queue_status(backlog_limit: int = 20, task_id: str | None = None) -> dict[str, Any]:
     snapshot = queue_snapshot(task_id=task_id, backlog_limit=backlog_limit)
-    snapshot["worker_enabled"] = ai_video_coordinator.enabled()
-    snapshot["worker_started"] = ai_video_coordinator.started
-    snapshot["thread_count"] = len(ai_video_coordinator.threads)
+    worker_status = ai_video_coordinator.status()
+    snapshot["worker_enabled"] = worker_status["worker_enabled"]
+    snapshot["worker_started"] = worker_status["worker_started"]
+    snapshot["thread_count"] = worker_status["thread_count"]
+    snapshot["worker_target_threads"] = worker_status["worker_target_threads"]
+    snapshot["thread_count_delta"] = worker_status["thread_count_delta"]
     return snapshot
+
+
+@router.post("/workers/restart")
+def restart_workers() -> dict[str, Any]:
+    try:
+        ai_video_coordinator.stop()
+        ai_video_coordinator.start()
+        return {"status": "ok", "worker_status": ai_video_coordinator.status()}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "hint": "Unable to restart AI video workers.",
+            },
+        ) from exc
 
 
 @router.get("/jobs/{task_id}/queue")

@@ -52,6 +52,7 @@ router = APIRouter(prefix="/api/tools/douyin-target", tags=["douyin-target"])
 class TargetSearchRequest(BaseModel):
     keyword: str
     page: int = Field(default=1, ge=1)
+    cursor: int | None = Field(default=None, ge=0)
     count: int = Field(default=20, ge=1, le=50)
     minFollowers: int | None = None
     maxFollowers: int | None = None
@@ -820,20 +821,22 @@ def _collect_video_comment_snapshot(
 @router.post("/search")
 def search(payload: TargetSearchRequest) -> dict[str, Any]:
     try:
-        result = TikhubDouyinApiAdapter().search_users(keyword=payload.keyword, page=payload.page, count=payload.count)
+        result = TikhubDouyinApiAdapter().search_users(
+            keyword=payload.keyword,
+            page=payload.page,
+            cursor=payload.cursor,
+            count=payload.count,
+        )
     except TikhubApiError as exc:
         raise HTTPException(
             status_code=502,
             detail={
                 "error_type": type(exc).__name__,
                 "message": str(exc),
-                "hint": "TikHub 搜索失败：请先核对 openapi 里 fetch_user_search 的参数，仅保留 keyword/cursor/douyin_user_fans/douyin_user_type/search_id。若仍失败，改用 v2 或把 upstream JSON 发给支持团队。",
+                "hint": "TikHub 搜索失败：当前用户搜索已改用 fetch_user_search_v2，上游仅支持 keyword/cursor；粉丝量、作品数等筛选会在本地入库后执行。",
                 "demo_request": {
                     "keyword": payload.keyword,
-                    "cursor": 0,
-                    "douyin_user_fans": "",
-                    "douyin_user_type": "",
-                    "search_id": "",
+                    "cursor": payload.cursor or 0,
                 },
                 "upstream": exc.to_dict(),
                 "error_log_path": exc.error_log_path,
@@ -848,10 +851,11 @@ def search(payload: TargetSearchRequest) -> dict[str, Any]:
                 "hint": "TikHub 搜索失败，请检查 TIKHUB_API_KEY、TIKHUB_API_BASE 或上游接口状态。",
             },
         ) from exc
-    items = [item for item in result.get("items", []) if _passes_search_filters(item, payload)]
-    items = _sort_users(items, payload.sortBy)
-    result["items"] = items
-    result["count"] = len(items)
+    raw_items = result.get("items", [])
+    items = [item for item in raw_items if _passes_search_filters(item, payload)]
+    result["items"] = _sort_users(items, payload.sortBy)
+    result["count"] = len(result["items"])
+    result["raw_count"] = len(raw_items)
     result["filters"] = payload.model_dump()
     return result
 

@@ -374,9 +374,11 @@ TARGET_VIDEO_COMMENT_PAGE_COLUMNS = {
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(DB_PATH, timeout=30.0)
     connection.row_factory = sqlite3.Row
     try:
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA journal_mode = WAL")
         yield connection
         connection.commit()
     finally:
@@ -1801,15 +1803,27 @@ def list_target_sets(limit: int = 100) -> list[dict[str, Any]]:
     with connect() as connection:
         rows = connection.execute(
             """
+            WITH user_counts AS (
+                SELECT set_id, COUNT(*) AS user_count
+                FROM tiktok_target_set_users
+                GROUP BY set_id
+            ),
+            video_counts AS (
+                SELECT
+                    set_id,
+                    COUNT(*) AS video_count,
+                    SUM(CASE WHEN analysis_status = 'done' THEN 1 ELSE 0 END) AS analyzed_count
+                FROM tiktok_target_videos
+                GROUP BY set_id
+            )
             SELECT
                 s.*,
-                COUNT(DISTINCT su.user_id) AS user_count,
-                COUNT(DISTINCT v.id) AS video_count,
-                SUM(CASE WHEN v.analysis_status = 'done' THEN 1 ELSE 0 END) AS analyzed_count
+                COALESCE(u.user_count, 0) AS user_count,
+                COALESCE(v.video_count, 0) AS video_count,
+                COALESCE(v.analyzed_count, 0) AS analyzed_count
             FROM tiktok_target_sets s
-            LEFT JOIN tiktok_target_set_users su ON su.set_id = s.id
-            LEFT JOIN tiktok_target_videos v ON v.set_id = s.id
-            GROUP BY s.id
+            LEFT JOIN user_counts u ON u.set_id = s.id
+            LEFT JOIN video_counts v ON v.set_id = s.id
             ORDER BY s.updated_at DESC
             LIMIT ?
             """,

@@ -13,13 +13,12 @@ from integrations.base import IntegrationAdapter, IntegrationManifest
 from backend.app.ai_provider_state import active_ai_provider
 from backend.app.video_analysis_queue import raise_if_ai_video_cancelled, record_ai_model_run, record_ai_video_artifact, upsert_ai_video_chunk
 from integrations.ai_video_analysis.analysis_runner import run_evidence_breakdown
+from integrations.ai_video_analysis.call_helpers import call_generate_text_hook
 from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
 from integrations.ai_video_analysis.model_gateway import (
+    AiVideoProviderRoute,
     normalized_usage,
-    relay_base_url,
-    relay_token,
-    uses_gemini_relay_provider,
-    uses_openai_compatible_relay,
+    resolve_ai_video_provider_route,
 )
 from integrations.ai_video_analysis.http_policy import default_max_retries, default_timeout_seconds, get_with_retries
 from integrations.ai_video_analysis.prompt_builder import (
@@ -64,7 +63,6 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             or os.getenv("YUNWU_MODEL")
             or os.getenv("AI_MODEL", "gemini-2.5-flash")
         )
-        self.gemini_access_mode = "relay"
         self.summary_provider = (
             self.config.get("summary_provider")
             or os.getenv("AI_VIDEO_SUMMARY_PROVIDER")
@@ -92,22 +90,11 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
 
     def validate_config(self, config: dict[str, Any] | None = None) -> list[str]:
         cfg = {**self.config, **(config or {})}
-        provider = cfg.get("provider") or os.getenv("AI_VIDEO_PROVIDER", self.provider)
-        errors = []
-        if provider == "gemini":
-            access_mode = "relay"
-            if self._uses_openai_compatible_relay():
-                if not (os.getenv("AI_VIDEO_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
-                    errors.append("Missing AI_VIDEO_RELAY_API_KEY")
-            elif not (os.getenv("GEMINI_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
-                errors.append("Missing GEMINI_RELAY_API_KEY")
-        if provider == "openai" and not (os.getenv("OPENAI_RELAY_API_KEY") or os.getenv("AI_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY")):
-            errors.append("Missing OPENAI_RELAY_API_KEY")
-        if provider == "yunwu" and self._uses_openai_compatible_relay(provider):
-            if not (os.getenv("AI_VIDEO_RELAY_API_KEY") or os.getenv("YUNWU_API_KEY") or os.getenv("AI_RELAY_API_KEY")):
-                errors.append("Missing AI_VIDEO_RELAY_API_KEY")
-        if provider == "local" and not os.getenv("LOCAL_VIDEO_MODEL_ENDPOINT"):
-            errors.append("Missing LOCAL_VIDEO_MODEL_ENDPOINT")
+        route = self._provider_route(
+            cfg.get("provider") or self.provider,
+            pipeline_mode=(cfg.get("pipeline_mode") or self.pipeline_mode),
+        )
+        errors = list(route.config_errors)
         summary_provider = (cfg.get("summary_provider") or os.getenv("AI_VIDEO_SUMMARY_PROVIDER") or "").lower()
         if summary_provider == "deepseek" and not (os.getenv("AI_VIDEO_SUMMARY_API_KEY") or os.getenv("DEEPSEEK_API_KEY")):
             errors.append("Missing DEEPSEEK_API_KEY")
@@ -137,28 +124,24 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         aweme_id = str(video.get("aweme_id") or video.get("id") or int(time.time()))
         job_id = job_id or f"video-breakdown-{aweme_id}-{int(time.time())}"
         selected_provider = provider or self.provider
+        route = self._provider_route(selected_provider)
+        if route.config_errors:
+            raise RuntimeError(route.error_message)
         prompt = self._analysis_prompt(video)
         if progress:
             progress(10, "准备 AI 视频拆解任务")
         self._check_cancelled(job_id)
-        if selected_provider == "mock":
+        if route.family == "mock":
             if progress:
                 progress(60, "生成 mock 拆解结果")
             self._check_cancelled(job_id)
             result = self._mock_result(video)
             status = "done"
-        elif (
-            selected_provider == "gemini"
-            or self._uses_gemini_relay_provider(selected_provider)
-            or self._uses_openai_compatible_relay(selected_provider)
-        ):
-            result = self._analysis_result(video, selected_provider=selected_provider, job_id=job_id, progress=progress, prompt=prompt)
+        elif route.can_use_evidence_pipeline:
+            result = self._analysis_result(video, route=route, job_id=job_id, progress=progress, prompt=prompt)
             status = "done"
         else:
-            raise RuntimeError(
-                f"当前全局 AI 模型 {selected_provider} 暂不支持视频上传任务。"
-                "请在配置 -> AI 模型中选择 云雾 API 或 简单中转站，并将 API 格式设为 Gemini 原生 generateContent。"
-            )
+            raise RuntimeError(route.error_message or f"当前全局 AI 模型 {selected_provider} 暂不支持视频上传任务。")
         job = {
             "job_id": job_id,
             "status": status,
@@ -180,13 +163,15 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         self,
         video: dict[str, Any],
         *,
-        selected_provider: str,
+        route: AiVideoProviderRoute,
         job_id: str,
         progress: Callable[[int, str], None] | None = None,
         prompt: str | None = None,
     ) -> dict[str, Any]:
         if self.pipeline_mode == "direct":
-            return self._gemini_result(video, progress=progress, prompt=prompt)
+            if not route.can_use_direct_video:
+                raise RuntimeError(route.error_message or "AI_VIDEO_PIPELINE_MODE=direct requires Gemini relay")
+            return self._gemini_result(video, route=route, progress=progress, prompt=prompt)
 
         try:
             self._check_cancelled(job_id)
@@ -194,7 +179,7 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             self._check_cancelled(job_id)
             self._record_evidence_state(job_id, evidence)
             self._check_cancelled(job_id)
-            result = self._evidence_breakdown(video, evidence=evidence, progress=progress)
+            result = self._evidence_breakdown(video, evidence=evidence, progress=progress, route=route)
             result["analysis_mode"] = "evidence_pipeline"
             result["evidence"] = self._compact_evidence(evidence)
             return result
@@ -203,7 +188,7 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
                 raise
             if progress:
                 progress(60, f"证据包流程不可用，回退直接视频分析：{type(exc).__name__}")
-            result = self._gemini_result(video, progress=progress, prompt=prompt)
+            result = self._gemini_result(video, route=route, progress=progress, prompt=prompt)
             result["analysis_mode"] = "direct_video_fallback"
             result["pipeline_error"] = f"{type(exc).__name__}: {exc}"
             return result
@@ -213,9 +198,10 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         video: dict[str, Any],
         *,
         evidence: dict[str, Any],
+        route: AiVideoProviderRoute | None = None,
         progress: Callable[[int, str], None] | None = None,
     ) -> dict[str, Any]:
-        return run_evidence_breakdown(self, video, evidence=evidence, progress=progress)
+        return run_evidence_breakdown(self, video, evidence=evidence, progress=progress, route=route)
 
     def _check_cancelled(self, task_id: str) -> None:
         raise_if_ai_video_cancelled(task_id)
@@ -362,34 +348,59 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             return [str(image_path)]
         return []
 
-    def _generate_text_json(self, prompt: str, *, action: str, image_paths: list[str] | None = None) -> str:
-        self._last_model_provider_value = active_ai_provider(self.provider) or self.provider
+    def _generate_text_json(
+        self,
+        prompt: str,
+        *,
+        action: str,
+        image_paths: list[str] | None = None,
+        route: AiVideoProviderRoute | None = None,
+    ) -> str:
+        route = route or self._provider_route()
+        self._last_model_provider_value = route.provider or active_ai_provider(self.provider) or self.provider
         self._last_model_name_value = self.gemini_model
-        if self._uses_openai_compatible_relay():
+        if route.family == "openai_compatible_relay":
             return self._generate_text_with_openai_compatible_relay(
                 prompt=prompt,
                 model=self.gemini_model,
                 action=action,
                 image_paths=image_paths,
+                route=route,
             )
-        if self._uses_gemini_relay_provider(active_ai_provider("")) or (self.gemini_access_mode or "").lower() == "relay":
-            return self._generate_text_with_relay(prompt=prompt, model=self.gemini_model, action=action, image_paths=image_paths)
+        if route.family == "gemini_relay":
+            return self._generate_text_with_relay(
+                prompt=prompt,
+                model=self.gemini_model,
+                action=action,
+                image_paths=image_paths,
+                route=route,
+            )
+        raise RuntimeError(route.error_message or "Gemini official/native access is disabled. Configure Yunwu or another relay provider.")
 
-        raise RuntimeError("Gemini official/native access is disabled. Configure Yunwu or another relay provider.")
-
-    def _generate_global_summary_json(self, prompt: str, *, action: str) -> str:
+    def _generate_global_summary_json(
+        self,
+        prompt: str,
+        *,
+        action: str,
+        route: AiVideoProviderRoute | None = None,
+    ) -> str:
         if self.summary_provider == "deepseek":
             try:
                 return self._generate_text_with_deepseek(prompt=prompt, action=action)
             except Exception as exc:
                 if self.summary_fallback_provider not in {"vision", "gemini", "relay"}:
                     raise
-                fallback_text = self._generate_text_json(prompt, action=f"{action} (fallback)")
+                fallback_text = call_generate_text_hook(
+                    self._generate_text_json,
+                    prompt,
+                    action=f"{action} (fallback)",
+                    route=route,
+                )
                 self._last_model_usage["fallback_from"] = "deepseek"
                 self._last_model_usage["fallback_error"] = f"{type(exc).__name__}: {exc}"
                 self._last_model_usage["fallback_provider"] = self._last_model_provider("global_breakdown")
                 return fallback_text
-        return self._generate_text_json(prompt, action=action)
+        return call_generate_text_hook(self._generate_text_json, prompt, action=action, route=route)
 
     def _generate_text_with_openai_compatible_relay(
         self,
@@ -398,8 +409,10 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         model: str,
         action: str,
         image_paths: list[str] | None = None,
+        route: AiVideoProviderRoute | None = None,
     ) -> str:
-        client = OpenAICompatibleRelayClient(model=model)
+        route = route or self._provider_route()
+        client = OpenAICompatibleRelayClient(base_url=route.base_url, api_key=route.api_key, model=model)
         started = time.perf_counter()
         response = client.generate_text(
             prompt=prompt,
@@ -433,10 +446,19 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         self._last_model_name_value = self.summary_model
         return response.text
 
-    def _generate_text_with_relay(self, *, prompt: str, model: str, action: str, image_paths: list[str] | None = None) -> str:
+    def _generate_text_with_relay(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        action: str,
+        image_paths: list[str] | None = None,
+        route: AiVideoProviderRoute | None = None,
+    ) -> str:
+        route = route or self._provider_route()
         client = GeminiGenerateContentRelayClient(
-            base_url=self._relay_base_url(),
-            api_key=self._relay_token(),
+            base_url=route.base_url,
+            api_key=route.api_key,
             model=model,
         )
         started = time.perf_counter()
@@ -552,30 +574,34 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
     def _gemini_result(
         self,
         video: dict[str, Any],
+        *,
+        route: AiVideoProviderRoute | None = None,
         progress: Callable[[int, str], None] | None = None,
         prompt: str | None = None,
     ) -> dict[str, Any]:
         prompt = prompt or self._analysis_prompt(video)
-        access_mode = "relay"
-        if self._uses_openai_compatible_relay():
+        route = route or self._provider_route()
+        if route.family == "openai_compatible_relay":
             raise RuntimeError(
                 "OpenAI-compatible relay does not support direct full-video upload in this adapter. "
                 "Use AI_VIDEO_PIPELINE_MODE=evidence so the system sends transcript chunks plus keyframe grids."
             )
-        if access_mode == "relay" or self._uses_gemini_relay_provider(active_ai_provider("")):
-            return self._gemini_relay_result(video, progress=progress, prompt=prompt)
-
-        raise RuntimeError("Gemini official/native access is disabled. Configure Yunwu or another relay provider.")
+        if route.family != "gemini_relay":
+            raise RuntimeError(route.error_message or "Gemini official/native access is disabled. Configure Yunwu or another relay provider.")
+        return self._gemini_relay_result(video, route=route, progress=progress, prompt=prompt)
 
     def _gemini_relay_result(
         self,
         video: dict[str, Any],
+        *,
+        route: AiVideoProviderRoute | None = None,
         progress: Callable[[int, str], None] | None = None,
         prompt: str | None = None,
     ) -> dict[str, Any]:
         prompt = prompt or self._analysis_prompt(video)
-        if not (self._relay_token()):
-            raise RuntimeError("Set GEMINI_RELAY_API_KEY in .env before using Gemini relay.")
+        route = route or self._provider_route()
+        if not route.api_key:
+            raise RuntimeError(route.error_message or "Set GEMINI_RELAY_API_KEY in .env before using Gemini relay.")
         if progress:
             progress(20, "定位或下载视频文件")
         video_path = self._resolve_video_file(video)
@@ -585,6 +611,7 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             video_path=video_path,
             prompt=prompt,
             model=self.gemini_model,
+            route=route,
             progress=progress,
             action="请求 Gemini 中转站生成拆解结果",
         )
@@ -600,11 +627,13 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         model: str,
         progress: Callable[[int, str], None] | None,
         action: str,
+        route: AiVideoProviderRoute | None = None,
         system_instruction: str | None = None,
     ) -> str:
+        route = route or self._provider_route()
         client = GeminiGenerateContentRelayClient(
-            base_url=self._relay_base_url(),
-            api_key=self._relay_token(),
+            base_url=route.base_url,
+            api_key=route.api_key,
             model=model,
         )
         started = time.perf_counter()
@@ -626,17 +655,17 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         self._last_model_name_value = model
         return response.text
 
-    def _uses_gemini_relay_provider(self, provider: str) -> bool:
-        return uses_gemini_relay_provider(provider)
-
-    def _uses_openai_compatible_relay(self, provider: str | None = None) -> bool:
-        return uses_openai_compatible_relay(provider, active_provider=active_ai_provider(""))
-
-    def _relay_base_url(self) -> str:
-        return relay_base_url(active_ai_provider(""))
-
-    def _relay_token(self) -> str:
-        return relay_token(active_ai_provider(""))
+    def _provider_route(
+        self,
+        provider: str | None = None,
+        *,
+        pipeline_mode: str | None = None,
+    ) -> AiVideoProviderRoute:
+        return resolve_ai_video_provider_route(
+            provider or self.provider,
+            active_provider=self.provider,
+            pipeline_mode=pipeline_mode or self.pipeline_mode,
+        )
 
     def _resolve_video_file(self, video: dict[str, Any]) -> Path:
         for key in ["local_path", "path", "file_path"]:
@@ -759,16 +788,4 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
                 "comment_potential": 0,
                 "overall": 0,
             },
-        }
-
-    def _provider_placeholder(self, video: dict[str, Any], provider: str) -> dict[str, Any]:
-        return {
-            "summary": f"{provider} provider 已预留，等待接入真实上传和模型调用逻辑。",
-            "timeline": [],
-            "hooks": [],
-            "visuals": [],
-            "audio": [],
-            "copywriting": [],
-            "keywords": [],
-            "rewrite_prompts": [],
         }

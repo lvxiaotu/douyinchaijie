@@ -31,7 +31,7 @@ def attach_ai_video_model_runs(task: dict[str, Any]) -> dict[str, Any]:
 @router.get("")
 def tasks(
     task_type: str | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=5000),
     include_result: bool = Query(default=False),
     include_events: bool = Query(default=False),
 ) -> list[dict[str, Any]]:

@@ -232,6 +232,17 @@ export function AiVideoQueuePanel({ taskId, onDeleted }) {
     return () => window.clearInterval(timer);
   }, [taskId]);
 
+  const queueProgress = useMemo(() => {
+    if (!snapshot) return { percent: 0, label: "等待加载" };
+    const total = Number(snapshot.active || 0) + Number(snapshot.queued || 0) + Number(snapshot.done || 0) + Number(snapshot.failed || 0) + Number(snapshot.cancelled || 0);
+    const finished = Number(snapshot.done || 0) + Number(snapshot.failed || 0) + Number(snapshot.cancelled || 0);
+    const percent = total > 0 ? Math.min(100, Math.round((finished / total) * 100)) : 0;
+    return {
+      percent,
+      label: `已完成 ${finished}/${total || 0}，进行中 ${snapshot.active || 0}，排队 ${snapshot.queued || 0}`,
+    };
+  }, [snapshot]);
+
   const metrics = useMemo(() => {
     if (!snapshot) return [];
     return [
@@ -267,12 +278,34 @@ export function AiVideoQueuePanel({ taskId, onDeleted }) {
       </div>
 
       {snapshot && (
+        <div className="queue-progress-banner" role="status" aria-live="polite">
+          <div className="queue-progress-header">
+            <strong>处理进度</strong>
+            <span>{queueProgress.label}</span>
+          </div>
+          <div className="queue-progress-track">
+            <div className="queue-progress-bar" style={{ width: `${queueProgress.percent}%` }} />
+          </div>
+          <div className="queue-progress-meta">
+            <span>worker 目标 {snapshot.worker_target_threads ?? snapshot.max_concurrent ?? 0}</span>
+            <span>当前线程 {snapshot.thread_count || 0}</span>
+            {Number(snapshot.thread_count_delta || 0) !== 0 && <span>差值 {snapshot.thread_count_delta}</span>}
+          </div>
+        </div>
+      )}
+
+      {snapshot && (
         <>
           <div className="queue-summary-row">
             <Badge status={snapshot.worker_started ? "done" : "draft"}>{snapshot.worker_started ? "worker 已启动" : "worker 未启动"}</Badge>
             <Badge status={snapshot.worker_enabled ? "ready" : "error"}>{snapshot.worker_enabled ? "worker 启用" : "worker 停用"}</Badge>
             <Badge status="running">{snapshot.thread_count || 0} 条线程</Badge>
             <Badge status="running">{snapshot.oldest_queued_at ? `最早排队 ${formatDateTime(snapshot.oldest_queued_at)}` : "暂无排队"}</Badge>
+            {snapshot.worker_target_threads != null && (
+              <Badge status={snapshot.thread_count_delta === 0 ? "done" : "paused"}>
+                目标 {snapshot.worker_target_threads}
+              </Badge>
+            )}
           </div>
 
           <div className="queue-section">

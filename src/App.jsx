@@ -16,6 +16,8 @@ import { TaskRecordModal, TaskStatusRow } from "./features/tasks";
 import { TextToAssetsPanel, TextToAssetsResultModal } from "./features/textToAssets";
 import { archiveIdSet, archivePresentation, groupTasksByStatus, normalizeAnalysisTask, normalizeCommercialAnalysisResult, normalizeProductionReverseTask, normalizePromptReverseTask, normalizeTextToAssetsTask, preferredTaskStatus } from "./utils/appUtils";
 
+const TaskListLimit = 5000;
+
 export function App() {
   const [activeSection, setActiveSection] = useState("dashboard");
   const [activeSetting, setActiveSetting] = useState("ai-provider");
@@ -61,28 +63,28 @@ export function App() {
   );
 
   async function refreshAnalysisTaskList(options = {}) {
-    const tasks = await fetchTasks("ai_video_analysis", options);
+    const tasks = await fetchTasks("ai_video_analysis", { limit: TaskListLimit, ...options });
     setAnalysisTasks(tasks.map((task) => normalizeAnalysisTask(task)));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   }
 
   async function refreshPromptReverseTaskList(options = {}) {
-    const tasks = await fetchTasks("ai_prompt_reverse", options);
+    const tasks = await fetchTasks("ai_prompt_reverse", { limit: TaskListLimit, ...options });
     setPromptReverseTasks(tasks.map(normalizePromptReverseTask));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   }
 
   async function refreshProductionReverseTaskList(options = {}) {
-    const tasks = await fetchTasks("ai_production_reverse", options);
+    const tasks = await fetchTasks("ai_production_reverse", { limit: TaskListLimit, ...options });
     setProductionReverseTasks(tasks.map(normalizeProductionReverseTask));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
   }
 
   async function refreshTextToAssetsTaskList(options = {}) {
-    const tasks = await fetchTasks("text_to_assets", options);
+    const tasks = await fetchTasks("text_to_assets", { limit: TaskListLimit, ...options });
     setTextToAssetsTasks(tasks.map(normalizeTextToAssetsTask));
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));

@@ -2182,6 +2182,53 @@ h1 {
   gap: 8px;
 }
 
+.queue-progress-banner {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.queue-progress-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.queue-progress-header span,
+.queue-progress-meta span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.queue-progress-track {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.queue-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #0ea5e9 0%, #22c55e 100%);
+  transition: width 180ms ease;
+}
+
+.queue-progress-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .queue-section {
   display: grid;
   gap: 12px;
@@ -7444,6 +7491,10 @@ html[data-ui-mode="dark"] textarea {
   display: grid;
   gap: 10px;
   margin-top: 18px;
+  max-height: min(760px, 72vh);
+  overflow-y: auto;
+  padding-right: 6px;
+  overscroll-behavior: contain;
 }
 
 .target-busy-banner {
@@ -7475,6 +7526,146 @@ html[data-ui-mode="dark"] textarea {
   }
 }
 
+.target-operation-progress {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 2px solid color-mix(in srgb, var(--blue) 58%, var(--line));
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--blue) 8%, transparent), transparent 52%),
+    var(--surface-2);
+  box-shadow: 6px 6px 0 var(--shadow);
+}
+
+.target-operation-progress.is-running {
+  border-color: color-mix(in srgb, var(--green) 56%, var(--blue));
+}
+
+.target-operation-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.target-operation-head h3 {
+  margin: 2px 0 4px;
+  font-size: 16px;
+}
+
+.target-operation-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.target-operation-kicker {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.target-operation-percent {
+  flex: none;
+  min-width: 64px;
+  text-align: right;
+  color: var(--blue);
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.target-operation-bar {
+  height: 10px;
+}
+
+.target-operation-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: 8px;
+}
+
+.target-operation-stat {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.target-operation-stat span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.target-operation-stat strong {
+  color: var(--text);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.target-operation-log {
+  display: grid;
+  gap: 6px;
+  max-height: 188px;
+  overflow-y: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 84%, #000 2%);
+}
+
+.target-operation-log-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface-2) 80%, transparent);
+}
+
+.target-operation-log-row span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.target-operation-log-row p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.target-operation-log-row.success {
+  background: color-mix(in srgb, var(--green) 10%, var(--surface));
+}
+
+.target-operation-log-row.success p {
+  color: #166534;
+  font-weight: 800;
+}
+
+.target-operation-log-row.error {
+  background: #fff1f2;
+}
+
+.target-operation-log-row.error p {
+  color: #be123c;
+  font-weight: 800;
+}
+
 .target-search-pagination {
   display: flex;
   align-items: center;
@@ -7490,6 +7681,16 @@ html[data-ui-mode="dark"] textarea {
 .target-search-pagination span {
   color: var(--muted);
   font-size: 13px;
+}
+
+.target-search-summary {
+  justify-content: flex-start;
+}
+
+.target-search-summary span:last-child {
+  margin-left: auto;
+  color: var(--blue);
+  font-weight: 800;
 }
 
 .target-user-row {

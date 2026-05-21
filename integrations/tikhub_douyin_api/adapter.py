@@ -25,8 +25,9 @@ from integrations.base import IntegrationAdapter, IntegrationManifest
 
 DEFAULT_API_BASE = "https://api.tikhub.io"
 DEFAULT_API_KEY_ENV = "TIKHUB_API_KEY"
-DEFAULT_USER_SEARCH_PATH = "/api/v1/douyin/search/fetch_user_search"
-DEFAULT_USER_SEARCH_V2_PATH = "/api/v1/douyin/search/fetch_user_search_v2"
+DEFAULT_USER_SEARCH_PATH = "/api/v1/douyin/search/fetch_user_search_v2"
+DEFAULT_USER_SEARCH_V2_PATH = DEFAULT_USER_SEARCH_PATH
+USER_SEARCH_CACHE_SOURCE = "tikhub-douyin-api:user-search-v2"
 DEFAULT_USER_PROFILE_PATH = "/api/v1/douyin/web/handler_user_profile"
 DEFAULT_USER_VIDEOS_PATH = "/api/v1/douyin/web/fetch_user_post_videos"
 DEFAULT_ONE_VIDEO_PATH = "/api/v1/douyin/app/v3/fetch_one_video_v3"
@@ -133,7 +134,7 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         id="tikhub-douyin-api",
         name="TikHub Douyin API",
         description="TikHub-based Douyin API adapter for future endpoints such as user search, profile, and work data.",
-        repo_url="https://docs.tikhub.io/186826143e0",
+        repo_url="https://docs.tikhub.io/370212785e0",
         tags=["douyin", "tikhub", "api"],
         config_schema={
             "api_base": "TikHub API root URL, default https://api.tikhub.io",
@@ -216,53 +217,46 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         resolved_cursor = cursor if cursor is not None else 0
         if offset is not None and offset > 0 and cursor is None and page <= 1:
             resolved_cursor = offset
-        resolved_user_type = user_type or user_search_profile_type or douyin_user_type
-        resolved_follower_filter = follower_filter or user_search_follower_count
-        normalized_user_type = self._normalize_user_search_type(resolved_user_type)
-        normalized_follower_filter = self._normalize_user_search_fans(resolved_follower_filter)
-        cached = get_target_user_search_page(
-            source=self.manifest.id,
-            keyword=keyword,
-            cursor=int(resolved_cursor or 0),
-            count=target_count,
-            search_id=search_id,
-            douyin_user_fans=normalized_follower_filter,
-            douyin_user_type=normalized_user_type,
-        )
+        cache_count = 0
+        cached = None
+        if cursor is not None or resolved_page <= 1:
+            cached = get_target_user_search_page(
+                source=USER_SEARCH_CACHE_SOURCE,
+                keyword=keyword,
+                cursor=int(resolved_cursor or 0),
+                count=cache_count,
+                search_id="",
+                douyin_user_fans="",
+                douyin_user_type="",
+            )
         if cached:
             response = self._build_cached_user_search_response(cached, page=resolved_page, count=target_count)
             if enrich_profiles:
-                response["items"] = self._enrich_users(response.get("items", [])[:target_count] if target_count else response.get("items", []))
+                response["items"] = self._enrich_users(response.get("items", []))
             response["count"] = len(response.get("items", []))
+            response["raw_count"] = len(response.get("items", []))
+            response["requested_count"] = target_count
+            response["next_cursor"] = response.get("pagination", {}).get("cursor") if isinstance(response.get("pagination"), dict) else response.get("cursor")
+            response["has_more"] = self._has_more(response.get("pagination", {}).get("has_more") if isinstance(response.get("pagination"), dict) else False)
             return response
         data: dict[str, Any] = {}
         raw_pages: list[dict[str, Any]] = []
-        fallback_errors: list[dict[str, Any]] = []
         spec: TikhubRequestSpec | None = None
 
         if cursor is not None or resolved_page <= 1:
             data, spec, errors = self._request_user_search_page(
                 keyword=keyword,
                 cursor=resolved_cursor,
-                search_id=search_id,
-                douyin_user_fans=normalized_follower_filter,
-                douyin_user_type=normalized_user_type,
             )
             raw_pages.append(data)
-            fallback_errors.extend(errors)
         else:
             current_cursor = 0
-            current_search_id = search_id or ""
             for page_index in range(1, resolved_page + 1):
                 data, spec, errors = self._request_user_search_page(
                     keyword=keyword,
                     cursor=current_cursor,
-                    search_id=current_search_id,
-                    douyin_user_fans=normalized_follower_filter,
-                    douyin_user_type=normalized_user_type,
                 )
                 raw_pages.append(data)
-                fallback_errors.extend(errors)
                 if page_index >= resolved_page:
                     break
                 pagination = self._extract_user_search_pagination(data)
@@ -270,12 +264,12 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
                 if not self._has_more(pagination.get("has_more")) or next_cursor is None or next_cursor == current_cursor:
                     break
                 current_cursor = next_cursor
-                current_search_id = str(pagination.get("search_id") or current_search_id)
 
         spec = spec or TikhubRequestSpec(path=DEFAULT_USER_SEARCH_PATH, method="POST", json_body={})
         items = self._extract_items(data)
         if enrich_profiles:
-            items = self._enrich_users(items[:target_count] if target_count else items)
+            items = self._enrich_users(items)
+        pagination = self._extract_user_search_pagination(data)
         response = {
             "status": "ok",
             "source": self.manifest.id,
@@ -283,28 +277,27 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             "keyword": keyword,
             "page": resolved_page,
             "cursor": (spec.json_body or {}).get("cursor", resolved_cursor),
-            "search_id": (spec.json_body or {}).get("search_id", search_id),
-            "count": target_count,
+            "search_id": pagination.get("search_id") or "",
+            "count": len(items),
+            "raw_count": len(items),
+            "requested_count": target_count,
             "request": {k: v for k, v in (spec.json_body or {}).items() if v is not None},
             "raw": data,
             "raw_pages": raw_pages,
-            "items": items[:target_count] if target_count else items,
-            "pagination": self._extract_user_search_pagination(data),
+            "items": items,
+            "pagination": pagination,
             "normalized": self._normalize_response(data),
+            "next_cursor": pagination.get("cursor"),
+            "has_more": self._has_more(pagination.get("has_more")),
         }
-        if fallback_errors:
-            response["fallback"] = {
-                "used": spec.path == DEFAULT_USER_SEARCH_V2_PATH,
-                "reason": "TikHub v1 user search returned HTTP 400; retried with v2 minimal payload.",
-                "errors": fallback_errors,
-            }
         self._cache_user_search_page(
             keyword=keyword,
             cursor=int(response["cursor"] or 0),
-            count=target_count,
-            search_id=str(response["search_id"] or ""),
-            douyin_user_fans=normalized_follower_filter,
-            douyin_user_type=normalized_user_type,
+            count=cache_count,
+            search_id="",
+            douyin_user_fans="",
+            douyin_user_type="",
+            source=USER_SEARCH_CACHE_SOURCE,
             request={k: v for k, v in (spec.json_body or {}).items() if v is not None},
             raw_page=data,
             page_items=response["items"],
@@ -319,9 +312,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         *,
         keyword: str,
         cursor: int,
-        search_id: str,
-        douyin_user_fans: str,
-        douyin_user_type: str,
     ) -> tuple[dict[str, Any], TikhubRequestSpec, list[dict[str, Any]]]:
         spec = TikhubRequestSpec(
             path=DEFAULT_USER_SEARCH_PATH,
@@ -329,30 +319,9 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             json_body={
                 "keyword": keyword,
                 "cursor": int(cursor or 0),
-                "douyin_user_fans": douyin_user_fans or "",
-                "douyin_user_type": douyin_user_type or "",
-                "search_id": search_id or "",
             },
         )
-        try:
-            return self._request_json(spec), spec, []
-        except TikhubApiError as exc:
-            if exc.status_code != 400:
-                raise
-            fallback_spec = TikhubRequestSpec(
-                path=DEFAULT_USER_SEARCH_V2_PATH,
-                method="POST",
-                json_body={
-                    "keyword": keyword,
-                    "cursor": int(cursor or 0),
-                },
-            )
-            previous_errors = [exc.to_dict()]
-            try:
-                return self._request_json(fallback_spec), fallback_spec, previous_errors
-            except TikhubApiError as fallback_exc:
-                fallback_exc.previous_errors = previous_errors + fallback_exc.previous_errors
-                raise
+        return self._request_json(spec), spec, []
 
     def get_user_profile(self, sec_user_id: str) -> dict[str, Any]:
         cached_user = get_target_user_by_identifiers(sec_user_id=sec_user_id)
@@ -701,8 +670,7 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         }
 
     def _extract_user_search_pagination(self, data: dict[str, Any]) -> dict[str, Any]:
-        root = self._payload_root(data)
-        root = root if isinstance(root, dict) else {}
+        root = self._user_search_root(data)
         extra = root.get("extra") if isinstance(root.get("extra"), dict) else {}
         log_pb = root.get("log_pb") if isinstance(root.get("log_pb"), dict) else {}
         search_id = extra.get("logid") or log_pb.get("impr_id") or root.get("rid") or data.get("rid")
@@ -719,7 +687,7 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         return {"max_cursor": root.get("max_cursor"), "has_more": root.get("has_more"), "cursor": root.get("cursor")}
 
     def _extract_items(self, data: dict[str, Any]) -> list[dict[str, Any]]:
-        root = self._payload_root(data)
+        root = self._user_search_root(data)
         user_list = None
         if isinstance(root, dict):
             user_list = root.get("user_list")
@@ -788,7 +756,7 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         return {
             "status": "ok",
             "source": self.manifest.id,
-            "endpoint": cached.get("source") or DEFAULT_USER_SEARCH_PATH,
+            "endpoint": DEFAULT_USER_SEARCH_PATH,
             "keyword": cached.get("keyword") or "",
             "page": page,
             "cursor": cached.get("cursor") or pagination.get("cursor") or 0,
@@ -800,6 +768,8 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             "items": items,
             "pagination": pagination,
             "normalized": cached.get("normalized") or {},
+            "next_cursor": pagination.get("cursor"),
+            "has_more": self._has_more(pagination.get("has_more")),
             "cache": {
                 "hit": True,
                 "cache_key": cached.get("cache_key"),
@@ -847,6 +817,7 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
     def _cache_user_search_page(
         self,
         *,
+        source: str,
         keyword: str,
         cursor: int,
         count: int,
@@ -860,7 +831,7 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         normalized: dict[str, Any],
     ) -> None:
         upsert_target_user_search_page(
-            source=self.manifest.id,
+            source=source,
             keyword=keyword,
             cursor=cursor,
             count=count,
@@ -1012,9 +983,26 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
 
     def _normalize_user(self, item: dict[str, Any]) -> dict[str, Any]:
         user = self._extract_user_info(item)
-        follower_count = self._to_int(user.get("follower_count") or user.get("followers") or user.get("followerCount"))
-        like_count = self._to_int(user.get("total_favorited") or user.get("total_favorited_count") or user.get("like_count"))
-        aweme_count = self._to_int(user.get("aweme_count") or user.get("video_count") or user.get("awemeCount"))
+        follower_count = self._to_int(
+            user.get("follower_count")
+            or user.get("followers")
+            or user.get("followerCount")
+            or user.get("fans_cnt")
+            or user.get("fans_count")
+        )
+        like_count = self._to_int(
+            user.get("total_favorited")
+            or user.get("total_favorited_count")
+            or user.get("like_count")
+            or user.get("like_cnt")
+        )
+        aweme_count = self._to_int(
+            user.get("aweme_count")
+            or user.get("video_count")
+            or user.get("awemeCount")
+            or user.get("publish_cnt")
+            or user.get("publish_count")
+        )
         last_post_at = self._to_int(
             user.get("last_post_time")
             or user.get("last_aweme_time")
@@ -1034,9 +1022,9 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             "sec_uid": user.get("sec_uid") or user.get("secUid") or user.get("sec_user_id"),
             "uid": user.get("uid") or user.get("user_id") or user.get("id"),
             "unique_id": user.get("unique_id") or user.get("uniqueId") or user.get("short_id") or user.get("search_user_name"),
-            "nickname": user.get("nickname") or user.get("display_name") or user.get("nickname_display") or user.get("search_user_desc"),
+            "nickname": user.get("nickname") or user.get("nick_name") or user.get("display_name") or user.get("nickname_display") or user.get("search_user_desc"),
             "signature": user.get("signature") or user.get("desc") or user.get("search_user_desc") or "",
-            "avatar": self._first_avatar_url(user),
+            "avatar": self._first_avatar_url(user) or user.get("avatar_url") or user.get("avatar"),
             "follower_count": follower_count,
             "following_count": self._to_int(user.get("following_count")),
             "like_count": like_count,
@@ -1158,6 +1146,16 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
                     return parsed
 
         return item
+
+    def _user_search_root(self, data: dict[str, Any]) -> dict[str, Any]:
+        root = self._payload_root(data)
+        if not isinstance(root, dict):
+            return {}
+        nested = root.get("data")
+        if isinstance(nested, dict):
+            if any(key in nested for key in ("user_list", "has_more", "cursor", "extra", "log_pb")):
+                return nested
+        return root
 
     def _maybe_parse_json(self, value: Any) -> Any:
         if not isinstance(value, str) or not value:

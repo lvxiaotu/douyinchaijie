@@ -197,6 +197,7 @@ export function searchDouyinTargets(payload) {
   return postJson("/api/tools/douyin-target/search", {
     keyword: payload.keyword || "",
     page: Number(payload.page || 1),
+    cursor: payload.cursor !== "" && payload.cursor != null ? Number(payload.cursor) : undefined,
     count: Number(payload.count || 20),
     minFollowers: payload.minFollowers !== "" && payload.minFollowers != null ? Number(payload.minFollowers) : undefined,
     maxFollowers: payload.maxFollowers !== "" && payload.maxFollowers != null ? Number(payload.maxFollowers) : undefined,

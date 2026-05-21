@@ -29,10 +29,26 @@ class VideoAnalysisCoordinator:
         self.stop_event = threading.Event()
         self.threads: list[threading.Thread] = []
         self.started = False
+        self.desired_thread_count = 0
         self.lock = threading.Lock()
 
     def enabled(self) -> bool:
         return os.getenv("AI_VIDEO_WORKER_ENABLED", "true").lower() not in {"0", "false", "no"}
+
+    def _compact_threads_locked(self, *, exclude: threading.Thread | None = None) -> None:
+        self.threads = [thread for thread in self.threads if thread is not exclude and thread.is_alive()]
+
+    def _spawn_worker_thread(self, index: int) -> threading.Thread:
+        worker_id = f"{worker_host_id()}-ai-video-{index}"
+        thread = threading.Thread(
+            target=self.worker_loop,
+            args=(worker_id, index),
+            name=f"ai-video-worker-{index}",
+            daemon=True,
+        )
+        thread.start()
+        self.threads.append(thread)
+        return thread
 
     def start(self) -> None:
         with self.lock:
@@ -48,17 +64,10 @@ class VideoAnalysisCoordinator:
                 return
             self.stop_event.clear()
             limit = video_task_concurrency_limit()
+            self.desired_thread_count = limit
             self.threads = []
-            for index in range(limit):
-                worker_id = f"{worker_host_id()}-ai-video-{index + 1}"
-                thread = threading.Thread(
-                    target=self.worker_loop,
-                    args=(worker_id,),
-                    name=f"ai-video-worker-{index + 1}",
-                    daemon=True,
-                )
-                thread.start()
-                self.threads.append(thread)
+            for index in range(1, limit + 1):
+                self._spawn_worker_thread(index)
             self.started = True
             print(f"[ai-video-worker] started {len(self.threads)} worker(s)", flush=True)
 
@@ -73,19 +82,55 @@ class VideoAnalysisCoordinator:
             self.started = False
         print("[ai-video-worker] stopped", flush=True)
 
-    def worker_loop(self, worker_id: str) -> None:
+    def reconcile(self, target_thread_count: int | None = None) -> dict[str, Any]:
+        target = target_thread_count if target_thread_count is not None else video_task_concurrency_limit()
+        try:
+            desired = max(1, min(3, int(target or 3)))
+        except ValueError:
+            desired = video_task_concurrency_limit()
+
+        spawned = 0
+        with self.lock:
+            self._compact_threads_locked()
+            self.desired_thread_count = desired
+            current = len(self.threads)
+            if self.started and self.enabled() and current < desired:
+                for index in range(current + 1, desired + 1):
+                    self._spawn_worker_thread(index)
+                    spawned += 1
+                current = len(self.threads)
+        return {
+            "enabled": self.enabled(),
+            "started": self.started,
+            "target_thread_count": desired,
+            "thread_count": current,
+            "thread_count_delta": current - desired,
+            "spawned": spawned,
+        }
+
+    def worker_loop(self, worker_id: str, worker_index: int) -> None:
         poll_interval = float(os.getenv("AI_VIDEO_WORKER_POLL_INTERVAL_SECONDS", "2") or 2)
-        while not self.stop_event.is_set():
-            try:
-                job = claim_next_ai_video_job(worker_id)
-                if not job:
-                    self.stop_event.wait(max(0.5, poll_interval))
-                    continue
-                self.run_claimed_job(worker_id, job)
-            except Exception as exc:
-                print(f"[ai-video-worker] loop error {worker_id}: {type(exc).__name__}: {exc}", flush=True)
-                traceback.print_exc()
-                self.stop_event.wait(max(1.0, poll_interval))
+        current_thread = threading.current_thread()
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    with self.lock:
+                        target = self.desired_thread_count or video_task_concurrency_limit()
+                    if worker_index > target:
+                        print(f"[ai-video-worker] retiring {worker_id} above target {target}", flush=True)
+                        break
+                    job = claim_next_ai_video_job(worker_id)
+                    if not job:
+                        self.stop_event.wait(max(0.5, poll_interval))
+                        continue
+                    self.run_claimed_job(worker_id, job)
+                except Exception as exc:
+                    print(f"[ai-video-worker] loop error {worker_id}: {type(exc).__name__}: {exc}", flush=True)
+                    traceback.print_exc()
+                    self.stop_event.wait(max(1.0, poll_interval))
+        finally:
+            with self.lock:
+                self._compact_threads_locked(exclude=current_thread)
 
     def run_claimed_job(self, worker_id: str, job: dict[str, Any]) -> None:
         task_id = str(job["task_id"])
@@ -176,9 +221,15 @@ class VideoAnalysisCoordinator:
 
     def status(self) -> dict[str, Any]:
         data = queue_stats()
+        with self.lock:
+            self._compact_threads_locked()
+            thread_count = len(self.threads)
+            target = self.desired_thread_count or video_task_concurrency_limit()
         data["worker_enabled"] = self.enabled()
         data["worker_started"] = self.started
-        data["thread_count"] = len(self.threads)
+        data["thread_count"] = thread_count
+        data["worker_target_threads"] = target
+        data["thread_count_delta"] = thread_count - target
         return data
 
 

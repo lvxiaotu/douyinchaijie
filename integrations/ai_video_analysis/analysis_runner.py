@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.app.video_analysis_queue import AiVideoTaskCancelled, record_ai_video_artifact, upsert_ai_video_chunk
+from integrations.ai_video_analysis.call_helpers import call_generate_text_hook
 
 
 def run_evidence_breakdown(
@@ -16,6 +17,7 @@ def run_evidence_breakdown(
     *,
     evidence: dict[str, Any],
     progress: Callable[[int, str], None] | None = None,
+    route: Any | None = None,
 ) -> dict[str, Any]:
     segments = evidence.get("analysis_segments") or []
     if not segments:
@@ -70,7 +72,13 @@ def run_evidence_breakdown(
         started = time.perf_counter()
         try:
             adapter._check_cancelled(task_id)
-            text = adapter._generate_text_json(prompt, action="请求模型生成分段拆解", image_paths=image_paths)
+            text = call_generate_text_hook(
+                adapter._generate_text_json,
+                prompt,
+                action="请求模型生成分段拆解",
+                image_paths=image_paths,
+                route=route,
+            )
             adapter._check_cancelled(task_id)
             latency_ms = int((time.perf_counter() - started) * 1000)
             adapter._record_model_run(
@@ -169,6 +177,7 @@ def run_evidence_breakdown(
                 evidence_path=evidence_path,
                 global_checkpoint=global_checkpoint,
                 task_id=task_id,
+                route=route,
             )
     else:
         result = _generate_global_breakdown(
@@ -179,6 +188,7 @@ def run_evidence_breakdown(
             evidence_path=evidence_path,
             global_checkpoint=global_checkpoint,
             task_id=task_id,
+            route=route,
         )
     if progress:
         progress(92, "全局爆款公式汇总完成，整理结果")
@@ -196,12 +206,18 @@ def _generate_global_breakdown(
     evidence_path: Path,
     global_checkpoint: Path,
     task_id: str,
+    route: Any | None = None,
 ) -> dict[str, Any]:
     global_prompt = adapter._global_breakdown_prompt(video, evidence=evidence, segment_breakdowns=segment_breakdowns)
     started = time.perf_counter()
     try:
         adapter._check_cancelled(task_id)
-        global_text = adapter._generate_global_summary_json(global_prompt, action="请求模型汇总全局爆款公式")
+        global_text = call_generate_text_hook(
+            adapter._generate_global_summary_json,
+            global_prompt,
+            action="请求模型汇总全局爆款公式",
+            route=route,
+        )
         adapter._check_cancelled(task_id)
         latency_ms = int((time.perf_counter() - started) * 1000)
         adapter._record_model_run(

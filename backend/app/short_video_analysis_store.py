@@ -37,9 +37,11 @@ PROPERTY_TAG_RULES = {
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(DB_PATH, timeout=30.0)
     connection.row_factory = sqlite3.Row
     try:
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA journal_mode = WAL")
         yield connection
         connection.commit()
     finally:

@@ -21,7 +21,7 @@ from integrations.ai_video_analysis.doubao_asr import normalize_doubao_asr_respo
 from integrations.ai_video_analysis.adapter import AiVideoAnalysisAdapter
 from integrations.ai_video_analysis.analysis_runner import run_evidence_breakdown
 from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
-from integrations.ai_video_analysis.model_gateway import normalized_usage, uses_openai_compatible_relay
+from integrations.ai_video_analysis.model_gateway import normalized_usage, resolve_ai_video_provider_route, uses_openai_compatible_relay
 from integrations.ai_video_analysis.prompt_builder import segment_breakdown_prompt
 from integrations.ai_video_analysis.result_normalizer import parse_model_json, parse_segment_json
 from integrations.ai_video_analysis.result_schema import validate_analysis_result, validate_segment_breakdown
@@ -180,8 +180,12 @@ class AiVideoP2Tests(unittest.TestCase):
         os.environ["YUNWU_API_FORMAT"] = "gemini_generate_content"
         adapter = AiVideoAnalysisAdapter({"provider": "yunwu"})
 
-        self.assertTrue(adapter._uses_gemini_relay_provider("yunwu"))
-        self.assertFalse(adapter._uses_openai_compatible_relay("yunwu"))
+        route = resolve_ai_video_provider_route("yunwu")
+        self.assertEqual(route.family, "gemini_relay")
+        self.assertEqual(route.base_url, "https://yunwu.ai")
+        self.assertEqual(route.api_format, "gemini_generate_content")
+        self.assertEqual(route.config_errors, ())
+        self.assertEqual(adapter.validate_config(), [])
 
     def test_deepseek_official_url_does_not_add_v1(self):
         client = DeepSeekChatClient(api_key="key", base_url="https://api.deepseek.com", model="deepseek-v4-flash")
@@ -191,17 +195,30 @@ class AiVideoP2Tests(unittest.TestCase):
 
     def test_yunwu_provider_is_allowed_when_openai_compatible_format_is_enabled(self):
         os.environ["AI_VIDEO_RELAY_API_FORMAT"] = "openai_chat_completions"
+        os.environ["YUNWU_API_FORMAT"] = "openai_chat_completions"
         os.environ["AI_VIDEO_RELAY_API_KEY"] = ""
         os.environ["YUNWU_API_KEY"] = ""
         os.environ["AI_RELAY_API_KEY"] = ""
         adapter = AiVideoAnalysisAdapter({"provider": "yunwu"})
 
-        self.assertTrue(adapter._uses_openai_compatible_relay("yunwu"))
+        route = resolve_ai_video_provider_route("yunwu")
+        self.assertEqual(route.family, "openai_compatible_relay")
         self.assertIn("Missing AI_VIDEO_RELAY_API_KEY", adapter.validate_config())
+        self.assertIn("Missing AI_VIDEO_RELAY_API_KEY", route.config_errors)
         self.assertEqual(
             OpenAICompatibleRelayClient.normalize_base_url("https://yunwu.ai/v1/chat/completions"),
             "https://yunwu.ai/v1",
         )
+
+    def test_direct_pipeline_rejects_openai_compatible_route(self):
+        os.environ["AI_VIDEO_RELAY_API_FORMAT"] = "openai_chat_completions"
+        os.environ["YUNWU_API_FORMAT"] = "openai_chat_completions"
+        os.environ["AI_VIDEO_RELAY_API_KEY"] = "test-key"
+        adapter = AiVideoAnalysisAdapter({"provider": "yunwu", "pipeline_mode": "direct"})
+
+        route = resolve_ai_video_provider_route("yunwu", pipeline_mode="direct")
+        self.assertIn("AI_VIDEO_PIPELINE_MODE=direct requires Gemini relay", route.config_errors)
+        self.assertIn("AI_VIDEO_PIPELINE_MODE=direct requires Gemini relay", adapter.validate_config())
 
     def test_model_gateway_openai_compatible_detection_is_independent(self):
         os.environ["AI_VIDEO_RELAY_API_FORMAT"] = "chat_completions"
@@ -318,7 +335,7 @@ class AiVideoP2Tests(unittest.TestCase):
         def fail_deepseek(prompt, action):
             raise RuntimeError("deepseek down")
 
-        def fallback(prompt, action, image_paths=None):
+        def fallback(prompt, action, image_paths=None, **kwargs):
             adapter._last_model_usage = {"prompt_tokens": 3, "completion_tokens": 2}
             adapter._last_model_provider_value = "openai_compatible_relay"
             adapter._last_model_name_value = "gemini-2.5flash"
@@ -552,7 +569,7 @@ class AiVideoP2Tests(unittest.TestCase):
         enqueue_ai_video_job(task_id="task-cancel-runner", video={"id": "v1"}, provider="mock")
         adapter = AiVideoAnalysisAdapter({"provider": "mock", "output_dir": str(root)})
 
-        def fake_generate(prompt, *, action, image_paths=None):
+        def fake_generate(prompt, *, action, image_paths=None, **kwargs):
             cancel_ai_video_job("task-cancel-runner")
             return json.dumps({"segment_role": "hook"}, ensure_ascii=False)
 

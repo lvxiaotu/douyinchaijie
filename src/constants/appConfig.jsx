@@ -55,10 +55,17 @@ export const statusText = {
   waiting_audio: "待补音频",
   waiting_visual: "待补画面",
   draft: "草稿",
+  pending: "等待",
+  queued: "排队中",
   running: "运行中",
   done: "完成",
   paused: "暂停",
   error: "失败",
+  failed: "失败",
+  failed_final: "失败",
+  retry_waiting: "重试等待",
+  stale_requeued: "重排队",
+  claimed: "已认领",
 };
 
 export const runningHubEmotionFields = [
