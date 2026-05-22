@@ -17,7 +17,6 @@ from integrations.tikhub_douyin_api.adapter import (
     DEFAULT_USER_SEARCH_PATH,
     DEFAULT_VIDEO_COMMENT_REPLIES_PATH,
     DEFAULT_VIDEO_COMMENTS_PATH,
-    USER_SEARCH_CACHE_SOURCE,
     TikhubDouyinApiAdapter,
 )
 from tests.postgres_test_utils import isolated_postgres_schema
@@ -89,17 +88,6 @@ class TikhubUserSearchTests(unittest.TestCase):
         self.assertEqual(result["next_cursor"], 20)
         self.assertTrue(result["has_more"])
 
-        cached = store.get_target_user_search_page(
-            source=USER_SEARCH_CACHE_SOURCE,
-            keyword="塔罗",
-            cursor=0,
-            count=0,
-        )
-        self.assertIsNotNone(cached)
-        self.assertEqual(len(cached["items"]), 2)
-        self.assertEqual(cached["request"], {"keyword": "塔罗", "cursor": 0})
-        self.assertEqual(cached["douyin_user_fans"], "")
-        self.assertEqual(cached["douyin_user_type"], "")
         user = store.get_target_user("user-1")
         self.assertIsNotNone(user)
         self.assertEqual(user["signature"], "Profile intro")
@@ -108,6 +96,70 @@ class TikhubUserSearchTests(unittest.TestCase):
         self.assertEqual(user["like_count"], 345600)
         self.assertEqual(user["aweme_count"], 88)
         self.assertIsNotNone(store.get_target_user("user-2"))
+
+    def test_user_search_updates_existing_user_without_cache(self):
+        first_payload = {
+            "status_code": 0,
+            "data": {
+                "cursor": 0,
+                "has_more": 0,
+                "user_list": [
+                    {
+                        "user_info": {
+                            "uid": "refresh-user",
+                            "sec_uid": "refresh-sec",
+                            "unique_id": "refresh_creator",
+                            "nickname": "Old Name",
+                            "follower_count": 100,
+                            "total_favorited": 200,
+                            "aweme_count": 3,
+                        }
+                    }
+                ],
+            },
+        }
+        second_payload = {
+            "status_code": 0,
+            "data": {
+                "cursor": 0,
+                "has_more": 0,
+                "user_list": [
+                    {
+                        "user_info": {
+                            "uid": "refresh-user",
+                            "sec_uid": "refresh-sec",
+                            "unique_id": "refresh_creator",
+                            "nickname": "New Name",
+                            "follower_count": 900,
+                            "total_favorited": 1200,
+                            "aweme_count": 6,
+                        }
+                    }
+                ],
+            },
+        }
+
+        with patch.object(TikhubDouyinApiAdapter, "_request_json", return_value=first_payload) as request_json:
+            TikhubDouyinApiAdapter({"api_key": "test"}).search_users(
+                keyword="refresh",
+                cursor=0,
+                count=1,
+                enrich_profiles=False,
+            )
+        with patch.object(TikhubDouyinApiAdapter, "_request_json", return_value=second_payload) as request_json:
+            TikhubDouyinApiAdapter({"api_key": "test"}).search_users(
+                keyword="refresh",
+                cursor=0,
+                count=1,
+                enrich_profiles=False,
+            )
+
+        request_json.assert_called_once()
+        user = store.get_target_user("refresh-user")
+        self.assertEqual(user["nickname"], "New Name")
+        self.assertEqual(user["follower_count"], 900)
+        self.assertEqual(user["like_count"], 1200)
+        self.assertEqual(user["aweme_count"], 6)
 
     def test_user_profile_enrichment_persists_ip_location(self):
         search_payload = {
@@ -342,6 +394,51 @@ class TikhubUserSearchTests(unittest.TestCase):
         self.assertEqual(replies["endpoint"], DEFAULT_VIDEO_COMMENT_REPLIES_PATH)
         self.assertEqual(replies["items"][0]["cid"], "r1")
         self.assertEqual([spec.path for spec in seen], [DEFAULT_VIDEO_COMMENTS_PATH, DEFAULT_VIDEO_COMMENT_REPLIES_PATH])
+
+    def test_user_videos_updates_existing_video_without_cache(self):
+        first_payload = {
+            "data": {
+                "aweme_list": [
+                    {
+                        "aweme_id": "refresh-aweme",
+                        "desc": "old video",
+                        "statistics": {"digg_count": 10, "comment_count": 1},
+                    }
+                ],
+                "max_cursor": 0,
+                "has_more": 0,
+            }
+        }
+        second_payload = {
+            "data": {
+                "aweme_list": [
+                    {
+                        "aweme_id": "refresh-aweme",
+                        "desc": "new video",
+                        "statistics": {"digg_count": 88, "comment_count": 7},
+                    }
+                ],
+                "max_cursor": 0,
+                "has_more": 0,
+            }
+        }
+
+        with patch.object(TikhubDouyinApiAdapter, "_request_json", return_value=first_payload):
+            TikhubDouyinApiAdapter({"api_key": "test"}).get_user_videos(
+                sec_user_id="video-refresh-sec",
+                count=1,
+            )
+        with patch.object(TikhubDouyinApiAdapter, "_request_json", return_value=second_payload) as request_json:
+            TikhubDouyinApiAdapter({"api_key": "test"}).get_user_videos(
+                sec_user_id="video-refresh-sec",
+                count=1,
+            )
+
+        request_json.assert_called_once()
+        video = store.get_target_video("refresh-aweme")
+        self.assertEqual(video["desc"], "new video")
+        self.assertEqual(video["digg_count"], 88)
+        self.assertEqual(video["comment_count"], 7)
 
     def test_favorites_use_tikhub_collection_endpoint(self):
         seen = []

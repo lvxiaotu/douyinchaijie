@@ -52,6 +52,44 @@ class TiktokTargetInteractionTests(unittest.TestCase):
         self.assertEqual(video["engagement_rate"], 0.235)
         self.assertEqual(video["metrics"]["publish"]["timezone"], "Asia/Shanghai")
 
+    def test_existing_video_is_updated_when_collected_again_by_aweme_id(self):
+        original = store.create_target_video(
+            "target-row-1",
+            "user-1",
+            {
+                "set_id": "set-1",
+                "aweme_id": "same-aweme",
+                "desc": "old desc",
+                "digg_count": 10,
+                "comment_count": 1,
+                "selected": True,
+                "source_json": {"old": True},
+            },
+        )
+
+        updated = store.create_target_video(
+            "same-aweme",
+            "user-1",
+            {
+                "set_id": "set-1",
+                "aweme_id": "same-aweme",
+                "desc": "new desc",
+                "digg_count": 99,
+                "comment_count": 8,
+                "selected": True,
+                "source_json": {"new": True},
+            },
+        )
+
+        videos = store.list_target_videos(user_id="user-1", limit=10)
+        self.assertEqual(len(videos), 1)
+        self.assertEqual(updated["id"], original["id"])
+        self.assertEqual(updated["desc"], "new desc")
+        self.assertEqual(updated["digg_count"], 99)
+        self.assertEqual(updated["comment_count"], 8)
+        self.assertTrue(updated["source_json"]["old"])
+        self.assertTrue(updated["source_json"]["new"])
+
     def test_comments_replies_and_insights_are_persisted(self):
         store.create_target_video(
             "video-row-2",
@@ -117,6 +155,46 @@ class TiktokTargetInteractionTests(unittest.TestCase):
         self.assertEqual(dataset["insights"]["creator_reply_tactics"]["author_reply_count"], 1)
         self.assertGreaterEqual(dataset["insights"]["creator_reply_tactics"]["counts"]["ask_for_comment"], 1)
         self.assertEqual(dataset["insights"]["pinned_comments"][0]["comment_id"], "c2")
+
+    def test_existing_comment_is_updated_when_collected_again(self):
+        store.create_target_video(
+            "video-comment-upsert",
+            "user-1",
+            {
+                "aweme_id": "aweme-comment-upsert",
+                "desc": "comments update",
+                "digg_count": 100,
+                "comment_count": 1,
+            },
+        )
+        store.replace_target_video_comments(
+            "video-comment-upsert",
+            [
+                {
+                    "cid": "c1",
+                    "text": "old comment",
+                    "digg_count": 1,
+                    "user": {"uid": "fan-1", "nickname": "fan"},
+                }
+            ],
+        )
+
+        dataset = store.replace_target_video_comments(
+            "video-comment-upsert",
+            [
+                {
+                    "cid": "c1",
+                    "text": "new comment",
+                    "digg_count": 9,
+                    "user": {"uid": "fan-1", "nickname": "fan"},
+                }
+            ],
+        )
+
+        self.assertEqual(dataset["comment_count"], 1)
+        self.assertEqual(dataset["comments"][0]["comment_id"], "c1")
+        self.assertEqual(dataset["comments"][0]["text"], "new comment")
+        self.assertEqual(dataset["comments"][0]["digg_count"], 9)
 
     def test_mysticism_comment_plugin_is_genre_scoped(self):
         store.create_target_video(

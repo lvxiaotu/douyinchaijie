@@ -933,8 +933,7 @@ def search(payload: TargetSearchRequest) -> dict[str, Any]:
             page=payload.page,
             cursor=payload.cursor,
             count=payload.count,
-            enrich_profiles=True,
-            profile_limit=payload.count,
+            enrich_profiles=False,
         )
     except TikhubApiError as exc:
         raise HTTPException(
@@ -963,7 +962,11 @@ def search(payload: TargetSearchRequest) -> dict[str, Any]:
     raw_items = result.get("items", [])
     items = [item for item in raw_items if _passes_search_filters(item, payload)]
     visible_items = _sort_users(items, payload.sortBy)[: payload.count]
-    result["items"] = tikhub.enrich_user_profiles(visible_items, keyword=payload.keyword, limit=len(visible_items))
+    result["items"] = tikhub.enrich_user_profiles(
+        visible_items,
+        keyword=payload.keyword,
+        limit=len(visible_items),
+    )
     result["count"] = len(result["items"])
     result["raw_count"] = len(raw_items)
     result["filters"] = payload.model_dump()

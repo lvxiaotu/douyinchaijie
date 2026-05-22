@@ -17,7 +17,7 @@
 | `archive_db` | `analysis_archives` / `prompt_reverse_archives` / `production_reverse_archives` |
 | `ai_video_queue_db` | `ai_video_jobs` / `ai_video_chunks` / `ai_video_artifacts` / `ai_model_runs` |
 | `tiktok_target_db` | `tiktok_target_users` / `tiktok_target_sets` / `tiktok_target_set_users` / `tiktok_target_videos` / `tiktok_target_tasks` / `tiktok_target_video_comments` / `tiktok_target_video_interaction_insights` |
-| `tiktok_target_cache_db` | `tiktok_target_user_video_pages` / `tiktok_target_user_search_pages` / `tiktok_target_video_comment_pages` |
+| `tiktok_target_cache_db` | `tiktok_target_video_comment_pages` |
 | `short_video_analysis_db` | `short_video_items` / `short_video_metric_snapshots` / `short_video_analysis_runs` / `short_video_analysis_segments` / `short_video_formula_library` / `short_video_remake_exports` |
 | `media_db` | `jianying_assets` / `jianying_drafts` / `jianying_templates` |
 
@@ -90,7 +90,7 @@
 ### 5. 抖音目标采集拆分
 
 - [x] `tiktok_target_users / sets / videos / tasks / comments / insights` 迁到 `tiktok_target_db`
-- [x] `*_pages` 缓存表迁到 `tiktok_target_cache_db`
+- [x] 评论页缓存表迁到 `tiktok_target_cache_db`，账号搜索页/账号视频页缓存表已废弃
 - [x] 不做外键，集合关系用 `id` 维护
 - [x] 查询页改成读模型/聚合结果，不依赖跨表强耦合
 
@@ -141,11 +141,11 @@
 - [x] 先冻结写入
 - [x] 从旧 SQLite 导出/导入脚本已落地：`scripts/migrate_sqlite_to_postgres.py`
 - [x] 使用脚本导入 PostgreSQL
-- [x] 逐表核对行数和关键抽样（`tiktok_target_user_video_pages` 按需保留，不纳入本次导入）
+- [x] 逐表核对行数和关键抽样（账号搜索页缓存、账号视频页缓存已废弃并删除）
 - [x] 切环境变量到 PG
 - [x] 重启 worker 和 API
 
-如果不保留旧数据，可以直接不迁，只做新库初始化；SQLite 只作为冷备份文件，不再参与运行。缓存页表保留功能即可，历史缓存可冷启动重新生成。
+如果不保留旧数据，可以直接不迁，只做新库初始化；SQLite 只作为冷备份文件，不再参与运行。评论页缓存可冷启动重新生成；账号搜索页/账号视频页缓存不再重建。
 
 ### 10. 清理 SQLite 依赖
 

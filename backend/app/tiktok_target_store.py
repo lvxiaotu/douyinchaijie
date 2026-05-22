@@ -329,44 +329,6 @@ TARGET_VIDEO_INTERACTION_INSIGHT_COLUMNS = {
     "deleted_at": "deleted_at INTEGER",
 }
 
-TARGET_USER_VIDEO_PAGE_COLUMNS = {
-    "cache_key": "cache_key TEXT NOT NULL DEFAULT ''",
-    "source": "source TEXT NOT NULL DEFAULT ''",
-    "user_id": "user_id TEXT NOT NULL DEFAULT ''",
-    "sec_user_id": "sec_user_id TEXT NOT NULL DEFAULT ''",
-    "unique_id": "unique_id TEXT NOT NULL DEFAULT ''",
-    "max_cursor": "max_cursor BIGINT NOT NULL DEFAULT 0",
-    "count": "count INTEGER NOT NULL DEFAULT 0",
-    "sort_type": "sort_type INTEGER NOT NULL DEFAULT 0",
-    "filter_type": "filter_type INTEGER",
-    "next_cursor": "next_cursor BIGINT",
-    "has_more": "has_more INTEGER NOT NULL DEFAULT 0",
-    "item_count": "item_count INTEGER NOT NULL DEFAULT 0",
-    "request_json": "request_json TEXT NOT NULL DEFAULT '{}'",
-    "items_json": "items_json TEXT NOT NULL DEFAULT '[]'",
-    "raw_json": "raw_json TEXT NOT NULL DEFAULT '{}'",
-    "pagination_json": "pagination_json TEXT NOT NULL DEFAULT '{}'",
-    "normalized_json": "normalized_json TEXT NOT NULL DEFAULT '{}'",
-    "fetched_at": "fetched_at INTEGER",
-}
-
-TARGET_USER_SEARCH_PAGE_COLUMNS = {
-    "cache_key": "cache_key TEXT NOT NULL DEFAULT ''",
-    "source": "source TEXT NOT NULL DEFAULT ''",
-    "keyword": "keyword TEXT NOT NULL DEFAULT ''",
-    "cursor": "cursor INTEGER NOT NULL DEFAULT 0",
-    "count": "count INTEGER NOT NULL DEFAULT 0",
-    "search_id": "search_id TEXT NOT NULL DEFAULT ''",
-    "douyin_user_fans": "douyin_user_fans TEXT NOT NULL DEFAULT ''",
-    "douyin_user_type": "douyin_user_type TEXT NOT NULL DEFAULT ''",
-    "request_json": "request_json TEXT NOT NULL DEFAULT '{}'",
-    "items_json": "items_json TEXT NOT NULL DEFAULT '[]'",
-    "raw_json": "raw_json TEXT NOT NULL DEFAULT '{}'",
-    "pagination_json": "pagination_json TEXT NOT NULL DEFAULT '{}'",
-    "normalized_json": "normalized_json TEXT NOT NULL DEFAULT '{}'",
-    "fetched_at": "fetched_at INTEGER",
-}
-
 TARGET_VIDEO_COMMENT_PAGE_COLUMNS = {
     "cache_key": "cache_key TEXT NOT NULL DEFAULT ''",
     "source": "source TEXT NOT NULL DEFAULT ''",
@@ -394,50 +356,9 @@ def cache_connection():
     return pg_connection("tiktok_target_cache")
 
 
-def ensure_bigint_column(connection, table: str, column: str) -> None:
-    row = connection.execute(
-        """
-        SELECT data_type
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = %s
-          AND column_name = %s
-        """,
-        (table, column),
-    ).fetchone()
-    if row and str(row["data_type"] or "").lower() == "bigint":
-        return
-    connection.execute(
-        f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT USING COALESCE({column}, 0)::BIGINT"
-    )
-
-
 def _cache_key(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def build_user_search_page_cache_key(
-    *,
-    source: str,
-    keyword: str,
-    cursor: int = 0,
-    count: int = 20,
-    search_id: str = "",
-    douyin_user_fans: str = "",
-    douyin_user_type: str = "",
-) -> str:
-    return _cache_key(
-        {
-            "source": source,
-            "keyword": keyword,
-            "cursor": int(cursor or 0),
-            "count": int(count or 0),
-            "search_id": search_id or "",
-            "douyin_user_fans": douyin_user_fans or "",
-            "douyin_user_type": douyin_user_type or "",
-        }
-    )
 
 
 def build_video_comment_page_cache_key(
@@ -629,58 +550,8 @@ def _init_db() -> None:
         )
         _backfill_target_user_profile_fields(connection)
     with cache_connection() as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tiktok_target_user_video_pages (
-                id TEXT PRIMARY KEY,
-                cache_key TEXT NOT NULL UNIQUE,
-                source TEXT NOT NULL DEFAULT '',
-                user_id TEXT NOT NULL DEFAULT '',
-                sec_user_id TEXT NOT NULL DEFAULT '',
-                unique_id TEXT NOT NULL DEFAULT '',
-                max_cursor BIGINT NOT NULL DEFAULT 0,
-                count INTEGER NOT NULL DEFAULT 0,
-                sort_type INTEGER NOT NULL DEFAULT 0,
-                filter_type INTEGER,
-                next_cursor BIGINT,
-                has_more INTEGER NOT NULL DEFAULT 0,
-                item_count INTEGER NOT NULL DEFAULT 0,
-                request_json TEXT NOT NULL DEFAULT '{}',
-                items_json TEXT NOT NULL DEFAULT '[]',
-                raw_json TEXT NOT NULL DEFAULT '{}',
-                pagination_json TEXT NOT NULL DEFAULT '{}',
-                normalized_json TEXT NOT NULL DEFAULT '{}',
-                fetched_at INTEGER,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            )
-            """
-        )
-        ensure_bigint_column(connection, "tiktok_target_user_video_pages", "max_cursor")
-        ensure_bigint_column(connection, "tiktok_target_user_video_pages", "next_cursor")
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tiktok_target_user_search_pages (
-                id TEXT PRIMARY KEY,
-                cache_key TEXT NOT NULL UNIQUE,
-                source TEXT NOT NULL DEFAULT '',
-                keyword TEXT NOT NULL DEFAULT '',
-                cursor INTEGER NOT NULL DEFAULT 0,
-                count INTEGER NOT NULL DEFAULT 0,
-                search_id TEXT NOT NULL DEFAULT '',
-                douyin_user_fans TEXT NOT NULL DEFAULT '',
-                douyin_user_type TEXT NOT NULL DEFAULT '',
-                request_json TEXT NOT NULL DEFAULT '{}',
-                items_json TEXT NOT NULL DEFAULT '[]',
-                raw_json TEXT NOT NULL DEFAULT '{}',
-                pagination_json TEXT NOT NULL DEFAULT '{}',
-                normalized_json TEXT NOT NULL DEFAULT '{}',
-                fetched_at INTEGER,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            )
-            """
-        )
+        connection.execute("DROP TABLE IF EXISTS tiktok_target_user_video_pages")
+        connection.execute("DROP TABLE IF EXISTS tiktok_target_user_search_pages")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS tiktok_target_video_comment_pages (
@@ -705,14 +576,7 @@ def _init_db() -> None:
             )
             """
         )
-        ensure_columns(connection, "tiktok_target_user_video_pages", TARGET_USER_VIDEO_PAGE_COLUMNS)
-        ensure_columns(connection, "tiktok_target_user_search_pages", TARGET_USER_SEARCH_PAGE_COLUMNS)
         ensure_columns(connection, "tiktok_target_video_comment_pages", TARGET_VIDEO_COMMENT_PAGE_COLUMNS)
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_user ON tiktok_target_user_video_pages(user_id, sec_user_id, unique_id)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_cache ON tiktok_target_user_video_pages(cache_key)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_video_pages_cursor ON tiktok_target_user_video_pages(user_id, max_cursor, count)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_search_pages_cache ON tiktok_target_user_search_pages(cache_key)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_user_search_pages_keyword ON tiktok_target_user_search_pages(keyword, cursor)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_video_comment_pages_cache ON tiktok_target_video_comment_pages(cache_key)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_video_comment_pages_video ON tiktok_target_video_comment_pages(video_id, page_kind, cursor)")
 
@@ -862,31 +726,6 @@ def first_positive_int(*values: Any, default: int = 1) -> int:
         if number is not None and number > 0:
             return number
     return default
-
-
-def build_user_video_page_cache_key(
-    *,
-    source: str,
-    user_id: str = "",
-    sec_user_id: str = "",
-    unique_id: str = "",
-    max_cursor: int = 0,
-    count: int = 20,
-    sort_type: int = 0,
-    filter_type: int | None = None,
-) -> str:
-    del user_id
-    del unique_id
-    return _cache_key(
-        {
-            "source": source,
-            "sec_user_id": sec_user_id,
-            "max_cursor": int(max_cursor or 0),
-            "count": int(count or 0),
-            "sort_type": int(sort_type or 0),
-            "filter_type": None if filter_type is None else int(filter_type),
-        }
-    )
 
 
 def normalize_genre(value: Any) -> str:
@@ -1085,27 +924,6 @@ def row_to_target_task(row: Any) -> dict[str, Any]:
     task["deleted"] = bool(task.get("deleted_at"))
     task["result"] = load_json(task.pop("result_json", "{}"), {})
     return task
-
-
-def row_to_target_user_video_page(row: Any) -> dict[str, Any]:
-    page = dict(row)
-    page["request"] = load_json(page.pop("request_json", "{}"), {})
-    page["items"] = load_json(page.pop("items_json", "[]"), [])
-    page["raw"] = load_json(page.pop("raw_json", "{}"), {})
-    page["pagination"] = load_json(page.pop("pagination_json", "{}"), {})
-    page["normalized"] = load_json(page.pop("normalized_json", "{}"), {})
-    page["has_more"] = bool(page.get("has_more"))
-    return page
-
-
-def row_to_target_user_search_page(row: Any) -> dict[str, Any]:
-    page = dict(row)
-    page["request"] = load_json(page.pop("request_json", "{}"), {})
-    page["items"] = load_json(page.pop("items_json", "[]"), [])
-    page["raw"] = load_json(page.pop("raw_json", "{}"), {})
-    page["pagination"] = load_json(page.pop("pagination_json", "{}"), {})
-    page["normalized"] = load_json(page.pop("normalized_json", "{}"), {})
-    return page
 
 
 def row_to_target_video_comment_page(row: Any) -> dict[str, Any]:
@@ -1388,7 +1206,23 @@ def build_interaction_insights(
 def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     init_db()
     current = now()
-    existing = get_target_user(user_id) or {}
+    user_id = str(user_id or payload.get("uid") or payload.get("user_id") or "").strip()
+    payload_sec_user_id = str(payload.get("sec_user_id") or payload.get("sec_uid") or "").strip()
+    payload_unique_id = str(payload.get("unique_id") or "").strip()
+    existing = get_target_user(user_id) if user_id else None
+    if not existing:
+        existing = get_target_user_by_identifiers(
+            user_id=user_id,
+            sec_user_id=payload_sec_user_id,
+            unique_id=payload_unique_id,
+        )
+        if existing:
+            user_id = str(existing.get("id") or user_id)
+    if not user_id:
+        user_id = payload_sec_user_id or payload_unique_id
+    if not user_id:
+        raise ValueError("Target user id is required")
+    existing = existing or {}
     existing_source = existing.get("source_json") if isinstance(existing.get("source_json"), dict) else {}
     incoming_source = payload.get("source_json") if isinstance(payload.get("source_json"), dict) else {}
     merged_source = {**existing_source, **incoming_source} if existing_source or incoming_source else payload.get("source_json") or {}
@@ -1548,117 +1382,6 @@ def get_target_user_by_identifiers(
     return row_to_target_user(row) if row else None
 
 
-def get_target_user_search_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
-    init_db()
-    with cache_connection() as connection:
-        row = connection.execute(
-            "SELECT * FROM tiktok_target_user_search_pages WHERE cache_key = %s",
-            (cache_key,),
-        ).fetchone()
-    return row_to_target_user_search_page(row) if row else None
-
-
-def get_target_user_search_page(
-    *,
-    source: str,
-    keyword: str,
-    cursor: int = 0,
-    count: int = 20,
-    search_id: str = "",
-    douyin_user_fans: str = "",
-    douyin_user_type: str = "",
-) -> dict[str, Any] | None:
-    cache_key = build_user_search_page_cache_key(
-        source=source,
-        keyword=keyword,
-        cursor=cursor,
-        count=count,
-        search_id=search_id,
-        douyin_user_fans=douyin_user_fans,
-        douyin_user_type=douyin_user_type,
-    )
-    return get_target_user_search_page_by_cache_key(cache_key)
-
-
-def upsert_target_user_search_page(
-    *,
-    source: str,
-    keyword: str,
-    cursor: int = 0,
-    count: int = 20,
-    search_id: str = "",
-    douyin_user_fans: str = "",
-    douyin_user_type: str = "",
-    request: dict[str, Any] | None = None,
-    items: list[dict[str, Any]] | None = None,
-    raw: dict[str, Any] | None = None,
-    pagination: dict[str, Any] | None = None,
-    normalized: dict[str, Any] | None = None,
-    fetched_at: int | None = None,
-) -> dict[str, Any]:
-    init_db()
-    current = now()
-    request = request or {}
-    items = items or []
-    raw = raw or {}
-    pagination = pagination or {}
-    normalized = normalized or {}
-    cache_key = build_user_search_page_cache_key(
-        source=source,
-        keyword=keyword,
-        cursor=cursor,
-        count=count,
-        search_id=search_id,
-        douyin_user_fans=douyin_user_fans,
-        douyin_user_type=douyin_user_type,
-    )
-    with cache_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO tiktok_target_user_search_pages (
-                id, cache_key, source, keyword, cursor, count, search_id, douyin_user_fans,
-                douyin_user_type, request_json, items_json, raw_json, pagination_json,
-                normalized_json, fetched_at, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(cache_key) DO UPDATE SET
-                source = excluded.source,
-                keyword = excluded.keyword,
-                cursor = excluded.cursor,
-                count = excluded.count,
-                search_id = excluded.search_id,
-                douyin_user_fans = excluded.douyin_user_fans,
-                douyin_user_type = excluded.douyin_user_type,
-                request_json = excluded.request_json,
-                items_json = excluded.items_json,
-                raw_json = excluded.raw_json,
-                pagination_json = excluded.pagination_json,
-                normalized_json = excluded.normalized_json,
-                fetched_at = excluded.fetched_at,
-                updated_at = excluded.updated_at
-            """,
-            (
-                cache_key,
-                cache_key,
-                source,
-                keyword,
-                int(cursor or 0),
-                int(count or 0),
-                search_id or "",
-                douyin_user_fans or "",
-                douyin_user_type or "",
-                json.dumps(request, ensure_ascii=False),
-                json.dumps(items, ensure_ascii=False),
-                json.dumps(raw, ensure_ascii=False),
-                json.dumps(pagination, ensure_ascii=False),
-                json.dumps(normalized, ensure_ascii=False),
-                fetched_at or current,
-                current,
-                current,
-            ),
-        )
-    return get_target_user_search_page_by_cache_key(cache_key) or {}
-
-
 def get_target_video_comment_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
     init_db()
     with cache_connection() as connection:
@@ -1774,131 +1497,6 @@ def upsert_target_video_comment_page(
             ),
         )
     return get_target_video_comment_page_by_cache_key(cache_key) or {}
-
-
-def get_target_user_video_page_by_cache_key(cache_key: str) -> dict[str, Any] | None:
-    init_db()
-    with cache_connection() as connection:
-        row = connection.execute(
-            "SELECT * FROM tiktok_target_user_video_pages WHERE cache_key = %s",
-            (cache_key,),
-        ).fetchone()
-    return row_to_target_user_video_page(row) if row else None
-
-
-def get_target_user_video_page(
-    *,
-    source: str,
-    user_id: str = "",
-    sec_user_id: str = "",
-    unique_id: str = "",
-    max_cursor: int = 0,
-    count: int = 20,
-    sort_type: int = 0,
-    filter_type: int | None = None,
-) -> dict[str, Any] | None:
-    cache_key = build_user_video_page_cache_key(
-        source=source,
-        user_id=user_id,
-        sec_user_id=sec_user_id,
-        unique_id=unique_id,
-        max_cursor=max_cursor,
-        count=count,
-        sort_type=sort_type,
-        filter_type=filter_type,
-    )
-    return get_target_user_video_page_by_cache_key(cache_key)
-
-
-def upsert_target_user_video_page(
-    *,
-    source: str,
-    user_id: str = "",
-    sec_user_id: str = "",
-    unique_id: str = "",
-    max_cursor: int = 0,
-    count: int = 20,
-    sort_type: int = 0,
-    filter_type: int | None = None,
-    next_cursor: int | None = None,
-    has_more: bool = False,
-    request: dict[str, Any] | None = None,
-    items: list[dict[str, Any]] | None = None,
-    raw: dict[str, Any] | None = None,
-    pagination: dict[str, Any] | None = None,
-    normalized: dict[str, Any] | None = None,
-    fetched_at: int | None = None,
-) -> dict[str, Any]:
-    init_db()
-    current = now()
-    request = request or {}
-    items = items or []
-    raw = raw or {}
-    pagination = pagination or {}
-    normalized = normalized or {}
-    cache_key = build_user_video_page_cache_key(
-        source=source,
-        user_id=user_id,
-        sec_user_id=sec_user_id,
-        unique_id=unique_id,
-        max_cursor=max_cursor,
-        count=count,
-        sort_type=sort_type,
-        filter_type=filter_type,
-    )
-    with cache_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO tiktok_target_user_video_pages (
-                id, cache_key, source, user_id, sec_user_id, unique_id, max_cursor, count,
-                sort_type, filter_type, next_cursor, has_more, item_count, request_json, items_json,
-                raw_json, pagination_json, normalized_json, fetched_at, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(cache_key) DO UPDATE SET
-                source = excluded.source,
-                user_id = excluded.user_id,
-                sec_user_id = excluded.sec_user_id,
-                unique_id = excluded.unique_id,
-                max_cursor = excluded.max_cursor,
-                count = excluded.count,
-                sort_type = excluded.sort_type,
-                filter_type = excluded.filter_type,
-                next_cursor = excluded.next_cursor,
-                has_more = excluded.has_more,
-                item_count = excluded.item_count,
-                request_json = excluded.request_json,
-                items_json = excluded.items_json,
-                raw_json = excluded.raw_json,
-                pagination_json = excluded.pagination_json,
-                normalized_json = excluded.normalized_json,
-                fetched_at = excluded.fetched_at,
-                updated_at = excluded.updated_at
-            """,
-            (
-                cache_key,
-                cache_key,
-                source,
-                user_id,
-                sec_user_id,
-                unique_id,
-                int(max_cursor or 0),
-                int(count or 0),
-                int(sort_type or 0),
-                filter_type,
-                next_cursor,
-                1 if has_more else 0,
-                len(items),
-                json.dumps(request, ensure_ascii=False),
-                json.dumps(items, ensure_ascii=False),
-                json.dumps(raw, ensure_ascii=False),
-                json.dumps(pagination, ensure_ascii=False),
-                json.dumps(normalized, ensure_ascii=False),
-                fetched_at or current,
-                current,
-                current,
-            ),
-        )
-    return get_target_user_video_page_by_cache_key(cache_key) or {}
 
 
 def list_target_users(status: str | None = None, limit: int = 200, set_id: str | None = None) -> list[dict[str, Any]]:
@@ -2152,7 +1750,10 @@ def remove_user_from_target_set(set_id: str, user_id: str) -> bool:
 def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     init_db()
     current = now()
-    existing = get_target_video(video_id) or {}
+    incoming_aweme_id = str(payload.get("aweme_id") or video_id or "").strip()
+    existing = get_target_video(video_id) or (resolve_target_video(incoming_aweme_id) if incoming_aweme_id else None) or {}
+    if existing:
+        video_id = str(existing.get("id") or video_id)
     existing_source = existing.get("source_json") if isinstance(existing.get("source_json"), dict) else {}
     incoming_source = payload.get("source_json") if isinstance(payload.get("source_json"), dict) else {}
     merged_source = {**existing_source, **incoming_source} if existing_source or incoming_source else payload.get("source_json") or payload

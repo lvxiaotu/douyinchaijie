@@ -16,13 +16,9 @@ from backend.app.error_log_store import write_error_log
 from backend.app.tiktok_target_store import (
     create_target_video,
     get_target_user_by_identifiers,
-    get_target_user_search_page,
-    get_target_user_video_page,
     get_target_video,
     upsert_target_video_comment_page,
     upsert_target_user,
-    upsert_target_user_search_page,
-    upsert_target_user_video_page,
 )
 from integrations.base import IntegrationAdapter, IntegrationManifest
 
@@ -31,7 +27,6 @@ DEFAULT_API_BASE = "https://api.tikhub.io"
 DEFAULT_API_KEY_ENV = "TIKHUB_API_KEY"
 DEFAULT_USER_SEARCH_PATH = "/api/v1/douyin/search/fetch_user_search_v2"
 DEFAULT_USER_SEARCH_V2_PATH = DEFAULT_USER_SEARCH_PATH
-USER_SEARCH_CACHE_SOURCE = "tikhub-douyin-api:user-search-v2"
 DEFAULT_USER_PROFILE_PATH = "/api/v1/douyin/web/handler_user_profile"
 DEFAULT_USER_VIDEOS_PATH = "/api/v1/douyin/web/fetch_user_post_videos"
 DEFAULT_ONE_VIDEO_PATH = "/api/v1/douyin/app/v3/fetch_one_video_v3"
@@ -259,44 +254,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         resolved_cursor = cursor if cursor is not None else 0
         if offset is not None and offset > 0 and cursor is None and page <= 1:
             resolved_cursor = offset
-        cache_count = 0
-        cached = None
-        if cursor is not None or resolved_page <= 1:
-            cached = get_target_user_search_page(
-                source=USER_SEARCH_CACHE_SOURCE,
-                keyword=keyword,
-                cursor=int(resolved_cursor or 0),
-                count=cache_count,
-                search_id="",
-                douyin_user_fans="",
-                douyin_user_type="",
-            )
-        if cached:
-            response = self._build_cached_user_search_response(cached, page=resolved_page, count=target_count)
-            if enrich_profiles:
-                response["items"] = self._enrich_users(response.get("items", []), limit=profile_limit if profile_limit is not None else target_count)
-            response["count"] = len(response.get("items", []))
-            response["raw_count"] = len(response.get("items", []))
-            response["requested_count"] = target_count
-            response["next_cursor"] = response.get("pagination", {}).get("cursor") if isinstance(response.get("pagination"), dict) else response.get("cursor")
-            response["has_more"] = self._has_more(response.get("pagination", {}).get("has_more") if isinstance(response.get("pagination"), dict) else False)
-            self._upsert_search_users(keyword, response["items"], fallback_search_id=str(response.get("search_id") or ""))
-            if enrich_profiles:
-                self._cache_user_search_page(
-                    keyword=keyword,
-                    cursor=int(response.get("cursor") or resolved_cursor or 0),
-                    count=cache_count,
-                    search_id="",
-                    douyin_user_fans="",
-                    douyin_user_type="",
-                    source=USER_SEARCH_CACHE_SOURCE,
-                    request=response.get("request") or {"keyword": keyword, "cursor": int(resolved_cursor or 0)},
-                    raw_page=response.get("raw") if isinstance(response.get("raw"), dict) else {},
-                    page_items=response["items"],
-                    pagination=response.get("pagination") if isinstance(response.get("pagination"), dict) else {},
-                    normalized=response.get("normalized") if isinstance(response.get("normalized"), dict) else {},
-                )
-            return response
         data: dict[str, Any] = {}
         raw_pages: list[dict[str, Any]] = []
         spec: TikhubRequestSpec | None = None
@@ -326,7 +283,10 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         spec = spec or TikhubRequestSpec(path=DEFAULT_USER_SEARCH_PATH, method="POST", json_body={})
         items = self._extract_items(data)
         if enrich_profiles:
-            items = self._enrich_users(items, limit=profile_limit if profile_limit is not None else target_count)
+            items = self._enrich_users(
+                items,
+                limit=profile_limit if profile_limit is not None else target_count,
+            )
         pagination = self._extract_user_search_pagination(data)
         response = {
             "status": "ok",
@@ -348,20 +308,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             "next_cursor": pagination.get("cursor"),
             "has_more": self._has_more(pagination.get("has_more")),
         }
-        self._cache_user_search_page(
-            keyword=keyword,
-            cursor=int(response["cursor"] or 0),
-            count=cache_count,
-            search_id="",
-            douyin_user_fans="",
-            douyin_user_type="",
-            source=USER_SEARCH_CACHE_SOURCE,
-            request={k: v for k, v in (spec.json_body or {}).items() if v is not None},
-            raw_page=data,
-            page_items=response["items"],
-            pagination=response["pagination"],
-            normalized=response["normalized"],
-        )
         self._upsert_search_users(keyword, response["items"], fallback_search_id=str(response["search_id"] or ""))
         return response
 
@@ -385,24 +331,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         sec_user_id = str(sec_user_id or "").strip()
         if not sec_user_id:
             raise ValueError("TikHub 用户信息接口需要 sec_user_id。")
-        cached_user = get_target_user_by_identifiers(sec_user_id=sec_user_id)
-        if cached_user and cached_user.get("source_json") and self._cached_profile_has_required_fields(cached_user):
-            normalized = self._normalize_user(cached_user.get("source_json") or cached_user)
-            for key in ("signature", "ip_location", "follower_count", "like_count", "total_favorited", "aweme_count", "following_count"):
-                if cached_user.get(key) not in [None, ""]:
-                    normalized[key] = cached_user.get(key)
-            if normalized.get("total_favorited") in [None, ""] and normalized.get("like_count") not in [None, ""]:
-                normalized["total_favorited"] = normalized.get("like_count")
-            return {
-                "status": "ok",
-                "source": self.manifest.id,
-                "request": {"sec_user_id": sec_user_id},
-                "raw": cached_user.get("source_json") or {},
-                "user": normalized,
-                "profile": normalized,
-                "sec_user_id": sec_user_id,
-                "cache": {"hit": True, "user_id": cached_user.get("id")},
-            }
         params = {"sec_user_id": sec_user_id}
         if self.douyin_web_cookie:
             params["cookie"] = self.douyin_web_cookie
@@ -442,17 +370,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         target_count = max(1, min(int(count or 20), 50))
         resolved_filter_type = int(filter_type if filter_type is not None else sort_type or 0)
         initial_cursor = int(max_cursor or 0)
-        cached = get_target_user_video_page(
-            source=self.manifest.id,
-            sec_user_id=sec,
-            unique_id=str(unique_id or ""),
-            max_cursor=initial_cursor,
-            count=target_count,
-            sort_type=int(sort_type or 0),
-            filter_type=resolved_filter_type,
-        )
-        if cached:
-            return self._build_cached_user_videos_response(cached)
         request_payload = {
             "sec_user_id": sec,
             "unique_id": str(unique_id or ""),
@@ -486,17 +403,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             last_page_raw = data
             page_items = self._extract_video_items(data)
             pagination = self._extract_video_pagination(data)
-            self._cache_user_video_page_variants(
-                sec_user_id=sec,
-                unique_id=str(unique_id or ""),
-                max_cursor=current_cursor,
-                sort_type=int(sort_type or 0),
-                filter_type=resolved_filter_type,
-                request_params={k: v for k, v in ((spec.params or {}) or {}).items() if v not in [None, ""] and k != "cookie"},
-                raw_page=data,
-                page_items=page_items,
-                pagination=pagination,
-            )
             items.extend(page_items)
 
             next_cursor = pagination.get("max_cursor")
@@ -520,34 +426,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             "has_more": bool(pagination.get("has_more")),
         }
         self._upsert_videos_from_items(sec, response["items"], unique_id=str(unique_id or ""), source_page=response)
-        self._cache_user_video_page_variants(
-            sec_user_id=sec,
-            unique_id=str(unique_id or ""),
-            max_cursor=initial_cursor,
-            sort_type=int(sort_type or 0),
-            filter_type=resolved_filter_type,
-            request_params=request_payload,
-            raw_page=raw,
-            page_items=response["items"],
-            pagination=pagination,
-        )
-        upsert_target_user_video_page(
-            source=self.manifest.id,
-            sec_user_id=sec,
-            unique_id=str(unique_id or ""),
-            max_cursor=initial_cursor,
-            count=target_count,
-            sort_type=int(sort_type or 0),
-            filter_type=resolved_filter_type,
-            next_cursor=self._to_int(pagination.get("max_cursor")),
-            has_more=bool(pagination.get("has_more")),
-            request=request_payload,
-            items=response["items"],
-            raw={"raw": raw, "raw_pages": raw_pages},
-            pagination=pagination,
-            normalized=response["normalized"],
-            fetched_at=int(time.time()),
-        )
         return response
 
     def get_work_detail(self, work_url: str, region: str = "US") -> dict[str, Any]:
@@ -1094,9 +972,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         text = str(value or "").strip()
         return len(text) >= 20 and " " not in text and "@" not in text and (text.startswith("MS4w") or text.startswith("MS4"))
 
-    def _cached_profile_has_required_fields(self, cached_user: dict[str, Any]) -> bool:
-        return all(cached_user.get(key) not in [None, ""] for key in ("signature", "ip_location", "follower_count", "like_count", "aweme_count"))
-
     def _user_videos_params(
         self,
         sec_user_id: str,
@@ -1203,98 +1078,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             return [item for item in root if isinstance(item, dict)]
         return []
 
-    def _build_cached_user_videos_response(self, cached: dict[str, Any]) -> dict[str, Any]:
-        raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
-        raw_pages = raw.get("raw_pages") if isinstance(raw.get("raw_pages"), list) else []
-        first_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else (raw_pages[0] if raw_pages else raw)
-        pagination = cached.get("pagination") if isinstance(cached.get("pagination"), dict) else {}
-        return {
-            "status": "ok",
-            "source": self.manifest.id,
-            "endpoint": DEFAULT_USER_VIDEOS_PATH,
-            "request": cached.get("request") or {},
-            "raw": first_raw,
-            "raw_pages": raw_pages,
-            "items": cached.get("items") or [],
-            "pagination": pagination,
-            "normalized": cached.get("normalized") or {},
-            "next_cursor": cached.get("next_cursor") or pagination.get("max_cursor"),
-            "has_more": bool(cached.get("has_more")),
-            "cache": {
-                "hit": True,
-                "cache_key": cached.get("cache_key"),
-                "fetched_at": cached.get("fetched_at"),
-                "item_count": cached.get("item_count"),
-            },
-        }
-
-    def _build_cached_user_search_response(self, cached: dict[str, Any], *, page: int, count: int) -> dict[str, Any]:
-        raw = cached.get("raw") if isinstance(cached.get("raw"), dict) else {}
-        raw_pages = raw.get("raw_pages") if isinstance(raw.get("raw_pages"), list) else []
-        first_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else (raw_pages[0] if raw_pages else raw)
-        pagination = cached.get("pagination") if isinstance(cached.get("pagination"), dict) else {}
-        items = cached.get("items") or []
-        return {
-            "status": "ok",
-            "source": self.manifest.id,
-            "endpoint": DEFAULT_USER_SEARCH_PATH,
-            "keyword": cached.get("keyword") or "",
-            "page": page,
-            "cursor": cached.get("cursor") or pagination.get("cursor") or 0,
-            "search_id": cached.get("search_id") or pagination.get("search_id") or "",
-            "count": count,
-            "request": cached.get("request") or {},
-            "raw": first_raw,
-            "raw_pages": raw_pages,
-            "items": items,
-            "pagination": pagination,
-            "normalized": cached.get("normalized") or {},
-            "next_cursor": pagination.get("cursor"),
-            "has_more": self._has_more(pagination.get("has_more")),
-            "cache": {
-                "hit": True,
-                "cache_key": cached.get("cache_key"),
-                "fetched_at": cached.get("fetched_at"),
-                "item_count": cached.get("item_count") or len(items),
-            },
-        }
-
-    def _cache_user_video_page_variants(
-        self,
-        *,
-        sec_user_id: str,
-        unique_id: str,
-        max_cursor: int,
-        sort_type: int,
-        filter_type: int,
-        request_params: dict[str, Any],
-        raw_page: dict[str, Any],
-        page_items: list[dict[str, Any]],
-        pagination: dict[str, Any],
-    ) -> None:
-        fetched_at = int(time.time())
-        has_more = bool(pagination.get("has_more"))
-        next_cursor = self._to_int(pagination.get("max_cursor"))
-        for count in range(1, len(page_items) + 1):
-            items = page_items[:count]
-            upsert_target_user_video_page(
-                source=self.manifest.id,
-                sec_user_id=sec_user_id,
-                unique_id=unique_id,
-                max_cursor=int(max_cursor or 0),
-                count=count,
-                sort_type=int(sort_type or 0),
-                filter_type=int(filter_type or 0),
-                next_cursor=next_cursor,
-                has_more=has_more,
-                request={**request_params, "count": count},
-                items=items,
-                raw={"raw": raw_page, "raw_pages": [raw_page]},
-                pagination=pagination,
-                normalized=self._normalize_video_response(raw_page),
-                fetched_at=fetched_at,
-            )
-
     def _cache_comment_page(
         self,
         *,
@@ -1330,38 +1113,6 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             raw={"raw": raw or {}, "raw_pages": raw_pages or ([] if not raw else [raw])},
             pagination=pagination or {},
             normalized=pagination or {},
-            fetched_at=int(time.time()),
-        )
-
-    def _cache_user_search_page(
-        self,
-        *,
-        source: str,
-        keyword: str,
-        cursor: int,
-        count: int,
-        search_id: str,
-        douyin_user_fans: str,
-        douyin_user_type: str,
-        request: dict[str, Any],
-        raw_page: dict[str, Any],
-        page_items: list[dict[str, Any]],
-        pagination: dict[str, Any],
-        normalized: dict[str, Any],
-    ) -> None:
-        upsert_target_user_search_page(
-            source=source,
-            keyword=keyword,
-            cursor=cursor,
-            count=count,
-            search_id=search_id,
-            douyin_user_fans=douyin_user_fans,
-            douyin_user_type=douyin_user_type,
-            request=request,
-            items=page_items,
-            raw={"raw": raw_page, "raw_pages": [raw_page]},
-            pagination=pagination,
-            normalized=normalized,
             fetched_at=int(time.time()),
         )
 
@@ -1474,7 +1225,7 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
                     "play_count": item.get("play_count") or item.get("play_count_raw"),
                     "is_top": item.get("is_top"),
                     "selected": False,
-                    "selection_strategy": "cache_refresh",
+                    "selection_strategy": "api_refresh",
                     "source_json": {
                         **item,
                         "unique_id": unique_id,
@@ -1631,13 +1382,24 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             "raw": item,
         }
 
-    def enrich_user_profiles(self, items: list[dict[str, Any]], *, keyword: str = "", limit: int | None = None) -> list[dict[str, Any]]:
+    def enrich_user_profiles(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        keyword: str = "",
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         enriched = self._enrich_users(items, limit=limit)
         if keyword:
             self._upsert_search_users(keyword, enriched)
         return enriched
 
-    def _enrich_users(self, items: list[dict[str, Any]], *, limit: int | None = None) -> list[dict[str, Any]]:
+    def _enrich_users(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         if not items:
             return []
         normalized_items = [item if isinstance(item, dict) else {} for item in items]
