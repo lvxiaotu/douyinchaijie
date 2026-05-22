@@ -69,7 +69,7 @@ class TiktokTargetInteractionTests(unittest.TestCase):
 
         updated = store.create_target_video(
             "same-aweme",
-            "user-1",
+            "user-2",
             {
                 "set_id": "set-1",
                 "aweme_id": "same-aweme",
@@ -81,14 +81,90 @@ class TiktokTargetInteractionTests(unittest.TestCase):
             },
         )
 
-        videos = store.list_target_videos(user_id="user-1", limit=10)
+        videos = store.list_target_videos(limit=10)
         self.assertEqual(len(videos), 1)
         self.assertEqual(updated["id"], original["id"])
+        self.assertEqual(updated["user_id"], "user-2")
         self.assertEqual(updated["desc"], "new desc")
         self.assertEqual(updated["digg_count"], 99)
         self.assertEqual(updated["comment_count"], 8)
         self.assertTrue(updated["source_json"]["old"])
         self.assertTrue(updated["source_json"]["new"])
+
+    def test_target_user_upsert_reuses_existing_sec_user_id(self):
+        original = store.upsert_target_user(
+            "user-row-1",
+            {
+                "sec_user_id": "sec-user-1",
+                "unique_id": "first-handle",
+                "nickname": "Old Name",
+            },
+        )
+
+        updated = store.upsert_target_user(
+            "different-user-row",
+            {
+                "sec_user_id": "sec-user-1",
+                "unique_id": "new-handle",
+                "nickname": "New Name",
+            },
+        )
+
+        self.assertEqual(updated["id"], original["id"])
+        self.assertEqual(updated["unique_id"], "new-handle")
+        self.assertEqual(updated["nickname"], "New Name")
+        self.assertEqual(len(store.list_target_users(limit=10)), 1)
+
+    def test_bulk_save_skips_existing_set_user_by_sec_user_id(self):
+        from backend.app.routes.douyin_target import TargetBulkSave, bulk_save_users
+
+        store.create_target_set("set-sec-dedupe", "Sec ID Set")
+
+        first = bulk_save_users(
+            TargetBulkSave(
+                set_id="set-sec-dedupe",
+                users=[
+                    {
+                        "sec_user_id": "sec-user-save",
+                        "uid": "uid-first",
+                        "unique_id": "first-handle",
+                        "nickname": "First",
+                    },
+                    {
+                        "sec_user_id": "sec-user-save",
+                        "uid": "uid-second",
+                        "unique_id": "second-handle",
+                        "nickname": "Second",
+                    },
+                ],
+            )
+        )
+
+        self.assertEqual(first["added_count"], 1)
+        self.assertEqual(first["count"], 1)
+        self.assertEqual(first["skipped_duplicate_count"], 1)
+        self.assertEqual(len(store.get_target_set_detail("set-sec-dedupe")["users"]), 1)
+        store.add_user_to_target_set("set-sec-dedupe", "missing-user-row")
+        self.assertEqual(store.list_target_sets(limit=10)[0]["user_count"], 1)
+
+        second = bulk_save_users(
+            TargetBulkSave(
+                set_id="set-sec-dedupe",
+                users=[
+                    {
+                        "sec_user_id": "sec-user-save",
+                        "uid": "uid-third",
+                        "unique_id": "third-handle",
+                        "nickname": "Third",
+                    }
+                ],
+            )
+        )
+
+        self.assertEqual(second["added_count"], 0)
+        self.assertEqual(second["count"], 0)
+        self.assertEqual(second["skipped_duplicate_count"], 1)
+        self.assertEqual(len(store.get_target_set_detail("set-sec-dedupe")["users"]), 1)
 
     def test_comments_replies_and_insights_are_persisted(self):
         store.create_target_video(

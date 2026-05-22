@@ -1209,15 +1209,16 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     user_id = str(user_id or payload.get("uid") or payload.get("user_id") or "").strip()
     payload_sec_user_id = str(payload.get("sec_user_id") or payload.get("sec_uid") or "").strip()
     payload_unique_id = str(payload.get("unique_id") or "").strip()
-    existing = get_target_user(user_id) if user_id else None
+    existing = get_target_user_by_identifiers(sec_user_id=payload_sec_user_id) if payload_sec_user_id else None
+    if not existing:
+        existing = get_target_user(user_id) if user_id else None
     if not existing:
         existing = get_target_user_by_identifiers(
             user_id=user_id,
-            sec_user_id=payload_sec_user_id,
-            unique_id=payload_unique_id,
+            unique_id=payload_unique_id if not payload_sec_user_id else "",
         )
-        if existing:
-            user_id = str(existing.get("id") or user_id)
+    if existing:
+        user_id = str(existing.get("id") or user_id)
     if not user_id:
         user_id = payload_sec_user_id or payload_unique_id
     if not user_id:
@@ -1521,7 +1522,16 @@ def list_target_users(status: str | None = None, limit: int = 200, set_id: str |
         values.append(limit)
         with connect() as connection:
             rows = connection.execute(query, values).fetchall()
-        return [row_to_target_user(row) for row in rows]
+        users = [row_to_target_user(row) for row in rows]
+        seen = set()
+        unique_users = []
+        for user in users:
+            identity = str(user.get("sec_user_id") or "").strip() or f'id:{user["id"]}'
+            if identity in seen:
+                continue
+            seen.add(identity)
+            unique_users.append(user)
+        return unique_users
 
     query = "SELECT * FROM tiktok_target_users"
     if status:
@@ -1532,6 +1542,23 @@ def list_target_users(status: str | None = None, limit: int = 200, set_id: str |
     with connect() as connection:
         rows = connection.execute(query, values).fetchall()
     return [row_to_target_user(row) for row in rows]
+
+
+def list_target_set_sec_user_ids(set_id: str) -> set[str]:
+    init_db()
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT target_user.sec_user_id
+            FROM tiktok_target_set_users AS set_user
+            JOIN tiktok_target_users AS target_user ON target_user.id = set_user.user_id
+            WHERE set_user.set_id = %s
+              AND set_user.deleted_at IS NULL
+              AND target_user.sec_user_id != ''
+            """,
+            (set_id,),
+        ).fetchall()
+    return {str(row["sec_user_id"]).strip() for row in rows if str(row["sec_user_id"]).strip()}
 
 
 def create_target_set(
@@ -1669,11 +1696,14 @@ def list_target_sets(limit: int = 100) -> list[dict[str, Any]]:
     with connect() as connection:
         user_count_rows = connection.execute(
             f"""
-            SELECT set_id, COUNT(*) AS user_count
-            FROM tiktok_target_set_users
-            WHERE set_id IN ({id_placeholders})
-              AND deleted_at IS NULL
-            GROUP BY set_id
+            SELECT
+                set_user.set_id,
+                COUNT(DISTINCT COALESCE(NULLIF(target_user.sec_user_id, ''), target_user.id)) AS user_count
+            FROM tiktok_target_set_users AS set_user
+            JOIN tiktok_target_users AS target_user ON target_user.id = set_user.user_id
+            WHERE set_user.set_id IN ({id_placeholders})
+              AND set_user.deleted_at IS NULL
+            GROUP BY set_user.set_id
             """,
             set_ids,
         ).fetchall()

@@ -33,6 +33,7 @@ from backend.app.tiktok_target_store import (
     get_target_video,
     get_target_video_interaction_dataset,
     init_db,
+    list_target_set_sec_user_ids,
     list_target_sets,
     list_target_tasks,
     list_target_videos,
@@ -274,10 +275,10 @@ def _comment_sampling_plan(video: dict[str, Any], payload: CollectCommentsReques
     }
 
 
-def _target_user_id(user: TargetUserCreate | dict[str, Any]) -> str:
+def _target_sec_user_id(user: TargetUserCreate | dict[str, Any]) -> str:
     getter = user.get if isinstance(user, dict) else lambda key, default=None: getattr(user, key, default)
     raw_user_id = getter("uid") or getter("user_id")
-    return str(getter("sec_user_id") or getter("sec_uid") or (_looks_like_sec_user_id(raw_user_id) and raw_user_id) or getter("unique_id") or raw_user_id or "") or str(uuid4())
+    return _as_text(getter("sec_user_id") or getter("sec_uid") or (_looks_like_sec_user_id(raw_user_id) and raw_user_id))
 
 
 def _target_user_payload(user: TargetUserCreate, fallback_keyword: str = "") -> dict[str, Any]:
@@ -991,19 +992,42 @@ def bulk_save_users(payload: TargetBulkSave) -> dict[str, Any]:
             filters=payload.filters,
         )
 
+    existing_set_sec_user_ids = list_target_set_sec_user_ids(set_id) if set_id else set()
+    seen_sec_user_ids: set[str] = set()
     saved = []
+    added = []
+    skipped_duplicate_sec_user_ids = []
+    skipped_missing_sec_user_ids = 0
     for user in payload.users:
-        user_id = _target_user_id(user)
-        saved_user = upsert_target_user(user_id, _target_user_payload(user, fallback_keyword=payload.keyword))
-        if set_id:
-            add_user_to_target_set(set_id, user_id)
+        sec_user_id = _target_sec_user_id(user)
+        if not sec_user_id:
+            skipped_missing_sec_user_ids += 1
+            continue
+        if sec_user_id in seen_sec_user_ids:
+            skipped_duplicate_sec_user_ids.append(sec_user_id)
+            continue
+        seen_sec_user_ids.add(sec_user_id)
+
+        saved_user = upsert_target_user(sec_user_id, _target_user_payload(user, fallback_keyword=payload.keyword))
         saved.append(saved_user)
+        if set_id and sec_user_id in existing_set_sec_user_ids:
+            skipped_duplicate_sec_user_ids.append(sec_user_id)
+            continue
+        if set_id:
+            add_user_to_target_set(set_id, str(saved_user.get("id") or sec_user_id))
+            existing_set_sec_user_ids.add(sec_user_id)
+        added.append(saved_user)
 
     return {
         "status": "ok",
         "set": get_target_set_detail(set_id) if set_id else target_set,
         "users": saved,
-        "count": len(saved),
+        "added_users": added,
+        "count": len(added),
+        "added_count": len(added),
+        "skipped_duplicate_count": len(skipped_duplicate_sec_user_ids),
+        "skipped_duplicate_sec_user_ids": skipped_duplicate_sec_user_ids,
+        "skipped_missing_sec_user_id_count": skipped_missing_sec_user_ids,
     }
 
 

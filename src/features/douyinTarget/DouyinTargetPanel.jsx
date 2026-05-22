@@ -96,7 +96,8 @@ function busyLabel(busy) {
 }
 
 function userId(user) {
-  return user.sec_user_id || user.sec_uid || user.uid || user.unique_id;
+  const uid = String(user.uid || user.user_id || "");
+  return String(user.sec_user_id || user.sec_uid || (uid.startsWith("MS4") ? uid : "") || "").trim();
 }
 
 function cleanKeyword(value) {
@@ -333,12 +334,13 @@ function buildSearchPayload(filters) {
 }
 
 function normalizeUserForSave(user, keyword) {
-  const secUserId = user.sec_uid || user.sec_user_id || (String(user.uid || "").startsWith("MS4") ? user.uid : "");
+  const uid = String(user.uid || user.user_id || "");
+  const secUserId = user.sec_uid || user.sec_user_id || (uid.startsWith("MS4") ? uid : "");
   return {
     keyword,
     sec_user_id: secUserId,
     sec_uid: secUserId,
-    uid: user.uid || "",
+    uid,
     unique_id: user.unique_id || "",
     nickname: user.nickname || "",
     avatar_url: user.avatar || user.avatar_url || "",
@@ -387,7 +389,6 @@ export function DouyinTargetPanel() {
   const [operation, setOperation] = useState(null);
 
   const users = searchResult?.items || [];
-  const selectedCount = selectedUsers.size;
   const activeVideos = activeSet?.videos || [];
   const activeUsers = activeSet?.users || [];
   const isCreatingSet = !activeSetId;
@@ -402,6 +403,12 @@ export function DouyinTargetPanel() {
     () => users.filter((item) => selectedUsers.has(userId(item))),
     [selectedUsers, users],
   );
+  const activeUserIds = useMemo(() => new Set(activeUsers.map(userId).filter(Boolean)), [activeUsers]);
+  const saveableSearchUsers = useMemo(
+    () => selectedSearchUsers.filter((item) => !activeUserIds.has(userId(item))),
+    [activeUserIds, selectedSearchUsers],
+  );
+  const selectedCount = saveableSearchUsers.length;
 
   const searchPayload = useMemo(() => buildSearchPayload(filters), [filters]);
 
@@ -642,8 +649,12 @@ export function DouyinTargetPanel() {
       setError("请先选择要保存的账号。");
       return;
     }
+    if (!saveableSearchUsers.length) {
+      setMessage("所选账号已全部在当前合集。");
+      return;
+    }
     const payload = {
-      users: selectedSearchUsers.map((item) => normalizeUserForSave(item, keyword)),
+      users: saveableSearchUsers.map((item) => normalizeUserForSave(item, keyword)),
       setId: activeSetId,
       setName: activeSetId ? "" : resolvedSetName,
       keyword: activeSetId ? keyword : resolvedSetKeyword,
@@ -651,7 +662,13 @@ export function DouyinTargetPanel() {
     };
     const result = await run("save", () => saveDouyinTargetUsers(payload));
     if (result) {
-      setMessage(`已保存 ${result.count} 个账号到待对标库`);
+      const addedCount = Number(result.added_count ?? result.count ?? 0);
+      const duplicateCount = Number(result.skipped_duplicate_count || 0);
+      const missingIdCount = Number(result.skipped_missing_sec_user_id_count || 0);
+      const messageParts = [`已新增 ${addedCount} 个账号到待对标库`];
+      if (duplicateCount) messageParts.push(`跳过 ${duplicateCount} 个重复账号`);
+      if (missingIdCount) messageParts.push(`跳过 ${missingIdCount} 个缺少 sec_user_id 的账号`);
+      setMessage(messageParts.join("，"));
       await loadSets(result.set?.id || activeSetId);
     }
   }
@@ -1151,13 +1168,15 @@ export function DouyinTargetPanel() {
         <div className="target-user-table">
           {users.map((item) => {
             const id = userId(item);
-            const checked = selectedUsers.has(id);
+            const alreadyInActiveSet = Boolean(id && activeUserIds.has(id));
+            const checked = Boolean(id && selectedUsers.has(id) && !alreadyInActiveSet);
             return (
               <article className="target-user-row" key={id || item.nickname}>
                 <label className="target-check">
                   <input
                     type="checkbox"
                     checked={checked}
+                    disabled={!id || alreadyInActiveSet}
                     onChange={(event) => {
                       setSelectedUsers((current) => {
                         const next = new Set(current);
@@ -1183,6 +1202,7 @@ export function DouyinTargetPanel() {
                   <span>关注 {compactNumber(item.following_count)}</span>
                 </div>
                 <div className="target-user-flags">
+                  {alreadyInActiveSet && <Badge status="done">已在合集</Badge>}
                   <Badge status={item.verified ? "ready" : "draft"}>{item.verified ? "认证" : "普通"}</Badge>
                   <span>{formatDate(item.last_post_at || item.recent_update_at)}</span>
                 </div>
