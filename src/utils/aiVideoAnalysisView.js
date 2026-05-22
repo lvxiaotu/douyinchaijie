@@ -462,6 +462,15 @@ export function mergeSegmentBreakdowns(resultSegments, evidenceSegments) {
       time_range: segment?.time_range || evidence.time_range,
       transcript: segment?.transcript || evidence.transcript,
       transcript_segments: segment?.transcript_segments || evidence.transcript_segments || [],
+      copywriting_intent: segment?.copywriting_intent || evidence.copywriting_intent,
+      psychology_principle: segment?.psychology_principle || evidence.psychology_principle,
+      suggestion_mechanism: segment?.suggestion_mechanism || evidence.suggestion_mechanism,
+      emotion: segment?.emotion || evidence.emotion,
+      copywriting_pattern: segment?.copywriting_pattern || evidence.copywriting_pattern,
+      commerce_signal: segment?.commerce_signal || evidence.commerce_signal,
+      comment_trigger: segment?.comment_trigger || evidence.comment_trigger,
+      replicable_point: segment?.replicable_point || evidence.replicable_point,
+      replication_action: segment?.replication_action || evidence.replication_action,
     };
   });
 }

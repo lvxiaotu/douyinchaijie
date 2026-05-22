@@ -62,6 +62,34 @@ class VisualStructure(FlexibleModel):
     audio_rhythm: str = ""
 
 
+class PsychologyBreakdown(FlexibleModel):
+    copywriting_intent: str = ""
+    psychology_principle: str = ""
+    suggestion_mechanism: str = ""
+    emotion: str = ""
+    copywriting_pattern: str = ""
+    commerce_signal: str = ""
+    comment_trigger: str = ""
+    replicable_point: str = ""
+    replication_action: str = ""
+
+    @field_validator(
+        "copywriting_intent",
+        "psychology_principle",
+        "suggestion_mechanism",
+        "emotion",
+        "copywriting_pattern",
+        "commerce_signal",
+        "comment_trigger",
+        "replicable_point",
+        "replication_action",
+        mode="before",
+    )
+    @classmethod
+    def normalize_text(cls, value: Any) -> str:
+        return _text(value)
+
+
 class CopywritingFormula(FlexibleModel):
     title_formula: str = ""
     script_formula: str = ""
@@ -114,11 +142,40 @@ class SegmentBreakdown(FlexibleModel):
     audio_pacing: str = ""
     narrative_technique: str = ""
     retention_mechanism: str = ""
+    copywriting_intent: str = ""
+    psychology_principle: str = ""
+    suggestion_mechanism: str = ""
+    emotion: str = ""
+    copywriting_pattern: str = ""
+    commerce_signal: str = ""
+    comment_trigger: str = ""
+    replicable_point: str = ""
+    replication_action: str = ""
     transcript: str = ""
     start: float | None = None
     end: float | None = None
 
-    @field_validator("segment_id", "time_range", "genre", "segment_role", "visual_style", "audio_pacing", "narrative_technique", "retention_mechanism", "transcript", mode="before")
+    @field_validator(
+        "segment_id",
+        "time_range",
+        "genre",
+        "segment_role",
+        "visual_style",
+        "audio_pacing",
+        "narrative_technique",
+        "retention_mechanism",
+        "copywriting_intent",
+        "psychology_principle",
+        "suggestion_mechanism",
+        "emotion",
+        "copywriting_pattern",
+        "commerce_signal",
+        "comment_trigger",
+        "replicable_point",
+        "replication_action",
+        "transcript",
+        mode="before",
+    )
     @classmethod
     def normalize_text(cls, value: Any) -> str:
         return _text(value)
@@ -154,6 +211,7 @@ class AnalysisResult(FlexibleModel):
     need_context: NeedContext = Field(default_factory=NeedContext)
     product_power: ProductPower = Field(default_factory=ProductPower)
     visual_structure: VisualStructure = Field(default_factory=VisualStructure)
+    psychology_breakdown: PsychologyBreakdown = Field(default_factory=PsychologyBreakdown)
     copywriting_formula: CopywritingFormula = Field(default_factory=CopywritingFormula)
     market_positioning: MarketPositioning = Field(default_factory=MarketPositioning)
     replication_plan: ReplicationPlan = Field(default_factory=ReplicationPlan)
@@ -192,4 +250,3 @@ def validate_segment_breakdown(value: dict[str, Any]) -> dict[str, Any]:
         if key not in data:
             data[key] = extra_value
     return data
-

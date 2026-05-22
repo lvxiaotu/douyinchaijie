@@ -294,14 +294,16 @@ export function SegmentTimeline({ segments, onSeek, activeTranscriptId }) {
             className={`content-lab-timeline-item ${segment.transcript ? "has-transcript" : ""}`}
             key={segment.id || segment.segment_id || index}
           >
-            <div className="content-lab-time-mark">
+            <div className="content-lab-timeline-meta">
               <button className="content-lab-time-jump" type="button" onClick={() => onSeek?.(segment)}>
                 {segment.time_range || secondsToLabel(segment.start) || `片段 ${index + 1}`}
               </button>
               <strong>{segment.segment_role || "未标注"}</strong>
+              <p>{segment.copywriting_intent || segment.hook || "文案意图未标注"}</p>
             </div>
-            {segment.transcript && (
-              <div className="content-lab-track content-lab-track-wide">
+            <div className="content-lab-timeline-body">
+              {segment.transcript && (
+                <div className="content-lab-track content-lab-track-full content-lab-transcript-block">
                 <span>语音转文字</span>
                 <button
                   className={`content-lab-segment-transcript ${String(activeTranscriptId) === String(segment.id || segment.segment_id) ? "active" : ""}`}
@@ -310,20 +312,71 @@ export function SegmentTimeline({ segments, onSeek, activeTranscriptId }) {
                 >
                   {segment.transcript}
                 </button>
+                </div>
+              )}
+              <div className="content-lab-timeline-grid">
+                <div className="content-lab-track">
+                  <span>视听手法</span>
+                  <p>{[segment.visual_style, segment.audio_pacing].filter(Boolean).join(" / ") || "暂无内容"}</p>
+                </div>
+                <div className="content-lab-track">
+                  <span>文案意图</span>
+                  <p>{segment.copywriting_intent || segment.narrative_technique || "暂无内容"}</p>
+                </div>
+                <div className="content-lab-track">
+                  <span>心理原理</span>
+                  <p>{segment.psychology_principle || segment.suggestion_mechanism || segment.retention_mechanism || "暂无内容"}</p>
+                </div>
+                <div className="content-lab-track">
+                  <span>暗示机制</span>
+                  <p>{segment.suggestion_mechanism || segment.retention_mechanism || "暂无内容"}</p>
+                </div>
+                <div className="content-lab-track">
+                  <span>可复刻动作</span>
+                  <p>{segment.replication_action || segment.replicable_point || segment.copywriting_pattern || "暂无内容"}</p>
+                </div>
+                <div className="content-lab-track">
+                  <span>情绪 / 信号</span>
+                  <p>{[segment.emotion, segment.comment_trigger, segment.commerce_signal].filter(Boolean).join(" / ") || "暂无内容"}</p>
+                </div>
               </div>
-            )}
-            <div className="content-lab-track">
-              <span>视听手法</span>
-              <p>{[segment.visual_style, segment.audio_pacing].filter(Boolean).join(" / ") || "暂无内容"}</p>
-            </div>
-            <div className="content-lab-track">
-              <span>心理拆解</span>
-              <p>{[segment.narrative_technique, segment.retention_mechanism].filter(Boolean).join(" / ") || "暂无内容"}</p>
             </div>
           </article>
         ))}
       </div>
     </div>
+  );
+}
+
+function PsychologyChip({ label, value }) {
+  return (
+    <div className="content-lab-psych-chip">
+      <span>{label}</span>
+      <p>{value || "暂无内容"}</p>
+    </div>
+  );
+}
+
+export function PsychologyBreakdown({ breakdown }) {
+  if (!breakdown) return null;
+  const items = [
+    ["文案意图", breakdown.copywriting_intent],
+    ["心理原理", breakdown.psychology_principle],
+    ["暗示机制", breakdown.suggestion_mechanism],
+    ["情绪", breakdown.emotion],
+    ["可复用句式", breakdown.copywriting_pattern],
+    ["评论/转化信号", [breakdown.comment_trigger, breakdown.commerce_signal].filter(Boolean).join(" / ")],
+    ["复刻动作", [breakdown.replicable_point, breakdown.replication_action].filter(Boolean).join(" / ")],
+  ];
+  return (
+    <section className="analysis-section content-lab-detail-card">
+      <strong>心理文案拆解</strong>
+      <div className="content-lab-psych-grid">
+        {items.map(([label, value]) => (
+          <PsychologyChip key={label} label={label} value={value} />
+        ))}
+      </div>
+    </section>
   );
 }
 

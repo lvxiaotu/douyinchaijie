@@ -42,6 +42,24 @@ def parse_segment_json(text: str, segment: dict[str, Any]) -> dict[str, Any]:
         data["narrative_technique"] = data.get("copywriting_pattern") or data.get("segment_role") or ""
     if "retention_mechanism" not in data:
         data["retention_mechanism"] = data.get("hook") or data.get("comment_trigger") or data.get("replicable_point") or ""
+    if "copywriting_intent" not in data:
+        data["copywriting_intent"] = data.get("hook") or data.get("conflict_or_value") or data.get("copywriting_pattern") or ""
+    if "psychology_principle" not in data:
+        data["psychology_principle"] = data.get("psychological_principle") or data.get("psychology") or data.get("retention_mechanism") or ""
+    if "suggestion_mechanism" not in data:
+        data["suggestion_mechanism"] = data.get("suggestion") or data.get("cue") or data.get("emotion") or ""
+    if "emotion" not in data:
+        data["emotion"] = data.get("emotional_trigger") or data.get("affect") or ""
+    if "copywriting_pattern" not in data:
+        data["copywriting_pattern"] = data.get("script_formula") or data.get("copywriting_intent") or ""
+    if "commerce_signal" not in data:
+        data["commerce_signal"] = data.get("product_power") or data.get("cta") or ""
+    if "comment_trigger" not in data:
+        data["comment_trigger"] = data.get("comment_bait") or data.get("question_hook") or ""
+    if "replicable_point" not in data:
+        data["replicable_point"] = data.get("reusable_elements") or data.get("hook") or data.get("narrative_technique") or ""
+    if "replication_action" not in data:
+        data["replication_action"] = data.get("replicable_point") or data.get("copywriting_pattern") or ""
     return validate_segment_breakdown(data)
 
 
@@ -53,6 +71,7 @@ def normalize_analysis_result(data: dict[str, Any], raw_text: str = "") -> dict[
     need_context = _first_dict(data, ["need_context", "需求与场景", "需求场景"])
     product_power = _first_dict(data, ["product_power", "产品表现", "产品力", "产品价值"])
     visual_structure = _first_dict(data, ["visual_structure", "视觉与结构", "视觉结构"])
+    psychology_breakdown = _first_dict(data, ["psychology_breakdown", "心理拆解", "心理文案拆解"])
     copywriting_formula = _first_dict(data, ["copywriting_formula", "文案公式", "脚本公式"])
     market_positioning = _first_dict(data, ["market_positioning", "商业定位", "市场定位"])
     replication_plan = _first_dict(data, ["replication_plan", "复刻计划", "模仿计划"])
@@ -92,6 +111,17 @@ def normalize_analysis_result(data: dict[str, Any], raw_text: str = "") -> dict[
             or _join_old(data.get("visuals")),
             "timeline_beats": _first_list_text(visual_structure, ["timeline_beats", "时间线", "节奏点"]),
             "audio_rhythm": _first_text(visual_structure, ["audio_rhythm", "声音节奏", "音频节奏"]),
+        },
+        "psychology_breakdown": {
+            "copywriting_intent": _first_text(psychology_breakdown, ["copywriting_intent", "文案意图", "话术意图"]),
+            "psychology_principle": _first_text(psychology_breakdown, ["psychology_principle", "心理原理", "心理学原理"]),
+            "suggestion_mechanism": _first_text(psychology_breakdown, ["suggestion_mechanism", "暗示机制", "暗示"]),
+            "emotion": _first_text(psychology_breakdown, ["emotion", "情绪"]),
+            "copywriting_pattern": _first_text(psychology_breakdown, ["copywriting_pattern", "文案句式", "文案模式"]),
+            "commerce_signal": _first_text(psychology_breakdown, ["commerce_signal", "转化信号", "商业信号"]),
+            "comment_trigger": _first_text(psychology_breakdown, ["comment_trigger", "评论诱因", "互动诱因"]),
+            "replicable_point": _first_text(psychology_breakdown, ["replicable_point", "可复刻点", "复刻动作"]),
+            "replication_action": _first_text(psychology_breakdown, ["replication_action", "复刻动作", "动作建议"]),
         },
         "copywriting_formula": {
             "title_formula": _first_text(copywriting_formula, ["title_formula", "标题公式"]),

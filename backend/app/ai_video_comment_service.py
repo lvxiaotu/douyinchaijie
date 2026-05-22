@@ -381,6 +381,7 @@ def build_target_interaction_context(video: dict[str, Any]) -> dict[str, Any]:
         ]
     )
     top_comments = sorted(top_comments, key=lambda item: int(item.get("digg_count") or 0), reverse=True)[:30]
+    metrics = latest_video.get("metrics") if isinstance(latest_video.get("metrics"), dict) else {}
     return {
         "set_id": latest_video.get("set_id"),
         "video_id": latest_video.get("id"),
@@ -409,7 +410,7 @@ def build_target_interaction_context(video: dict[str, Any]) -> dict[str, Any]:
             "snapshot_at": latest_video.get("comment_snapshot_at"),
             "comment_saved_count": latest_video.get("comment_saved_count"),
             "reply_saved_count": latest_video.get("reply_saved_count"),
-            "error": (metrics.get("comment_snapshot_error") if isinstance(metrics, dict) else "") or "",
+            "error": (metrics.get("comment_snapshot_error") if isinstance(metrics, dict) else "") or latest_video.get("comment_snapshot_error") or "",
             "keyword_counts": insights.get("keyword_counts") or {},
             "symbol_counts": insights.get("symbol_counts") or {},
             "emotion_profile": insights.get("emotion_profile") or {},

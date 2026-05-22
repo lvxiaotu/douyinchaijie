@@ -19,7 +19,7 @@ import {
 } from "../../utils/aiVideoAnalysisView";
 import { rewriteAiVideoRemake, saveAiVideoRemakeExport, sendAiVideoRemakeToScript } from "../../services/api";
 import { ModelRunSummary } from "./ModelRunSummary";
-import { CommentIntelligence, RemakeLab, ResultOverview, SectionRows, SegmentTimeline, VideoTranscriptSyncPanel } from "./AnalysisResultSections";
+import { CommentIntelligence, PsychologyBreakdown, RemakeLab, ResultOverview, SectionRows, SegmentTimeline, VideoTranscriptSyncPanel } from "./AnalysisResultSections";
 import { useAiVideoEvidence } from "./useAiVideoEvidence";
 import { useDouyinInteractions } from "./useDouyinInteractions";
 
@@ -241,6 +241,15 @@ export function AnalysisResultModal({ task, onClose, pageMode = false }) {
       ],
     ],
     [
+      "心理文案拆解",
+      [
+        ["文案意图", result.psychology_breakdown?.copywriting_intent],
+        ["心理原理", result.psychology_breakdown?.psychology_principle],
+        ["暗示机制", result.psychology_breakdown?.suggestion_mechanism],
+        ["可复刻动作", result.psychology_breakdown?.replication_action || result.psychology_breakdown?.replicable_point],
+      ],
+    ],
+    [
       "视觉与节奏模板",
       [
         ["镜头结构", result.visual_structure?.shot_structure],
@@ -324,6 +333,7 @@ export function AnalysisResultModal({ task, onClose, pageMode = false }) {
           />
 
           <SegmentTimeline segments={segmentBreakdowns} onSeek={handleSeekTranscript} activeTranscriptId={activeTranscriptId} />
+          <PsychologyBreakdown breakdown={result.psychology_breakdown} />
 
           <div className="content-lab-workspace">
             <CommentIntelligence snapshot={interactionSnapshot} loading={liveInteractionStatus.loading} error={liveInteractionStatus.error} />

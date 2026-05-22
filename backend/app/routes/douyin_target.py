@@ -757,6 +757,7 @@ def _analysis_target_context(video: dict[str, Any], target_user: dict[str, Any] 
         ]
     )
     top_comments = sorted(top_comments, key=lambda item: int(item.get("digg_count") or 0), reverse=True)[:30]
+    metrics = video.get("metrics") if isinstance(video.get("metrics"), dict) else {}
     return {
         "set_id": video.get("set_id"),
         "video_id": video.get("id"),

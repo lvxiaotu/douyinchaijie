@@ -117,6 +117,17 @@ JSON_RESPONSE_CONTRACT = """
     "timeline_beats": ["00:00-00:03：钩子", "00:03-00:08：冲突/铺垫"],
     "audio_rhythm": "口播、BGM、音效、停顿、字幕节奏"
   },
+  "psychology_breakdown": {
+    "copywriting_intent": "整条视频文案想推动用户做什么，如何引导注意力、理解和行动",
+    "psychology_principle": "核心心理学原理或认知偏差，如好奇缺口、损失厌恶、从众、权威、稀缺、互惠、锚定、承诺一致性、情绪唤醒等",
+    "suggestion_mechanism": "如何完成暗示、预设、框架引导或轻度心理触发",
+    "emotion": "主导情绪与情绪曲线",
+    "copywriting_pattern": "可复用的话术句式/结构",
+    "commerce_signal": "购买、收藏、私信、点击或信任信号",
+    "comment_trigger": "诱发评论、站队、纠错、求链接或共鸣的机制",
+    "replicable_point": "最值得复刻的心理按钮或文案动作",
+    "replication_action": "把心理机制抽象成一句可执行的复刻动作"
+  },
   "copywriting_formula": {
     "title_formula": "标题公式，使用变量占位",
     "script_formula": "脚本公式，按步骤拆成可替换模板",
@@ -165,12 +176,13 @@ DEFAULT_ANALYSIS_PROMPT = """
 
 拆解原则：
 1. 先判断它属于什么赛道、靠什么火：情绪共鸣、争议互动、干货收藏、视觉爽点、反常识、商品利益、关系冲突、地点/价格吸引等。
-2. 拆开头 3 秒、剧情推进、镜头节奏、文案公式、评论诱因、信任建构、转化设计。
+2. 拆开头 3 秒、剧情推进、镜头节奏、文案公式、评论诱因、信任建构、转化设计，并重点补齐“文案意图 -> 心理原理 -> 暗示/框架 -> 用户动作”的链路。
 3. 不要照抄原视频具体表达，要抽象成可替换变量和可复用模板。
 4. 如果视频不带货，也要判断它能否迁移成商业内容；如果视频是商业内容，也要拆出非商业赛道可复用的叙事结构。
 5. 对不同赛道使用对应行业术语，但最终字段保持通用。
 6. 如果涉及玄学、疗效、财富、情感挽回、夸大效果、真实人物肖像、AI 生成内容等风险，必须指出并给出安全改写。
 7. 评分使用 0-100 的整数，越高越值得优先复刻。
+8. 如果能识别出心理学线索，请明确写出：好奇缺口、损失厌恶、从众、权威、稀缺、互惠、锚定、承诺一致性、情绪唤醒、社会认同、框架效应、峰终定律、选择架构等。
 """.strip()
 
 
@@ -257,13 +269,15 @@ def segment_breakdown_prompt(video: dict[str, Any], segment: dict[str, Any]) -> 
   "audio_pacing": "声音特征，如语速突变、BGM卡点、音效、停顿、字幕密度",
   "narrative_technique": "本段叙事技巧，如提出疑问、展示痛点、给出反转、硬核科普、视觉爽点、卖点展现",
   "retention_mechanism": "本段靠什么留住用户，如视觉冲击、好奇心、情绪共鸣、利益诱导、争议站队",
-  "hook": "这一段如何抓注意力",
-  "conflict_or_value": "这一段制造的冲突、价值或信息差",
-  "emotion": "情绪触发",
-  "copywriting_pattern": "可复用文案句式",
+  "copywriting_intent": "这一段文案/话术想推动用户做什么",
+  "psychology_principle": "使用了什么心理学原理或认知偏差，如好奇缺口、损失厌恶、从众、权威、稀缺、互惠、锚定、承诺一致性、情绪唤醒等",
+  "suggestion_mechanism": "这一段是如何完成暗示、预设、框架引导或轻度心理触发的",
+  "emotion": "主导情绪与情绪曲线",
+  "copywriting_pattern": "可复用文案句式/结构",
   "commerce_signal": "产品、购买、收藏、私信、信任背书等转化信号",
   "comment_trigger": "评论诱因",
-  "replicable_point": "这一段最值得复刻的点",
+  "replicable_point": "这一段最值得复刻的心理按钮或文案动作",
+  "replication_action": "把这段抽象成一句可执行的复刻动作",
   "highlight_screenshots": [
     {{"time": 12.5, "time_label": "00:12", "reason": "最能证明钩子、反转、产品利益点或情绪爆点的画面"}}
   ]
@@ -301,7 +315,7 @@ def global_breakdown_prompt(
             base_prompt,
             f"赛道上下文：{json.dumps(context, ensure_ascii=False)}",
             VIRAL_BREAKDOWN_GUIDE,
-            "下面是已由音频转写、评论数据和分段多模态分析得到的证据包。请基于证据汇总全局爆款公式，不要编造证据中不存在的事实。请重点输出爆款公式、文本心理学、视觉节奏模板和脱敏后的 standard_remake_template：",
+            "下面是已由音频转写、评论数据和分段多模态分析得到的证据包。请基于证据汇总全局爆款公式，不要编造证据中不存在的事实。请重点输出爆款公式、文本心理学、心理暗示原理、视觉节奏模板和脱敏后的 standard_remake_template：",
             json.dumps(payload, ensure_ascii=False),
             JSON_RESPONSE_CONTRACT,
         ]

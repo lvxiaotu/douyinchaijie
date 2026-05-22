@@ -374,6 +374,7 @@ export function normalizeCommercialAnalysisResult(source) {
   const needContext = firstObject(raw, ["need_context", "需求与场景", "需求场景"]);
   const productPower = firstObject(raw, ["product_power", "产品表现", "产品力", "产品价值"]);
   const visualStructure = firstObject(raw, ["visual_structure", "视觉与结构", "视觉结构"]);
+  const psychologyBreakdown = firstObject(raw, ["psychology_breakdown", "心理拆解", "心理文案拆解"]);
   const copywritingFormula = firstObject(raw, ["copywriting_formula", "文案公式", "脚本公式"]);
   const marketPositioning = firstObject(raw, ["market_positioning", "商业定位", "市场定位"]);
   const replicationPlan = firstObject(raw, ["replication_plan", "复刻计划", "模仿计划"]);
@@ -455,6 +456,17 @@ export function normalizeCommercialAnalysisResult(source) {
       reusable_elements: firstText(visualStructure, ["reusable_elements", "可复用元素", "可服用元素"]),
       timeline_beats: firstText(visualStructure, ["timeline_beats", "时间线", "节奏点"]),
       audio_rhythm: firstText(visualStructure, ["audio_rhythm", "声音节奏", "音频节奏"]),
+    },
+    psychology_breakdown: {
+      copywriting_intent: firstText(psychologyBreakdown, ["copywriting_intent", "文案意图", "话术意图"]),
+      psychology_principle: firstText(psychologyBreakdown, ["psychology_principle", "心理原理", "心理学原理"]),
+      suggestion_mechanism: firstText(psychologyBreakdown, ["suggestion_mechanism", "暗示机制", "暗示"]),
+      emotion: firstText(psychologyBreakdown, ["emotion", "情绪"]),
+      copywriting_pattern: firstText(psychologyBreakdown, ["copywriting_pattern", "文案句式", "文案模式"]),
+      commerce_signal: firstText(psychologyBreakdown, ["commerce_signal", "转化信号", "商业信号"]),
+      comment_trigger: firstText(psychologyBreakdown, ["comment_trigger", "评论诱因", "互动诱因"]),
+      replicable_point: firstText(psychologyBreakdown, ["replicable_point", "可复刻点", "复刻动作"]),
+      replication_action: firstText(psychologyBreakdown, ["replication_action", "复刻动作", "动作建议"]),
     },
     copywriting_formula: {
       title_formula: firstText(copywritingFormula, ["title_formula", "标题公式"]),

@@ -411,6 +411,8 @@ class AiVideoP2Tests(unittest.TestCase):
         self.assertIn("audio_pacing", prompt)
         self.assertIn("narrative_technique", prompt)
         self.assertIn("retention_mechanism", prompt)
+        self.assertIn("psychology_principle", prompt)
+        self.assertIn("copywriting_intent", prompt)
 
     def test_prompt_builder_segment_prompt_is_independent(self):
         prompt = segment_breakdown_prompt(
@@ -444,6 +446,7 @@ class AiVideoP2Tests(unittest.TestCase):
         self.assertIn("cross_genre_variants", prompt)
         self.assertIn("standard_remake_template", prompt)
         self.assertIn("数据指标抓异常", prompt)
+        self.assertIn("心理暗示原理", prompt)
 
     def test_parse_model_json_preserves_generic_p2_fields(self):
         adapter = AiVideoAnalysisAdapter({"provider": "mock"})
@@ -495,6 +498,7 @@ class AiVideoP2Tests(unittest.TestCase):
         self.assertEqual(result["visual_style"], "近景切换")
         self.assertEqual(result["audio_pacing"], "快节奏")
         self.assertEqual(result["retention_mechanism"], "反常识")
+        self.assertEqual(result["copywriting_intent"], "反常识")
 
     def test_result_schema_clamps_scores_and_keeps_raw_json(self):
         result = validate_analysis_result(
@@ -512,6 +516,7 @@ class AiVideoP2Tests(unittest.TestCase):
         self.assertEqual(result["segment_breakdowns"][0]["visual_style"], "近景；字幕")
         self.assertTrue(result["unexpected"]["keep"])
         self.assertIn("raw_model_json", result)
+        self.assertIn("psychology_breakdown", result)
 
     def test_segment_schema_normalizes_text_fields(self):
         result = validate_segment_breakdown(
