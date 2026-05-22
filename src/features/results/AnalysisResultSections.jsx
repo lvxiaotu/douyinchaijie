@@ -124,8 +124,9 @@ export function ResultOverview({
               )}
               <div>
                 <strong>{author.nickname || task?.title || "未返回作者信息"}</strong>
-                <p>账号标识：{author.display_id || author.unique_id || author.uid || author.sec_uid || "未返回"}</p>
                 <span>简介：{author.signature || "暂无简介"}</span>
+                <span>属地：{author.ip_location || "未知"}</span>
+                <p>抖音号：{author.display_id || author.unique_id || "未返回"}</p>
               </div>
             </div>
             <div className="content-lab-profile-meta">
@@ -133,8 +134,10 @@ export function ResultOverview({
               <InfoPill label="发布时间" value={formatTimeLabel(videoInfo.create_time || taskVideo?.create_time)} />
               <InfoPill label="作品ID" value={videoInfo.aweme_id || taskVideo?.aweme_id || "未返回"} />
               <InfoPill label="作品时长" value={videoInfo.duration ? `${videoInfo.duration}s` : "未返回"} />
+              <InfoPill label="属地" value={author.ip_location || "未知"} />
               <InfoPill label="粉丝量" value={author.follower_count == null ? "未返回" : compactNumber(author.follower_count)} />
-              <InfoPill label="作者获赞" value={author.like_count == null ? "未返回" : compactNumber(author.like_count)} />
+              <InfoPill label="作者获赞" value={author.total_favorited == null ? "未返回" : compactNumber(author.total_favorited)} />
+              <InfoPill label="历史视频" value={author.aweme_count == null ? "未返回" : compactNumber(author.aweme_count)} />
             </div>
             <div className="content-lab-profile-tags">
               {topMetaTags.length ? topMetaTags.map((tag) => <Badge key={tag}>{tag}</Badge>) : <span className="field-hint">暂无标签数据</span>}
@@ -155,9 +158,9 @@ export function ResultOverview({
 export function CommentIntelligence({ snapshot, loading, error }) {
   const keywords = getCommentKeywords(snapshot);
   const motivations = getCommentMotivations(snapshot);
-  const pinned = Array.isArray(snapshot?.pinned_comments) ? snapshot.pinned_comments : [];
-  const topComments = Array.isArray(snapshot?.top_comments) ? snapshot.top_comments : [];
-  const authorReplies = Array.isArray(snapshot?.author_replies) ? snapshot.author_replies : [];
+  const pinned = dedupeComments(Array.isArray(snapshot?.pinned_comments) ? snapshot.pinned_comments : []);
+  const topComments = dedupeComments(Array.isArray(snapshot?.top_comments) ? snapshot.top_comments : []);
+  const authorReplies = dedupeComments(Array.isArray(snapshot?.author_replies) ? snapshot.author_replies : []);
   const savedTotal = Number(snapshot?.comment_saved_count || 0) + Number(snapshot?.reply_saved_count || 0);
   return (
     <div className="analysis-section content-lab-comments">
@@ -207,6 +210,28 @@ export function CommentIntelligence({ snapshot, loading, error }) {
       </div>
     </div>
   );
+}
+
+function dedupeComments(comments) {
+  const seen = new Set();
+  return comments.filter((comment) => {
+    const identity = commentIdentity(comment);
+    if (!identity || seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+function compactCommentText(value) {
+  return String(value || "").replace(/\s+/g, "").trim();
+}
+
+function commentIdentity(comment) {
+  const id = String(comment?.comment_id || comment?.cid || comment?.id || "").trim();
+  if (id) return `id:${id}`;
+  const text = compactCommentText(comment?.text || comment?.content || comment?.comment);
+  const author = compactCommentText(comment?.user_id || comment?.sec_uid || comment?.unique_id || comment?.nickname || comment?.user_name);
+  return author && text ? `author_text:${author}:${text.slice(0, 200)}` : `text:${text.slice(0, 200)}`;
 }
 
 export function VideoTranscriptSyncPanel({ videoRef, videoUrl, posterUrl, transcriptLines, activeTranscriptId, evidenceStatus, onSeek }) {

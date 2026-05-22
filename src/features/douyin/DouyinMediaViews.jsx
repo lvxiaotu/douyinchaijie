@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Badge } from "../../components/common/index";
 import { API_BASE } from "../../constants/appConfig";
 import { createAiVideoBreakdownJob, fetchDouyinFavoriteItems, fetchDouyinUserVideos } from "../../services/api";
-import { compactNumber, firstUrl, unwrapDouyinData } from "../../utils/appUtils";
+import { compactNumber, firstUrl, normalizeDouyinVideoItem, unwrapDouyinData } from "../../utils/appUtils";
 
 export function DouyinProfileView({ result }) {
   const data = unwrapDouyinData(result);
@@ -37,26 +37,12 @@ export function DouyinVideoView({ item, compact = false, onBreakdown, onPromptRe
   const [breakdownError, setBreakdownError] = useState("");
   const [reverseLoading, setReverseLoading] = useState(false);
   const [productionLoading, setProductionLoading] = useState(false);
-  const video = item?.video || item?.video_data || {};
-  const author = item?.author || {};
-  const cover =
-    firstUrl(video.cover) ||
-    firstUrl(video.origin_cover) ||
-    firstUrl(video.dynamic_cover) ||
-    firstUrl(item?.images?.[0]);
-  const videoUrl =
-    firstUrl(video.play_addr) ||
-    firstUrl(video.download_addr) ||
-    video.nwm_video_url_HQ ||
-    video.wm_video_url_HQ ||
-    item?.video_url;
+  const { stats, author, cover, videoUrl, images, desc, shareUrl } = normalizeDouyinVideoItem(item);
   const proxiedVideoUrl = videoUrl
-    ? `${API_BASE}/api/integrations/douyin/media-proxy?url=${encodeURIComponent(videoUrl)}&referer=${encodeURIComponent(
-        item?.share_info?.share_url || "https://www.douyin.com/",
+    ? `${API_BASE}/api/media/proxy?url=${encodeURIComponent(videoUrl)}&referer=${encodeURIComponent(
+        shareUrl || "https://www.douyin.com/",
       )}`
     : "";
-  const images = Array.isArray(item?.images) ? item.images : [];
-  const stats = item?.statistics || {};
 
   async function handleBreakdown() {
     setBreakdownLoading(true);
@@ -122,16 +108,16 @@ export function DouyinVideoView({ item, compact = false, onBreakdown, onPromptRe
         )}
       </div>
       <div className="video-info">
-        <h3>{item?.desc || item?.title || "未命名作品"}</h3>
+        <h3>{desc || "未命名作品"}</h3>
         <p>{author.nickname ? `作者：${author.nickname}` : "作者信息未返回"}</p>
         <div className="stat-grid">
-          <span>点赞 {compactNumber(stats.digg_count)}</span>
-          <span>评论 {compactNumber(stats.comment_count)}</span>
-          <span>收藏 {compactNumber(stats.collect_count)}</span>
-          <span>分享 {compactNumber(stats.share_count)}</span>
+          <span>点赞 {compactNumber(item?.digg_count ?? stats.digg_count)}</span>
+          <span>评论 {compactNumber(item?.comment_count ?? stats.comment_count)}</span>
+          <span>收藏 {compactNumber(item?.collect_count ?? stats.collect_count)}</span>
+          <span>分享 {compactNumber(item?.share_count ?? stats.share_count)}</span>
         </div>
-        {item?.share_info?.share_url && (
-          <a className="result-link" href={item.share_info.share_url} target="_blank" rel="noreferrer">
+        {shareUrl && (
+          <a className="result-link" href={shareUrl} target="_blank" rel="noreferrer">
             打开原始链接
           </a>
         )}

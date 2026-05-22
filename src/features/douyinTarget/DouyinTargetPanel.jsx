@@ -333,17 +333,20 @@ function buildSearchPayload(filters) {
 }
 
 function normalizeUserForSave(user, keyword) {
+  const secUserId = user.sec_uid || user.sec_user_id || (String(user.uid || "").startsWith("MS4") ? user.uid : "");
   return {
     keyword,
-    sec_user_id: user.sec_uid || user.sec_user_id || "",
-    sec_uid: user.sec_uid || user.sec_user_id || "",
+    sec_user_id: secUserId,
+    sec_uid: secUserId,
     uid: user.uid || "",
     unique_id: user.unique_id || "",
     nickname: user.nickname || "",
     avatar_url: user.avatar || user.avatar_url || "",
     signature: user.signature || "",
+    ip_location: user.ip_location || "",
     follower_count: user.follower_count ?? null,
-    like_count: user.like_count ?? null,
+    like_count: user.like_count ?? user.total_favorited ?? null,
+    total_favorited: user.total_favorited ?? user.like_count ?? null,
     aweme_count: user.aweme_count ?? null,
     following_count: user.following_count ?? null,
     recent_update_at: user.recent_update_at || user.last_post_at || null,
@@ -542,7 +545,8 @@ export function DouyinTargetPanel() {
 
       while (mergedItems.length < targetCount && hasMore && page <= MaxContinuousSearchPages) {
         const currentCursor = cursor;
-        const pageResult = await searchDouyinTargets({ ...request, page, cursor: currentCursor, count: SearchPageSize });
+        const remainingCount = Math.max(1, Math.min(SearchPageSize, targetCount - mergedItems.length));
+        const pageResult = await searchDouyinTargets({ ...request, page, cursor: currentCursor, count: remainingCount });
         const pageItems = pageResult.items || [];
         mergedItems = mergeUniqueUsers(mergedItems, pageItems).slice(0, targetCount);
         lastResult = pageResult;
@@ -1167,13 +1171,16 @@ export function DouyinTargetPanel() {
                 <img src={item.avatar} alt="" />
                 <div className="target-user-main">
                   <strong>{item.nickname || "未命名账号"}</strong>
-                  <p>{item.unique_id || item.uid || item.sec_uid}</p>
-                  <span>{item.signature || "暂无简介"}</span>
+                  <p className="target-user-signature">简介：{item.signature || "暂无简介"}</p>
+                  <span className="target-user-identity">
+                    抖音号：{item.unique_id || "未返回"} · 属地：{item.ip_location || "未知"}
+                  </span>
                 </div>
                 <div className="target-user-stats">
                   <span>粉丝 {compactNumber(item.follower_count)}</span>
-                  <span>点赞 {compactNumber(item.like_count)}</span>
+                  <span>获赞 {compactNumber(item.total_favorited ?? item.like_count)}</span>
                   <span>视频 {compactNumber(item.aweme_count)}</span>
+                  <span>关注 {compactNumber(item.following_count)}</span>
                 </div>
                 <div className="target-user-flags">
                   <Badge status={item.verified ? "ready" : "draft"}>{item.verified ? "认证" : "普通"}</Badge>

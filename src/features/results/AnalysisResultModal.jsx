@@ -93,7 +93,9 @@ export function AnalysisResultModal({ task, onClose, pageMode = false }) {
       { label: "收藏", value: compactNumber(task?.video?.statistics?.collect_count || result?.douyin_target?.metrics?.collect_count || videoInfo.collect_count) },
       { label: "分享", value: compactNumber(task?.video?.statistics?.share_count || result?.douyin_target?.metrics?.share_count || videoInfo.share_count) },
       { label: "粉丝量", value: author.follower_count == null ? "未返回" : compactNumber(author.follower_count) },
-      { label: "获赞", value: compactNumber(author.like_count) },
+      { label: "获赞", value: author.total_favorited == null ? "未返回" : compactNumber(author.total_favorited) },
+      { label: "视频", value: author.aweme_count == null ? "未返回" : compactNumber(author.aweme_count) },
+      { label: "属地", value: author.ip_location || "未知" },
     ],
     [task, result, videoInfo, author],
   );

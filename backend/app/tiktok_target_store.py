@@ -8,7 +8,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from backend.app.postgres_store import ensure_columns, pg_connection, placeholders, run_once
+from backend.app.postgres_store import ensure_columns, pg_connection, placeholders, quote_identifier, run_once
 
 CHINA_TZ = timezone(timedelta(hours=8))
 
@@ -261,6 +261,8 @@ LEGACY_MYSTICISM_INTERACTION_KEYWORDS = (
 TARGET_USER_COLUMNS = {
     "avatar_url": "avatar_url TEXT NOT NULL DEFAULT ''",
     "signature": "signature TEXT NOT NULL DEFAULT ''",
+    "ip_location": "ip_location TEXT NOT NULL DEFAULT ''",
+    "total_favorited": "total_favorited INTEGER",
     "aweme_count": "aweme_count INTEGER",
     "following_count": "following_count INTEGER",
     "is_private": "is_private INTEGER NOT NULL DEFAULT 0",
@@ -625,6 +627,7 @@ def _init_db() -> None:
                OR last_post_at = 0
             """
         )
+        _backfill_target_user_profile_fields(connection)
     with cache_connection() as connection:
         connection.execute(
             """
@@ -736,6 +739,121 @@ def to_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _target_user_source_candidates(source: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def add(value: Any, depth: int = 0) -> None:
+        if not isinstance(value, dict) or depth > 4:
+            return
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidates.append(value)
+        for key in (
+            "user",
+            "user_info",
+            "profile",
+            "author",
+            "owner",
+            "account",
+            "data",
+            "raw",
+            "payload",
+            "result",
+        ):
+            add(value.get(key), depth + 1)
+
+    add(source)
+    return candidates
+
+
+def _first_text_from_user_source(source: Any, keys: tuple[str, ...]) -> str:
+    for candidate in _target_user_source_candidates(source):
+        for key in keys:
+            value = candidate.get(key)
+            if value is None or value == "" or isinstance(value, (dict, list)):
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+    return ""
+
+
+def _first_int_from_user_source(source: Any, keys: tuple[str, ...]) -> int | None:
+    fallback: int | None = None
+    for candidate in _target_user_source_candidates(source):
+        for key in keys:
+            number = to_int(candidate.get(key))
+            if number is None:
+                continue
+            if number > 0:
+                return number
+            if fallback is None:
+                fallback = number
+    return fallback
+
+
+def _backfill_target_user_profile_fields(connection: Any) -> None:
+    rows = connection.execute(
+        """
+        SELECT id, source_json, signature, ip_location, follower_count, like_count,
+               total_favorited, aweme_count, following_count
+        FROM tiktok_target_users
+        WHERE signature = ''
+           OR ip_location = ''
+           OR follower_count IS NULL
+           OR like_count IS NULL
+           OR total_favorited IS NULL
+           OR aweme_count IS NULL
+           OR following_count IS NULL
+        """
+    ).fetchall()
+    for row in rows:
+        source = load_json(row.get("source_json"), {})
+        if not isinstance(source, dict):
+            continue
+        updates: dict[str, Any] = {}
+        signature = _first_text_from_user_source(source, ("signature", "desc", "intro", "bio"))
+        if not row.get("signature") and signature:
+            updates["signature"] = signature
+        ip_location = _first_text_from_user_source(source, ("ip_location", "ipLocation", "location"))
+        if not row.get("ip_location") and ip_location:
+            updates["ip_location"] = ip_location
+
+        follower_count = _first_int_from_user_source(source, ("follower_count", "followers", "followerCount", "fans_cnt", "fans_count"))
+        if row.get("follower_count") in [None, ""] and follower_count is not None:
+            updates["follower_count"] = follower_count
+
+        like_count = _first_int_from_user_source(source, ("like_count", "total_favorited", "total_favorited_count", "like_cnt"))
+        if row.get("like_count") in [None, ""] and like_count is not None:
+            updates["like_count"] = like_count
+
+        total_favorited = _first_int_from_user_source(source, ("total_favorited", "total_favorited_count", "like_count", "like_cnt"))
+        if total_favorited is None and row.get("like_count") not in [None, ""]:
+            total_favorited = to_int(row.get("like_count"))
+        if row.get("total_favorited") in [None, ""] and total_favorited is not None:
+            updates["total_favorited"] = total_favorited
+
+        aweme_count = _first_int_from_user_source(source, ("aweme_count", "video_count", "awemeCount", "publish_cnt", "publish_count"))
+        if row.get("aweme_count") in [None, ""] and aweme_count is not None:
+            updates["aweme_count"] = aweme_count
+
+        following_count = _first_int_from_user_source(source, ("following_count", "follow_count", "following", "followingCount"))
+        if row.get("following_count") in [None, ""] and following_count is not None:
+            updates["following_count"] = following_count
+
+        if not updates:
+            continue
+        updates["updated_at"] = now()
+        set_clause = ", ".join(f"{quote_identifier(column)} = %s" for column in updates)
+        connection.execute(
+            f"UPDATE tiktok_target_users SET {set_clause} WHERE id = %s",
+            (*updates.values(), row["id"]),
+        )
 
 
 def first_positive_int(*values: Any, default: int = 1) -> int:
@@ -909,6 +1027,36 @@ def row_to_target_user(row: Any) -> dict[str, Any]:
     user["verified"] = bool(user.get("verified"))
     user["is_private"] = bool(user.get("is_private"))
     user["source_json"] = load_json(user.get("source_json"), {})
+    source = user["source_json"] if isinstance(user["source_json"], dict) else {}
+    if not user.get("signature"):
+        user["signature"] = _first_text_from_user_source(source, ("signature", "desc", "intro", "bio"))
+    if not user.get("ip_location"):
+        user["ip_location"] = _first_text_from_user_source(source, ("ip_location", "ipLocation", "location"))
+    if user.get("total_favorited") in [None, ""] and user.get("like_count") not in [None, ""]:
+        user["total_favorited"] = user.get("like_count")
+    if user.get("follower_count") in [None, ""]:
+        maybe = _first_int_from_user_source(source, ("follower_count", "followers", "followerCount", "fans_cnt", "fans_count"))
+        if maybe is not None:
+            user["follower_count"] = maybe
+    if user.get("like_count") in [None, ""]:
+        maybe = _first_int_from_user_source(source, ("like_count", "total_favorited", "total_favorited_count", "like_cnt"))
+        if maybe is not None:
+            user["like_count"] = maybe
+            user["total_favorited"] = maybe
+    if user.get("total_favorited") in [None, ""]:
+        maybe = _first_int_from_user_source(source, ("total_favorited", "total_favorited_count", "like_count", "like_cnt"))
+        if maybe is not None:
+            user["total_favorited"] = maybe
+            if user.get("like_count") in [None, ""]:
+                user["like_count"] = maybe
+    if user.get("aweme_count") in [None, ""]:
+        maybe = _first_int_from_user_source(source, ("aweme_count", "video_count", "awemeCount", "publish_cnt", "publish_count"))
+        if maybe is not None:
+            user["aweme_count"] = maybe
+    if user.get("following_count") in [None, ""]:
+        maybe = _first_int_from_user_source(source, ("following_count", "follow_count", "following", "followingCount"))
+        if maybe is not None:
+            user["following_count"] = maybe
     return user
 
 
@@ -1087,14 +1235,29 @@ def _dedupe_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
     for comment in comments:
-        identity = str(comment.get("comment_id") or comment.get("id") or "").strip()
-        if not identity:
-            text = re.sub(r"\s+", "", str(comment.get("text") or ""))
-            nickname = re.sub(r"\s+", "", str(comment.get("nickname") or comment.get("unique_id") or ""))
-            identity = f"{nickname}:{text[:120]}"
-        if identity in seen:
+        identities = []
+        raw_identity = str(comment.get("comment_id") or comment.get("cid") or comment.get("id") or "").strip()
+        if raw_identity:
+            identities.append(f"id:{raw_identity}")
+        text = re.sub(r"\s+", "", str(comment.get("text") or ""))
+        author = re.sub(
+            r"\s+",
+            "",
+            str(
+                comment.get("user_id")
+                or comment.get("sec_uid")
+                or comment.get("unique_id")
+                or comment.get("nickname")
+                or ""
+            ),
+        )
+        if text and author:
+            identities.append(f"author_text:{author}:{text[:200]}")
+        if not identities and text:
+            identities.append(f"text:{text[:200]}")
+        if any(identity in seen for identity in identities):
             continue
-        seen.add(identity)
+        seen.update(identities)
         unique.append(comment)
     return unique
 
@@ -1230,23 +1393,47 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     incoming_source = payload.get("source_json") if isinstance(payload.get("source_json"), dict) else {}
     merged_source = {**existing_source, **incoming_source} if existing_source or incoming_source else payload.get("source_json") or {}
 
-    def pick_text(key: str, *, default: str = "") -> str:
-        value = payload.get(key)
-        if value not in [None, ""]:
-            return str(value)
-        value = existing.get(key)
-        if value not in [None, ""]:
-            return str(value)
+    def pick_text(key: str, *aliases: str, source_keys: tuple[str, ...] = (), default: str = "") -> str:
+        for candidate in (key, *aliases):
+            value = payload.get(candidate)
+            if value not in [None, ""]:
+                return str(value)
+        for candidate in (key, *aliases):
+            value = existing.get(candidate)
+            if value not in [None, ""]:
+                return str(value)
+        if source_keys:
+            value = _first_text_from_user_source(merged_source, source_keys)
+            if value:
+                return value
         return default
 
-    def pick_int(key: str) -> int | None:
-        incoming = to_int(payload.get(key)) if payload.get(key) not in [None, ""] else None
-        current_value = to_int(existing.get(key)) if existing.get(key) not in [None, ""] else None
+    def pick_int(key: str, *aliases: str, source_keys: tuple[str, ...] = ()) -> int | None:
+        candidates = (key, *aliases)
+        incoming = None
+        for candidate in candidates:
+            value = payload.get(candidate)
+            if value not in [None, ""]:
+                incoming = to_int(value)
+                if incoming is not None:
+                    break
+        current_value = None
+        for candidate in candidates:
+            if existing.get(candidate) not in [None, ""]:
+                current_value = to_int(existing.get(candidate))
+                if current_value is not None:
+                    break
+        source_value = _first_int_from_user_source(merged_source, source_keys) if source_keys else None
         if incoming and incoming > 0:
             return incoming
         if current_value and current_value > 0:
             return current_value
-        return incoming if incoming is not None else current_value
+        if source_value and source_value > 0:
+            return source_value
+        for value in (incoming, current_value, source_value):
+            if value is not None:
+                return value
+        return None
 
     def pick_bool(key: str, *, default: bool = False) -> bool:
         if key in payload:
@@ -1275,8 +1462,8 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO tiktok_target_users (
                 id, keyword, sec_user_id, unique_id, nickname, follower_count, like_count,
                 recent_update_at, verified, status, source_json, created_at, updated_at,
-                avatar_url, signature, aweme_count, following_count, is_private, last_post_at, searched_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                avatar_url, signature, ip_location, total_favorited, aweme_count, following_count, is_private, last_post_at, searched_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 keyword = excluded.keyword,
                 sec_user_id = excluded.sec_user_id,
@@ -1290,6 +1477,8 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                 source_json = excluded.source_json,
                 avatar_url = excluded.avatar_url,
                 signature = excluded.signature,
+                ip_location = excluded.ip_location,
+                total_favorited = excluded.total_favorited,
                 aweme_count = excluded.aweme_count,
                 following_count = excluded.following_count,
                 is_private = excluded.is_private,
@@ -1303,8 +1492,8 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                 pick_text('sec_user_id'),
                 pick_text('unique_id'),
                 pick_text('nickname'),
-                pick_int('follower_count'),
-                pick_int('like_count'),
+                pick_int('follower_count', source_keys=("follower_count", "followers", "followerCount", "fans_cnt", "fans_count")),
+                pick_int('like_count', 'total_favorited', source_keys=("like_count", "total_favorited", "total_favorited_count", "like_cnt")),
                 resolved_recent_update_at,
                 1 if pick_bool('verified') else 0,
                 resolved_status,
@@ -1312,9 +1501,11 @@ def upsert_target_user(user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                 current,
                 current,
                 pick_text('avatar_url') or pick_text('avatar'),
-                pick_text('signature'),
-                pick_int('aweme_count'),
-                pick_int('following_count'),
+                pick_text('signature', source_keys=("signature", "desc", "intro", "bio")),
+                pick_text('ip_location', 'ipLocation', 'location', source_keys=("ip_location", "ipLocation", "location")),
+                pick_int('total_favorited', 'like_count', source_keys=("total_favorited", "total_favorited_count", "like_count", "like_cnt")),
+                pick_int('aweme_count', source_keys=("aweme_count", "video_count", "awemeCount", "publish_cnt", "publish_count")),
+                pick_int('following_count', 'follow_count', source_keys=("following_count", "follow_count", "following", "followingCount")),
                 1 if pick_bool('is_private') else 0,
                 resolved_last_post_at,
                 to_int(payload.get('searched_at')) or to_int(existing.get('searched_at')) or current,

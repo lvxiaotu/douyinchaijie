@@ -209,6 +209,37 @@ class TiktokTargetInteractionTests(unittest.TestCase):
         self.assertEqual(len(dataset["insights"]["top_comments"]), 1)
         self.assertEqual(dataset["insights"]["top_comments"][0]["comment_id"], "same-comment")
 
+    def test_same_author_same_text_comments_are_deduped_even_with_different_ids(self):
+        store.create_target_video(
+            "aweme-dedupe-text",
+            "user-1",
+            {
+                "aweme_id": "aweme-dedupe-text",
+                "desc": "duplicate comments by text",
+                "digg_count": 100,
+                "comment_count": 2,
+            },
+        )
+        comments = [
+            {
+                "cid": "comment-a",
+                "text": "我还以为逆位是痛苦减轻了呢[流泪]",
+                "digg_count": 1681,
+                "user": {"uid": "fan-1", "nickname": "~啊biu~"},
+            },
+            {
+                "cid": "comment-b",
+                "text": "我还以为逆位是痛苦减轻了呢[流泪]",
+                "digg_count": 1681,
+                "user": {"uid": "fan-1", "nickname": "~啊biu~"},
+            },
+        ]
+
+        dataset = store.replace_target_video_comments("aweme-dedupe-text", comments)
+
+        self.assertEqual(len(dataset["insights"]["top_comments"]), 1)
+        self.assertEqual(dataset["insights"]["top_comments"][0]["comment_id"], "comment-a")
+
     def test_clear_analysis_preserves_comments_and_interaction_insights(self):
         store.create_target_video(
             "aweme-6",

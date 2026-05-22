@@ -14,6 +14,7 @@ from .routes.ai_prompt_reverse import router as ai_prompt_reverse_router
 from .routes.douyin import router as douyin_router
 from .routes.jianying import router as jianying_router
 from .routes.jianying_editor_sdk import router as jianying_editor_sdk_router
+from .routes.media_proxy import router as media_proxy_router
 from .routes.runninghub_tts import router as runninghub_tts_router
 from .routes.studio import router as studio_router
 from .routes.douyin_target import router as douyin_target_router
@@ -62,6 +63,7 @@ def stop_workers() -> None:
 
 
 app.include_router(douyin_router)
+app.include_router(media_proxy_router)
 app.include_router(ai_provider_router)
 app.include_router(ai_video_analysis_router)
 app.include_router(ai_prompt_reverse_router)

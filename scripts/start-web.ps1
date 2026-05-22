@@ -2,7 +2,6 @@ param(
   [int]$Port = 8010,
   [string]$HostAddress = "127.0.0.1",
   [switch]$InstallDeps,
-  [switch]$StartDouyin,
   [switch]$NoBuild,
   [switch]$NoOpen
 )
@@ -43,35 +42,9 @@ if (-not $NoOpen) {
   Start-Process $Url
 }
 
-$DouyinJob = $null
-if ($StartDouyin) {
-  $DouyinRoot = Join-Path $Root "integrations\douyin_download_api\vendor\Douyin_TikTok_Download_API"
-  $DouyinPython = Join-Path $DouyinRoot ".venv312\Scripts\python.exe"
-  $DouyinStart = Join-Path $DouyinRoot "start.py"
-
-  if ((Test-Path $DouyinPython) -and (Test-Path $DouyinStart)) {
-    Write-Host "Starting Douyin download API in the background..."
-    $DouyinJob = Start-Job -ScriptBlock {
-      param($ServiceRoot, $PythonPath)
-      Set-Location $ServiceRoot
-      & $PythonPath start.py
-    } -ArgumentList $DouyinRoot, $DouyinPython
-  } else {
-    Write-Warning "Douyin download API vendor environment was not found. Skipping upstream service."
-  }
-}
-
 Write-Host ""
 Write-Host "Web tool is starting at $Url"
 Write-Host "Press Ctrl+C in this window to stop it."
 Write-Host ""
 
-try {
-  & $VenvPython -m uvicorn backend.app.main:app --host $HostAddress --port $Port
-} finally {
-  if ($DouyinJob) {
-    Write-Host "Stopping Douyin download API background job..."
-    Stop-Job $DouyinJob -ErrorAction SilentlyContinue
-    Remove-Job $DouyinJob -Force -ErrorAction SilentlyContinue
-  }
-}
+& $VenvPython -m uvicorn backend.app.main:app --host $HostAddress --port $Port

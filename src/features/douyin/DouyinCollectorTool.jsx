@@ -31,9 +31,9 @@ export function DouyinCollectorPanel({ onBreakdown, onPromptReverse, onProductio
       <div className="panel-header">
         <div>
           <h2>抖音采集</h2>
-          <p>填写参数后直接调用后端接口，Cookie 和服务地址从本地配置读取。</p>
+          <p>填写参数后调用 TikHub 抖音接口；Cookie 仅用于需要登录态的收藏数据。</p>
         </div>
-        <Badge status="ready">已接入</Badge>
+        <Badge status="ready">TikHub</Badge>
       </div>
 
       <div className="collector-grid">

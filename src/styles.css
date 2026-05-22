@@ -7785,9 +7785,20 @@ html[data-ui-mode="dark"] textarea {
   margin: 2px 0;
 }
 
+.target-user-signature {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-user-identity {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
 .target-user-stats {
   display: grid;
-  grid-template-columns: repeat(3, auto);
+  grid-template-columns: repeat(4, auto);
   gap: 10px;
 }
 

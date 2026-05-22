@@ -12,11 +12,11 @@ def get_workbench() -> WorkbenchSnapshot:
             id="douyin-favorites",
             icon="抖",
             name="抖音收藏分析器",
-            desc="接入 Douyin_TikTok_Download_API：用户主页、作品详情、收藏视频下载。",
+            desc="业务采集走 TikHub：用户主页、作品详情、作品列表、评论、回复和收藏下载；本地提供媒体代理。",
             status="ready",
             updated="已预留 API",
             tags=["视频", "采集", "分析"],
-            integration_id="douyin-download-api",
+            integration_id="tikhub-douyin-api",
         ),
         ToolDefinition(
             id="video-analyzer",
@@ -112,12 +112,12 @@ def get_workbench() -> WorkbenchSnapshot:
         ],
         integrations=[
             IntegrationDefinition(
-                id="douyin-download-api",
-                name="Douyin_TikTok_Download_API 适配器",
-                desc="仅接入用户主页信息、作品详情、收藏列表视频下载。",
+                id="tikhub-douyin-api",
+                name="TikHub Douyin API 适配器",
+                desc="用户主页、作品列表、作品详情、评论、回复、收藏列表、收藏下载和 URL ID 提取已切到 TikHub；本地提供媒体代理。",
                 kind="python",
                 status="ready",
-                repo_url="https://github.com/Evil0ctal/Douyin_TikTok_Download_API",
+                repo_url="https://docs.tikhub.io/186826151e0",
             ),
             IntegrationDefinition(
                 id="ai-video-analysis",

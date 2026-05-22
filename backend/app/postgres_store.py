@@ -52,6 +52,7 @@ def pg_connection(name: str) -> Iterator[Connection[Any]]:
                 kwargs={"row_factory": dict_row},
                 min_size=int(os.getenv("POSTGRES_POOL_MIN_SIZE", "1") or 1),
                 max_size=int(os.getenv("POSTGRES_POOL_MAX_SIZE", "10") or 10),
+                open=True,
             )
             _POOLS[name] = pool
     with pool.connection() as connection:

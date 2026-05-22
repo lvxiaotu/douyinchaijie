@@ -10,7 +10,7 @@ export const fallbackWorkbench = {
       id: "douyin-favorites",
       icon: "抖",
       name: "抖音采集",
-      desc: "接入 Douyin_TikTok_Download_API，支持主页、作品详情和收藏下载。",
+      desc: "业务采集已切到 TikHub：用户主页、作品详情、作品列表、评论、回复和收藏下载。",
       status: "ready",
       updated: "已预置 API",
       tags: ["视频", "采集", "分析"],
@@ -96,9 +96,9 @@ export const fallbackWorkbench = {
   ],
   integrations: [
     {
-      id: "douyin-download-api",
-      name: "Douyin_TikTok_Download_API 适配器",
-      desc: "接入用户主页信息、作品详情和收藏列表下载。",
+      id: "tikhub-douyin-api",
+      name: "TikHub Douyin API 适配器",
+      desc: "接入 TikHub 抖音接口：用户主页、作品详情、作品列表、评论、回复、收藏列表、收藏下载和 URL ID 提取。",
       kind: "python",
       status: "ready",
     },

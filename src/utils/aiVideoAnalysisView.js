@@ -58,10 +58,22 @@ export function firstUrlValue(...values) {
   return "";
 }
 
+export function firstNumberValue(...values) {
+  let fallback = null;
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (!Number.isFinite(number)) continue;
+    if (number > 0) return number;
+    if (fallback === null) fallback = number;
+  }
+  return fallback;
+}
+
 export function proxiedDouyinMediaUrl(url) {
   if (!url) return "";
   if (/^\/api\//.test(url) || url.startsWith("blob:") || url.startsWith("data:")) return url;
-  return `/api/integrations/douyin/media-proxy?url=${encodeURIComponent(url)}&referer=${encodeURIComponent("https://www.douyin.com/")}`;
+  return `/api/media/proxy?url=${encodeURIComponent(url)}&referer=${encodeURIComponent("https://www.douyin.com/")}`;
 }
 
 export function resolveSourceVideoUrl(task, evidenceDataset) {
@@ -141,6 +153,8 @@ export function mergeFilledObject(...sources) {
       }
       if (current === undefined || current === null || current === "") {
         result[key] = value;
+      } else if (Number(current) <= 0 && Number(value) > 0) {
+        result[key] = value;
       }
     }
   }
@@ -167,12 +181,28 @@ function sortTopComments(comments, limit = 8) {
       reply_count: Number(comment?.reply_count || comment?.replies_count || 0),
     }))
     .filter((comment) => comment.text)
+    .filter((comment, index, normalized) => {
+      const identity = commentIdentity(comment);
+      return normalized.findIndex((item) => commentIdentity(item) === identity) === index;
+    })
     .sort((left, right) => right.digg_count - left.digg_count || right.reply_count - left.reply_count)
     .slice(0, limit);
 }
 
 function mergeLikeCountComments(comments, limit = 8) {
   return sortTopComments(comments, limit);
+}
+
+function compactCommentText(value) {
+  return String(value || "").replace(/\s+/g, "").trim();
+}
+
+function commentIdentity(comment) {
+  const id = firstTextValue(comment?.comment_id, comment?.cid, comment?.id);
+  if (id) return `id:${id}`;
+  const text = compactCommentText(comment?.text || comment?.content || comment?.comment);
+  const author = compactCommentText(comment?.user_id || comment?.sec_uid || comment?.unique_id || comment?.nickname || comment?.user_name);
+  return author && text ? `author_text:${author}:${text.slice(0, 200)}` : `text:${text.slice(0, 200)}`;
 }
 
 export function buildRemakeItems(result) {
@@ -345,22 +375,38 @@ export function buildInteractionSnapshot(snapshot, liveDataset) {
 export function resolveAuthorProfile(task, taskVideo, result) {
   const rawAuthor = mergeFilledObject(
     task?.author,
+    task?.payload?.author,
+    task?.payload?.douyin_target?.author,
+    task?.payload?.douyin_target?.user,
     taskVideo?.author,
     result?.author,
+    result?.douyin_target?.author,
+    result?.douyin_target?.user,
     result?.video?.author,
     result?.raw_model_json?.author,
+    result?.raw_model_json?.douyin_target?.author,
   );
   const author = mergeFilledObject(
     rawAuthor,
+    task?.payload?.author,
+    task?.payload?.douyin_target?.author,
+    task?.payload?.douyin_target?.user,
     taskVideo?.author,
     taskVideo?.raw?.author,
     result?.author,
+    result?.douyin_target?.author,
+    result?.douyin_target?.user,
     result?.video?.author,
     result?.raw_model_json?.author,
+    result?.raw_model_json?.douyin_target?.author,
   );
   const uid = firstTextValue(author.uid, author.user_id, author.id, taskVideo?.author_user_id, taskVideo?.raw?.author_user_id);
   const uniqueId = firstTextValue(author.unique_id, author.uniqueId, author.short_id, author.display_id, author.search_user_name);
   const secUid = firstTextValue(author.sec_uid, author.sec_user_id);
+  const followerCount = firstNumberValue(author.follower_count, author.fans_count, author.followers_count);
+  const followingCount = firstNumberValue(author.following_count, author.follow_count);
+  const likeCount = firstNumberValue(author.like_count, author.total_favorited, author.total_favorite, author.digg_count);
+  const awemeCount = firstNumberValue(author.aweme_count, author.video_count, author.item_count);
   return {
     uid,
     sec_uid: secUid,
@@ -368,11 +414,13 @@ export function resolveAuthorProfile(task, taskVideo, result) {
     display_id: firstTextValue(author.display_id, uniqueId, uid),
     nickname: firstTextValue(author.nickname, author.name, author.author_name, author.user_name, uniqueId, uid),
     signature: firstTextValue(author.signature, author.desc, author.intro, author.bio),
+    ip_location: firstTextValue(author.ip_location, author.ipLocation, author.location),
     avatar: firstTextValue(author.avatar, author.avatar_url, author.avatar_thumb, author.avatar_larger),
-    follower_count: Number(author.follower_count || author.fans_count || author.followers_count || 0),
-    following_count: Number(author.following_count || author.follow_count || 0),
-    like_count: Number(author.like_count || author.total_favorited || 0),
-    aweme_count: Number(author.aweme_count || author.video_count || 0),
+    follower_count: followerCount,
+    following_count: followingCount,
+    like_count: likeCount,
+    total_favorited: likeCount,
+    aweme_count: awemeCount,
     verified: Boolean(author.verified || author.is_verified),
     tags: author.tags || author.keywords || [],
   };

@@ -3,16 +3,15 @@ import os
 import json
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 import requests
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from dotenv import dotenv_values
 
-from backend.app.error_log_store import write_error_log
-from integrations.douyin_download_api.adapter import DouyinDownloadApiAdapter
+from backend.app.routes.media_proxy import proxy_remote_media
+from integrations.tikhub_douyin_api import TikhubDouyinApiAdapter
+from integrations.tikhub_douyin_api.adapter import TikhubApiError
 
 router = APIRouter(prefix="/api/integrations/douyin", tags=["douyin"])
 logger = logging.getLogger(__name__)
@@ -22,6 +21,7 @@ ENV_PATH = ROOT / ".env"
 
 class UserProfileRequest(BaseModel):
     user_url: str = Field(..., description="Douyin user page URL")
+    sec_user_id: str | None = Field(default=None, description="Douyin sec_user_id")
 
 
 class UserVideosRequest(BaseModel):
@@ -34,6 +34,7 @@ class UserVideosRequest(BaseModel):
 
 class WorkDetailRequest(BaseModel):
     work_url: str = Field(..., description="Douyin video/work URL")
+    region: str = Field(default="US", description="TikHub region for app/v3 video endpoint")
 
 
 class VideoCommentsRequest(BaseModel):
@@ -64,13 +65,13 @@ class FavoriteItemsRequest(BaseModel):
 
 
 class DouyinConfigPayload(BaseModel):
-    api_base: str = Field(default="http://127.0.0.1:8123")
+    api_base: str = Field(default="https://api.tikhub.io")
     output_dir: str = Field(default="./data/runtime/douyin/downloads")
     cookie: str = Field(default="")
 
 
-def adapter() -> DouyinDownloadApiAdapter:
-    return DouyinDownloadApiAdapter()
+def tikhub_adapter() -> TikhubDouyinApiAdapter:
+    return TikhubDouyinApiAdapter()
 
 
 def _is_upstream_unavailable(exc: Exception) -> bool:
@@ -98,14 +99,25 @@ def _is_upstream_unavailable(exc: Exception) -> bool:
 
 
 def integration_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, TikhubApiError):
+        logger.warning("TikHub Douyin integration failed: %s", exc)
+        return HTTPException(
+            status_code=exc.status_code or 502,
+            detail={
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "hint": "检查 TIKHUB_API_KEY、TikHub 额度或接口参数。",
+                "upstream": exc.to_dict(),
+            },
+        )
     if _is_upstream_unavailable(exc):
         logger.warning("Douyin integration upstream unavailable: %s", exc)
         return HTTPException(
             status_code=503,
             detail={
                 "error_type": type(exc).__name__,
-                "message": "Douyin_TikTok_Download_API 未启动或无法连接到 127.0.0.1:8123",
-                "hint": "请先启动本地 Douyin_TikTok_Download_API 服务，再重试该接口。",
+                "message": "TikHub Douyin API 无法连接或请求超时",
+                "hint": "请检查 TIKHUB_API_BASE、网络和 TikHub 服务状态。",
             },
         )
     logger.exception("Douyin integration failed")
@@ -114,7 +126,7 @@ def integration_error(exc: Exception) -> HTTPException:
         detail={
             "error_type": type(exc).__name__,
             "message": str(exc),
-            "hint": "Check DY_COOKIES and whether Douyin_TikTok_Download_API is running.",
+            "hint": "检查 TIKHUB_API_KEY、TIKHUB_DOUYIN_WEB_COOKIE/DOUYIN_WEB_COOKIE 或接口参数。",
         },
     )
 
@@ -155,68 +167,9 @@ def encode_env_value(value: str) -> str:
     return value
 
 
-def _log_douyin_upstream_error(
-    *,
-    path: str,
-    method: str,
-    request: dict[str, Any],
-    exc: Exception,
-    api_base: str,
-    status_code: int | None = None,
-    response_text: str = "",
-    extra: dict[str, Any] | None = None,
-) -> None:
-    write_error_log(
-        namespace="douyin-download-api",
-        path=path,
-        method=method,
-        request=request,
-        exc=exc,
-        api_base=api_base,
-        status_code=status_code,
-        response_text=response_text,
-        extra=extra,
-    )
-
-
-def sync_upstream_cookie(api_base: str, cookie: str) -> dict[str, Any]:
-    if not cookie:
-        return {"synced": False, "reason": "empty cookie"}
-    request_payload = {"json_body": {"service": "douyin", "cookie": cookie}}
-    target_path = "/api/hybrid/update_cookie"
-    try:
-        response = requests.post(
-            f"{api_base.rstrip('/')}{target_path}",
-            json=request_payload["json_body"],
-            timeout=10,
-        )
-        if not response.ok:
-            _log_douyin_upstream_error(
-                path=target_path,
-                method="POST",
-                request=request_payload,
-                exc=RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}"),
-                api_base=api_base,
-                status_code=response.status_code,
-                response_text=response.text[:4000],
-                extra={"phase": "sync_upstream_cookie_http_error"},
-            )
-        return {"synced": response.ok, "status_code": response.status_code, "body": response.text[:500]}
-    except Exception as exc:
-        _log_douyin_upstream_error(
-            path=target_path,
-            method="POST",
-            request=request_payload,
-            exc=exc,
-            api_base=api_base,
-            extra={"phase": "sync_upstream_cookie_request_exception"},
-        )
-        return {"synced": False, "reason": str(exc)}
-
-
 @router.get("/status")
 def status() -> dict[str, Any]:
-    instance = adapter()
+    instance = tikhub_adapter()
     errors = instance.validate_config()
     return {
         "id": instance.manifest.id,
@@ -225,7 +178,9 @@ def status() -> dict[str, Any]:
         "ready": not errors,
         "errors": errors,
         "api_base": instance.api_base,
+        "provider": "tikhub",
         "output_dir": str(instance.output_dir),
+        "media_proxy": "local",
     }
 
 
@@ -233,10 +188,10 @@ def status() -> dict[str, Any]:
 def get_config() -> dict[str, Any]:
     env = read_env_map()
     return {
-        "api_base": env.get("DOUYIN_DOWNLOAD_API_BASE", "http://127.0.0.1:8123"),
+        "api_base": env.get("TIKHUB_API_BASE", "https://api.tikhub.io"),
         "output_dir": env.get("DOUYIN_OUTPUT_DIR", "./data/runtime/douyin/downloads"),
-        "cookie": env.get("DY_COOKIES", ""),
-        "has_cookie": bool(env.get("DY_COOKIES")),
+        "cookie": env.get("TIKHUB_DOUYIN_WEB_COOKIE") or env.get("DOUYIN_WEB_COOKIE") or "",
+        "has_cookie": bool(env.get("TIKHUB_DOUYIN_WEB_COOKIE") or env.get("DOUYIN_WEB_COOKIE")),
     }
 
 
@@ -245,13 +200,12 @@ def save_config(payload: DouyinConfigPayload) -> dict[str, Any]:
     try:
         write_env_values(
             {
-                "DOUYIN_DOWNLOAD_API_BASE": payload.api_base,
+                "TIKHUB_API_BASE": payload.api_base,
                 "DOUYIN_OUTPUT_DIR": payload.output_dir,
-                "DY_COOKIES": payload.cookie,
+                "TIKHUB_DOUYIN_WEB_COOKIE": payload.cookie,
             }
         )
-        sync_result = sync_upstream_cookie(payload.api_base, payload.cookie)
-        return {"status": "ok", "config": get_config(), "upstream_cookie_sync": sync_result}
+        return {"status": "ok", "config": get_config(), "upstream_cookie_sync": {"synced": False, "reason": "配置已保存；TikHub Cookie 会在收藏请求中随请求发送。"}}
     except Exception as exc:
         raise integration_error(exc) from exc
 
@@ -259,7 +213,9 @@ def save_config(payload: DouyinConfigPayload) -> dict[str, Any]:
 @router.post("/user-profile")
 def user_profile(payload: UserProfileRequest) -> dict[str, Any]:
     try:
-        return adapter().get_user_profile(payload.user_url)
+        instance = tikhub_adapter()
+        sec_user_id = payload.sec_user_id or instance.get_sec_user_id(payload.user_url)
+        return instance.get_user_profile(sec_user_id)
     except Exception as exc:
         raise integration_error(exc) from exc
 
@@ -267,11 +223,12 @@ def user_profile(payload: UserProfileRequest) -> dict[str, Any]:
 @router.post("/user-videos")
 def user_videos(payload: UserVideosRequest) -> dict[str, Any]:
     try:
-        return adapter().get_user_videos(
-            user_url=payload.user_url,
-            sec_user_id=payload.sec_user_id,
-            max_items=payload.max_items,
-            page_size=payload.page_size,
+        instance = tikhub_adapter()
+        sec_user_id = payload.sec_user_id or (instance.get_sec_user_id(payload.user_url) if payload.user_url else "")
+        count = payload.max_items or payload.page_size
+        return instance.get_user_videos(
+            sec_user_id=sec_user_id,
+            count=count,
             max_cursor=payload.max_cursor,
         )
     except Exception as exc:
@@ -281,7 +238,7 @@ def user_videos(payload: UserVideosRequest) -> dict[str, Any]:
 @router.post("/work-detail")
 def work_detail(payload: WorkDetailRequest) -> dict[str, Any]:
     try:
-        return adapter().get_work_detail(payload.work_url)
+        return tikhub_adapter().get_work_detail(payload.work_url, region=payload.region)
     except Exception as exc:
         raise integration_error(exc) from exc
 
@@ -289,7 +246,7 @@ def work_detail(payload: WorkDetailRequest) -> dict[str, Any]:
 @router.post("/video-comments")
 def video_comments(payload: VideoCommentsRequest) -> dict[str, Any]:
     try:
-        return adapter().get_video_comments(
+        return tikhub_adapter().get_video_comments(
             aweme_id=payload.aweme_id,
             max_items=payload.max_items,
             page_size=payload.page_size,
@@ -302,7 +259,7 @@ def video_comments(payload: VideoCommentsRequest) -> dict[str, Any]:
 @router.post("/video-comment-replies")
 def video_comment_replies(payload: VideoCommentRepliesRequest) -> dict[str, Any]:
     try:
-        return adapter().get_video_comment_replies(
+        return tikhub_adapter().get_video_comment_replies(
             item_id=payload.item_id,
             comment_id=payload.comment_id,
             max_items=payload.max_items,
@@ -316,10 +273,9 @@ def video_comment_replies(payload: VideoCommentRepliesRequest) -> dict[str, Any]
 @router.post("/favorites/download")
 def download_favorites(payload: FavoriteDownloadRequest) -> dict[str, Any]:
     try:
-        return adapter().download_favorite_videos(
+        return tikhub_adapter().download_favorite_videos(
             max_items=payload.max_items,
             page_size=payload.page_size,
-            max_cursor=payload.max_cursor,
         )
     except Exception as exc:
         raise integration_error(exc) from exc
@@ -328,63 +284,25 @@ def download_favorites(payload: FavoriteDownloadRequest) -> dict[str, Any]:
 @router.post("/favorites/items")
 def favorite_items(payload: FavoriteItemsRequest) -> dict[str, Any]:
     try:
-        return adapter().get_favorite_videos(
+        return tikhub_adapter().get_favorite_videos(
             max_items=payload.max_items,
             page_size=payload.page_size,
+            max_cursor=payload.max_cursor,
         )
     except Exception as exc:
         raise integration_error(exc) from exc
 
 
 @router.get("/media-proxy")
-def media_proxy(url: str = Query(...), referer: str | None = Query(default=None)):
-    try:
-        target_url = unquote(url)
-        parsed = urlparse(target_url)
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            "Referer": referer or "https://www.douyin.com/",
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Range": "bytes=0-",
-        }
-        response = requests.get(target_url, headers=headers, stream=True, timeout=30)
-        response.raise_for_status()
-        media_type = response.headers.get("content-type", "video/mp4")
-        proxy_headers = {
-            "Accept-Ranges": response.headers.get("accept-ranges", "bytes"),
-            "Cache-Control": "private, max-age=300",
-        }
-        if response.headers.get("content-length"):
-            proxy_headers["Content-Length"] = response.headers["content-length"]
-        return StreamingResponse(
-            response.iter_content(chunk_size=1024 * 512),
-            media_type=media_type,
-            headers=proxy_headers,
-        )
-    except Exception as exc:
-        _log_douyin_upstream_error(
-            path=parsed.path if "parsed" in locals() and parsed.path else "/media-proxy",
-            method="GET",
-            request={
-                "params": {
-                    "url": target_url if "target_url" in locals() else url,
-                    "referer": referer or "",
-                },
-                "headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                    "Referer": referer or "https://www.douyin.com/",
-                    "Accept": "*/*",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    "Range": "bytes=0-",
-                },
-            },
-            exc=exc,
-            api_base=parsed.netloc if "parsed" in locals() else "",
-            extra={"phase": "media_proxy_request_exception"},
-        )
-        raise integration_error(exc) from exc
+def media_proxy(
+    request: Request,
+    url: str = Query(...),
+    referer: str | None = Query(default=None),
+):
+    return proxy_remote_media(
+        url=url,
+        referer=referer,
+        request=request,
+        namespace="douyin-media-proxy",
+        default_referer="https://www.douyin.com/",
+    )

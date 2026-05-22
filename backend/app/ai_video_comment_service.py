@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -11,7 +12,7 @@ from backend.app.tiktok_target_store import (
     replace_target_video_comments,
     resolve_target_video,
 )
-from integrations.douyin_download_api.adapter import DouyinDownloadApiAdapter
+from integrations.tikhub_douyin_api import TikhubDouyinApiAdapter
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -219,7 +220,7 @@ def _collect_progress(
 
 def collect_video_comment_snapshot(
     video: dict[str, Any],
-    adapter: DouyinDownloadApiAdapter | None = None,
+    adapter: TikhubDouyinApiAdapter | None = None,
     options: Any | None = None,
     *,
     progress: ProgressCallback | None = None,
@@ -232,7 +233,7 @@ def collect_video_comment_snapshot(
     if not aweme_id:
         raise RuntimeError("missing aweme_id")
 
-    adapter = adapter or DouyinDownloadApiAdapter()
+    adapter = adapter or TikhubDouyinApiAdapter()
     author_ids = author_identity_from_video(video)
     sampling_plan = comment_sampling_plan(video, normalized_options)
     _progress(progress, 12, f"开始获取评论数据：目标 {sampling_plan['max_comments']} 条")
@@ -242,7 +243,7 @@ def collect_video_comment_snapshot(
             [],
             status="done",
             raw_ai={
-                "collector": "douyin-download-api",
+                "collector": "tikhub-douyin-api",
                 "comment_pages": [],
                 "request": normalized_options,
                 "sampling_plan": sampling_plan,
@@ -331,7 +332,7 @@ def collect_video_comment_snapshot(
         normalized,
         status="done",
         raw_ai={
-            "collector": "douyin-download-api",
+            "collector": "tikhub-douyin-api",
             "comment_pages": result.get("raw_pages", []),
             "request": normalized_options,
             "sampling_plan": sampling_plan,
@@ -364,21 +365,22 @@ def build_target_interaction_context(video: dict[str, Any]) -> dict[str, Any]:
     latest_video = dataset.get("video") if isinstance(dataset.get("video"), dict) else video
     insights = dataset.get("insights") if isinstance(dataset.get("insights"), dict) else {}
     comments = dataset.get("comments") if isinstance(dataset.get("comments"), list) else []
-    top_comments = [
-        {
-            "comment_id": item.get("comment_id"),
-            "nickname": item.get("nickname"),
-            "text": item.get("text"),
-            "digg_count": item.get("digg_count"),
-            "reply_count": item.get("reply_count"),
-            "is_pinned": item.get("is_pinned"),
-            "is_author": item.get("is_author"),
-        }
-        for item in comments
-        if int(item.get("level") or 1) == 1
-    ]
+    top_comments = _dedupe_compact_comments(
+        [
+            {
+                "comment_id": item.get("comment_id"),
+                "nickname": item.get("nickname"),
+                "text": item.get("text"),
+                "digg_count": item.get("digg_count"),
+                "reply_count": item.get("reply_count"),
+                "is_pinned": item.get("is_pinned"),
+                "is_author": item.get("is_author"),
+            }
+            for item in comments
+            if int(item.get("level") or 1) == 1
+        ]
+    )
     top_comments = sorted(top_comments, key=lambda item: int(item.get("digg_count") or 0), reverse=True)[:30]
-    metrics = latest_video.get("metrics") if isinstance(latest_video.get("metrics"), dict) else {}
     return {
         "set_id": latest_video.get("set_id"),
         "video_id": latest_video.get("id"),
@@ -412,11 +414,38 @@ def build_target_interaction_context(video: dict[str, Any]) -> dict[str, Any]:
             "symbol_counts": insights.get("symbol_counts") or {},
             "emotion_profile": insights.get("emotion_profile") or {},
             "creator_reply_tactics": insights.get("creator_reply_tactics") or {},
-            "pinned_comments": insights.get("pinned_comments") or [],
-            "author_replies": insights.get("author_replies") or [],
-            "top_comments": insights.get("top_comments") or top_comments,
+            "pinned_comments": _dedupe_compact_comments(insights.get("pinned_comments") or []),
+            "author_replies": _dedupe_compact_comments(insights.get("author_replies") or []),
+            "top_comments": _dedupe_compact_comments(insights.get("top_comments") or top_comments),
         },
     }
+
+
+def _dedupe_compact_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        text = re.sub(r"\s+", "", str(comment.get("text") or comment.get("content") or ""))
+        author = re.sub(
+            r"\s+",
+            "",
+            str(comment.get("user_id") or comment.get("sec_uid") or comment.get("unique_id") or comment.get("nickname") or ""),
+        )
+        identities = []
+        comment_id = str(comment.get("comment_id") or comment.get("cid") or comment.get("id") or "").strip()
+        if comment_id:
+            identities.append(f"id:{comment_id}")
+        if text and author:
+            identities.append(f"author_text:{author}:{text[:200]}")
+        if not identities and text:
+            identities.append(f"text:{text[:200]}")
+        if any(identity in seen for identity in identities):
+            continue
+        seen.update(identities)
+        unique.append(comment)
+    return unique
 
 
 def merge_target_context(existing: dict[str, Any], latest: dict[str, Any]) -> dict[str, Any]:
@@ -430,7 +459,6 @@ def merge_target_context(existing: dict[str, Any], latest: dict[str, Any]) -> di
     if old_metrics or new_metrics:
         merged["metrics"] = {**old_metrics, **new_metrics}
     return merged
-
 
 def merge_comment_context_into_result(
     result: dict[str, Any],

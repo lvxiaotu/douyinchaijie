@@ -50,6 +50,7 @@ export function firstUrl(value) {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return firstUrl(value[0]);
   if (Array.isArray(value.url_list)) return value.url_list[0] || "";
+  if (typeof value.url === "string") return value.url;
   return "";
 }
 
@@ -63,6 +64,40 @@ export function compactNumber(value) {
 
 export function unwrapDouyinData(value) {
   return value?.raw?.data || value?.data || value?.raw || value;
+}
+
+export function normalizeDouyinVideoItem(item) {
+  const source = item?.raw && typeof item.raw === "object" ? item.raw : item || {};
+  const video = source?.video || item?.video || {};
+  const stats = source?.statistics || source?.stats || item?.statistics || item?.stats || {};
+  const author = source?.author || item?.author || {};
+  const cover =
+    firstUrl(item?.cover_url) ||
+    firstUrl(video.cover) ||
+    firstUrl(video.origin_cover) ||
+    firstUrl(video.dynamic_cover) ||
+    firstUrl(source?.images?.[0]);
+  const videoUrl =
+    firstUrl(item?.play_url) ||
+    firstUrl(item?.download_url) ||
+    firstUrl(item?.source_video_url) ||
+    firstUrl(video.play_addr) ||
+    firstUrl(video.play_addr_h264) ||
+    firstUrl(video.download_addr) ||
+    video.nwm_video_url_HQ ||
+    video.wm_video_url_HQ ||
+    source?.video_url;
+  return {
+    source,
+    video,
+    stats,
+    author,
+    cover,
+    videoUrl,
+    images: Array.isArray(source?.images) ? source.images : [],
+    desc: item?.desc || source?.desc || item?.title || source?.title || "",
+    shareUrl: source?.share_info?.share_url || item?.share_url || source?.share_url || "",
+  };
 }
 
 export function cleanScriptValue(value) {
@@ -228,6 +263,21 @@ export function firstObject(source, keys) {
   return {};
 }
 
+export function mergeFilledObject(...sources) {
+  const result = {};
+  for (const source of sources) {
+    if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+    for (const [key, value] of Object.entries(source)) {
+      if (value === undefined || value === null || value === "") continue;
+      const current = result[key];
+      if (current === undefined || current === null || current === "") {
+        result[key] = value;
+      }
+    }
+  }
+  return result;
+}
+
 export function firstNumber(source, keys) {
   if (!source || typeof source !== "object") return 0;
   for (const key of keys) {
@@ -239,6 +289,20 @@ export function firstNumber(source, keys) {
     }
   }
   return 0;
+}
+
+export function firstRawNumber(source, keys) {
+  if (!source || typeof source !== "object") return null;
+  let fallback = null;
+  for (const key of keys) {
+    const value = source[key];
+    if (value === undefined || value === null || value === "") continue;
+    const number = Number(value);
+    if (!Number.isFinite(number)) continue;
+    if (number > 0) return number;
+    if (fallback === null) fallback = number;
+  }
+  return fallback;
 }
 
 export function firstArray(source, keys) {
@@ -319,7 +383,10 @@ export function normalizeCommercialAnalysisResult(source) {
   const interactionSnapshot = firstObject(douyinTarget, ["interaction_snapshot", "interaction", "互动快照"]);
   const targetMetrics = firstObject(douyinTarget, ["metrics", "指标"]);
   const rawSegments = Array.isArray(raw?.segment_breakdowns) ? raw.segment_breakdowns : [];
-  const authorSource = firstObject(raw, ["author", "user", "owner", "作者", "博主", "account", "profile"]);
+  const authorSource = mergeFilledObject(
+    firstObject(raw, ["author", "user", "owner", "作者", "博主", "account", "profile"]),
+    firstObject(douyinTarget, ["author", "user", "owner", "作者", "博主", "account", "profile"]),
+  );
   const videoSource = firstObject(raw, ["video", "video_data", "aweme", "作品", "视频"]);
   const mediaTags = normalizeTagList(
     raw?.tags,
@@ -341,11 +408,13 @@ export function normalizeCommercialAnalysisResult(source) {
       nickname: firstText(authorSource, ["nickname", "name", "author_name", "unique_id", "user_name", "username", "sec_nickname"]),
       unique_id: firstText(authorSource, ["unique_id", "user_id", "uid", "sec_uid", "sec_user_id"]),
       signature: firstText(authorSource, ["signature", "desc", "intro", "bio"]),
+      ip_location: firstText(authorSource, ["ip_location", "ipLocation", "location", "属地"]),
       avatar: firstUrlFromObject(authorSource, ["avatar", "avatar_url", "avatar_larger", "avatar_thumb", "avatar_300x300", "avatar_medium"]),
-      follower_count: Number(firstText(authorSource, ["follower_count", "fans_count", "粉丝数"]) || 0),
-      following_count: Number(firstText(authorSource, ["following_count", "关注数"]) || 0),
-      like_count: Number(firstText(authorSource, ["like_count", "total_favorited", "获赞"]) || 0),
-      aweme_count: Number(firstText(authorSource, ["aweme_count", "作品数", "video_count"]) || 0),
+      follower_count: firstRawNumber(authorSource, ["follower_count", "fans_count", "followers_count", "粉丝数"]),
+      following_count: firstRawNumber(authorSource, ["following_count", "follow_count", "关注数"]),
+      like_count: firstRawNumber(authorSource, ["like_count", "total_favorited", "total_favorite", "digg_count", "获赞"]),
+      total_favorited: firstRawNumber(authorSource, ["total_favorited", "like_count", "total_favorite", "digg_count", "获赞"]),
+      aweme_count: firstRawNumber(authorSource, ["aweme_count", "作品数", "video_count", "item_count"]),
       verified: Boolean(authorSource?.verified || authorSource?.is_verified),
     },
     video: {
@@ -423,6 +492,7 @@ export function normalizeCommercialAnalysisResult(source) {
     },
     douyin_target: {
       metrics: targetMetrics,
+      author: firstObject(douyinTarget, ["author", "user", "owner", "作者", "博主", "account", "profile"]),
       interaction_snapshot: interactionSnapshot,
       keyword_counts: firstObject(interactionSnapshot, ["keyword_counts", "关键词"]),
       symbol_counts: firstObject(interactionSnapshot, ["symbol_counts", "符号"]),

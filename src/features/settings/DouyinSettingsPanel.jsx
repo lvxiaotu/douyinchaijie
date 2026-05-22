@@ -3,7 +3,7 @@ import { Badge } from "../../components/common/index";
 import { fetchDouyinConfig, saveDouyinConfig } from "../../services/api";
 
 export function DouyinSettingsPanel() {
-  const [apiBase, setApiBase] = useState("http://127.0.0.1:8123");
+  const [apiBase, setApiBase] = useState("https://api.tikhub.io");
   const [outputDir, setOutputDir] = useState("./data/runtime/douyin/downloads");
   const [cookie, setCookie] = useState("");
   const [message, setMessage] = useState("");
@@ -13,7 +13,7 @@ export function DouyinSettingsPanel() {
   useEffect(() => {
     fetchDouyinConfig()
       .then((config) => {
-        setApiBase(config.api_base || "http://127.0.0.1:8123");
+        setApiBase(config.api_base || "https://api.tikhub.io");
         setOutputDir(config.output_dir || "./data/runtime/douyin/downloads");
         setCookie(config.cookie || "");
       })
@@ -27,8 +27,7 @@ export function DouyinSettingsPanel() {
     setMessage("");
     try {
       const result = await saveDouyinConfig({ apiBase, outputDir, cookie });
-      const synced = result.upstream_cookie_sync?.synced;
-      setMessage(synced ? "配置已保存，并已同步上游 Cookie。" : "配置已保存。上游 Cookie 同步未确认，必要时重启上游服务。");
+      setMessage(result.upstream_cookie_sync?.reason || "配置已保存。");
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -41,13 +40,13 @@ export function DouyinSettingsPanel() {
       <div className="panel-header">
         <div>
           <h2>抖音采集配置</h2>
-          <p>个人本地使用配置，保存到项目 `.env`。</p>
+          <p>TikHub 抖音接口配置，保存到项目 `.env`。</p>
         </div>
-        <Badge status="ready">本地</Badge>
+        <Badge status="ready">TikHub</Badge>
       </div>
       <form className="douyin-settings-form" onSubmit={handleSubmit}>
         <label>
-          上游 API 地址
+          TikHub API 地址
           <input value={apiBase} onChange={(event) => setApiBase(event.target.value)} />
         </label>
         <label>
@@ -55,7 +54,7 @@ export function DouyinSettingsPanel() {
           <input value={outputDir} onChange={(event) => setOutputDir(event.target.value)} />
         </label>
         <label className="textarea-label">
-          抖音 Cookie
+          抖音 Web Cookie（收藏数据使用）
           <textarea value={cookie} onChange={(event) => setCookie(event.target.value)} rows={7} />
         </label>
         <button className="primary-button" type="submit" disabled={saving}>

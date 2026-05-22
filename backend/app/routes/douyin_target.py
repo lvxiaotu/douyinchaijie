@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 from uuid import uuid4
@@ -43,7 +44,6 @@ from backend.app.tiktok_target_store import (
     update_target_task_from_ai_task,
     upsert_target_user,
 )
-from integrations.douyin_download_api.adapter import DouyinDownloadApiAdapter
 from integrations.tikhub_douyin_api import TikhubDouyinApiAdapter
 from integrations.tikhub_douyin_api.adapter import TikhubApiError
 
@@ -79,8 +79,10 @@ class TargetUserCreate(BaseModel):
     avatar_url: str = Field(default="")
     avatar: str = Field(default="")
     signature: str = Field(default="")
+    ip_location: str = Field(default="")
     follower_count: int | None = None
     like_count: int | None = None
+    total_favorited: int | None = None
     aweme_count: int | None = None
     following_count: int | None = None
     recent_update_at: int | None = None
@@ -274,20 +276,26 @@ def _comment_sampling_plan(video: dict[str, Any], payload: CollectCommentsReques
 
 def _target_user_id(user: TargetUserCreate | dict[str, Any]) -> str:
     getter = user.get if isinstance(user, dict) else lambda key, default=None: getattr(user, key, default)
-    return str(getter("sec_user_id") or getter("sec_uid") or getter("uid") or getter("unique_id") or "") or str(uuid4())
+    raw_user_id = getter("uid") or getter("user_id")
+    return str(getter("sec_user_id") or getter("sec_uid") or (_looks_like_sec_user_id(raw_user_id) and raw_user_id) or getter("unique_id") or raw_user_id or "") or str(uuid4())
 
 
 def _target_user_payload(user: TargetUserCreate, fallback_keyword: str = "") -> dict[str, Any]:
     source = user.source_json or {}
+    fallback_sec_user_id = user.sec_user_id or user.sec_uid
+    if not fallback_sec_user_id and _looks_like_sec_user_id(user.uid):
+        fallback_sec_user_id = user.uid
     return {
         "keyword": user.keyword or fallback_keyword,
-        "sec_user_id": user.sec_user_id or user.sec_uid,
+        "sec_user_id": fallback_sec_user_id,
         "unique_id": user.unique_id,
         "nickname": user.nickname,
         "avatar_url": user.avatar_url or user.avatar,
         "signature": user.signature,
+        "ip_location": user.ip_location,
         "follower_count": user.follower_count,
-        "like_count": user.like_count,
+        "like_count": user.like_count if user.like_count is not None else user.total_favorited,
+        "total_favorited": user.total_favorited if user.total_favorited is not None else user.like_count,
         "aweme_count": user.aweme_count,
         "following_count": user.following_count,
         "recent_update_at": user.recent_update_at or user.last_post_at,
@@ -303,6 +311,51 @@ def _nested_dict(value: Any, key: str) -> dict[str, Any]:
     if isinstance(value, dict) and isinstance(value.get(key), dict):
         return value[key]
     return {}
+
+
+def _user_profile_source_candidates(source: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def add(value: Any, depth: int = 0) -> None:
+        if not isinstance(value, dict) or depth > 4:
+            return
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidates.append(value)
+        for key in ("user", "user_info", "profile", "author", "owner", "account", "data", "raw", "payload", "result"):
+            add(value.get(key), depth + 1)
+
+    add(source)
+    return candidates
+
+
+def _pick_text_from_user_sources(source: Any, *keys: str) -> str:
+    for candidate in _user_profile_source_candidates(source):
+        for key in keys:
+            value = candidate.get(key)
+            if value is None or value == "" or isinstance(value, (dict, list)):
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+    return ""
+
+
+def _pick_number_from_user_sources(source: Any, *keys: str) -> int | None:
+    fallback: int | None = None
+    for candidate in _user_profile_source_candidates(source):
+        for key in keys:
+            number = _maybe_int(candidate.get(key))
+            if number is None:
+                continue
+            if number > 0:
+                return number
+            if fallback is None:
+                fallback = number
+    return fallback
 
 
 def _as_text(value: Any) -> str:
@@ -526,7 +579,14 @@ def _analysis_author_payload(video: dict[str, Any], target_user: dict[str, Any] 
             author["author_name"] = author.get("author_name") or nickname
             author["user_name"] = author.get("user_name") or nickname
 
-        signature = pick_text(target_user.get("signature"), author.get("signature"), author.get("desc"), author.get("intro"), author.get("bio"))
+        signature = pick_text(
+            target_user.get("signature"),
+            author.get("signature"),
+            author.get("desc"),
+            author.get("intro"),
+            author.get("bio"),
+            _pick_text_from_user_sources(user_source, "signature", "desc", "intro", "bio"),
+        )
         if signature:
             author["signature"] = signature
             author["desc"] = author.get("desc") or signature
@@ -552,6 +612,7 @@ def _analysis_author_payload(video: dict[str, Any], target_user: dict[str, Any] 
             author.get("fans_count"),
             author.get("followers"),
             user_source.get("follower_count") if isinstance(user_source, dict) else None,
+            _pick_number_from_user_sources(user_source, "follower_count", "followers", "followerCount", "fans_cnt", "fans_count"),
         )
         if follower_count is not None:
             author["follower_count"] = follower_count
@@ -565,6 +626,8 @@ def _analysis_author_payload(video: dict[str, Any], target_user: dict[str, Any] 
             author.get("total_favorite"),
             author.get("digg_count"),
             user_source.get("like_count") if isinstance(user_source, dict) else None,
+            user_source.get("total_favorited") if isinstance(user_source, dict) else None,
+            _pick_number_from_user_sources(user_source, "like_count", "total_favorited", "total_favorited_count", "like_cnt"),
         )
         if like_count is not None:
             author["like_count"] = like_count
@@ -572,12 +635,24 @@ def _analysis_author_payload(video: dict[str, Any], target_user: dict[str, Any] 
             author["total_favorite"] = like_count
             author["digg_count"] = like_count
 
+        ip_location = pick_text(
+            target_user.get("ip_location"),
+            author.get("ip_location"),
+            author.get("ipLocation"),
+            author.get("location"),
+            user_source.get("ip_location") if isinstance(user_source, dict) else None,
+            _pick_text_from_user_sources(user_source, "ip_location", "ipLocation", "location"),
+        )
+        if ip_location:
+            author["ip_location"] = ip_location
+
         aweme_count = pick_number(
             target_user.get("aweme_count"),
             author.get("aweme_count"),
             author.get("video_count"),
             author.get("item_count"),
             user_source.get("aweme_count") if isinstance(user_source, dict) else None,
+            _pick_number_from_user_sources(user_source, "aweme_count", "video_count", "awemeCount", "publish_cnt", "publish_count"),
         )
         if aweme_count is not None:
             author["aweme_count"] = aweme_count
@@ -589,6 +664,7 @@ def _analysis_author_payload(video: dict[str, Any], target_user: dict[str, Any] 
             author.get("following_count"),
             author.get("follow_count"),
             user_source.get("following_count") if isinstance(user_source, dict) else None,
+            _pick_number_from_user_sources(user_source, "following_count", "follow_count", "following", "followingCount"),
         )
         if following_count is not None:
             author["following_count"] = following_count
@@ -665,19 +741,21 @@ def _analysis_target_context(video: dict[str, Any], target_user: dict[str, Any] 
     insights = dataset.get("insights") or {}
     comments = dataset.get("comments") or []
     author = _analysis_author_payload(video, target_user)
-    top_comments = [
-        {
-            "comment_id": item.get("comment_id"),
-            "nickname": item.get("nickname"),
-            "text": item.get("text"),
-            "digg_count": item.get("digg_count"),
-            "reply_count": item.get("reply_count"),
-            "is_pinned": item.get("is_pinned"),
-            "is_author": item.get("is_author"),
-        }
-        for item in comments
-        if int(item.get("level") or 1) == 1
-    ]
+    top_comments = _dedupe_compact_comments(
+        [
+            {
+                "comment_id": item.get("comment_id"),
+                "nickname": item.get("nickname"),
+                "text": item.get("text"),
+                "digg_count": item.get("digg_count"),
+                "reply_count": item.get("reply_count"),
+                "is_pinned": item.get("is_pinned"),
+                "is_author": item.get("is_author"),
+            }
+            for item in comments
+            if int(item.get("level") or 1) == 1
+        ]
+    )
     top_comments = sorted(top_comments, key=lambda item: int(item.get("digg_count") or 0), reverse=True)[:30]
     return {
         "set_id": video.get("set_id"),
@@ -711,12 +789,38 @@ def _analysis_target_context(video: dict[str, Any], target_user: dict[str, Any] 
             "symbol_counts": insights.get("symbol_counts") or {},
             "emotion_profile": insights.get("emotion_profile") or {},
             "creator_reply_tactics": insights.get("creator_reply_tactics") or {},
-            "pinned_comments": insights.get("pinned_comments") or [],
-            "author_replies": insights.get("author_replies") or [],
-            "top_comments": insights.get("top_comments") or top_comments,
+            "pinned_comments": _dedupe_compact_comments(insights.get("pinned_comments") or []),
+            "author_replies": _dedupe_compact_comments(insights.get("author_replies") or []),
+            "top_comments": _dedupe_compact_comments(insights.get("top_comments") or top_comments),
         },
     }
 
+
+def _dedupe_compact_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        text = re.sub(r"\s+", "", str(comment.get("text") or comment.get("content") or ""))
+        author = re.sub(
+            r"\s+",
+            "",
+            str(comment.get("user_id") or comment.get("sec_uid") or comment.get("unique_id") or comment.get("nickname") or ""),
+        )
+        identities = []
+        comment_id = str(comment.get("comment_id") or comment.get("cid") or comment.get("id") or "").strip()
+        if comment_id:
+            identities.append(f"id:{comment_id}")
+        if text and author:
+            identities.append(f"author_text:{author}:{text[:200]}")
+        if not identities and text:
+            identities.append(f"text:{text[:200]}")
+        if any(identity in seen for identity in identities):
+            continue
+        seen.update(identities)
+        unique.append(comment)
+    return unique
 
 def _author_identity_from_video(video: dict[str, Any]) -> set[str]:
     source = video.get("source_json") if isinstance(video.get("source_json"), dict) else {}
@@ -737,7 +841,7 @@ def _author_identity_from_video(video: dict[str, Any]) -> set[str]:
 
 def _collect_video_comment_snapshot(
     video: dict[str, Any],
-    adapter: DouyinDownloadApiAdapter,
+    adapter: TikhubDouyinApiAdapter,
     payload: CollectCommentsRequest,
 ) -> dict[str, Any]:
     video_id = str(video.get("id") or "")
@@ -752,7 +856,7 @@ def _collect_video_comment_snapshot(
             [],
             status="done",
             raw_ai={
-                "collector": "douyin-download-api",
+                "collector": "tikhub-douyin-api",
                 "comment_pages": [],
                 "request": payload.model_dump(),
                 "sampling_plan": sampling_plan,
@@ -811,7 +915,7 @@ def _collect_video_comment_snapshot(
         normalized,
         status="done",
         raw_ai={
-            "collector": "douyin-download-api",
+            "collector": "tikhub-douyin-api",
             "comment_pages": result.get("raw_pages", []),
             "request": payload.model_dump(),
             "sampling_plan": sampling_plan,
@@ -821,12 +925,15 @@ def _collect_video_comment_snapshot(
 
 @router.post("/search")
 def search(payload: TargetSearchRequest) -> dict[str, Any]:
+    tikhub = TikhubDouyinApiAdapter()
     try:
-        result = TikhubDouyinApiAdapter().search_users(
+        result = tikhub.search_users(
             keyword=payload.keyword,
             page=payload.page,
             cursor=payload.cursor,
             count=payload.count,
+            enrich_profiles=True,
+            profile_limit=payload.count,
         )
     except TikhubApiError as exc:
         raise HTTPException(
@@ -854,7 +961,8 @@ def search(payload: TargetSearchRequest) -> dict[str, Any]:
         ) from exc
     raw_items = result.get("items", [])
     items = [item for item in raw_items if _passes_search_filters(item, payload)]
-    result["items"] = _sort_users(items, payload.sortBy)
+    visible_items = _sort_users(items, payload.sortBy)[: payload.count]
+    result["items"] = tikhub.enrich_user_profiles(visible_items, keyword=payload.keyword, limit=len(visible_items))
     result["count"] = len(result["items"])
     result["raw_count"] = len(raw_items)
     result["filters"] = payload.model_dump()
@@ -976,7 +1084,7 @@ def collect_comments(payload: CollectCommentsRequest) -> dict[str, Any]:
     else:
         raise HTTPException(status_code=400, detail="set_id or video_ids is required")
 
-    adapter = DouyinDownloadApiAdapter()
+    adapter = TikhubDouyinApiAdapter()
     saved = []
     errors = []
     for video in target_videos:
