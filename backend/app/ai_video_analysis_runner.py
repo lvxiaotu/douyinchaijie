@@ -89,6 +89,18 @@ class AiVideoAnalysisRunner:
                 job_path=str(result_job.get("job_path") or ""),
             )
 
+        latest_payload = latest_task.get("payload") if isinstance(latest_task.get("payload"), dict) else {}
+        latest_comment_state = (
+            latest_payload.get("comment_collection_state")
+            if isinstance(latest_payload.get("comment_collection_state"), dict)
+            else {}
+        )
+        if comment_state.get("status") == "failed" and latest_comment_state.get("status") == "done":
+            comment_state = latest_comment_state
+            payload = latest_payload
+            latest_video = latest_payload.get("video") if isinstance(latest_payload.get("video"), dict) else {}
+            video = latest_video or video
+
         result = attach_model_runs(task_id, result_job.get("result") or {})
         result = merge_comment_context_into_result(result, video=video, comment_state=comment_state)
         result_status = "done" if result_job.get("status") == "done" else "running"

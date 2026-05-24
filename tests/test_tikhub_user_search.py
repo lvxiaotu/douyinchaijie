@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 from backend.app import tiktok_target_store as store
 from integrations.tikhub_douyin_api.adapter import (
     DEFAULT_AWEME_ID_PATH,
+    DEFAULT_ONE_VIDEO_PATH,
     DEFAULT_SEC_USER_ID_PATH,
     DEFAULT_USER_COLLECTION_VIDEOS_PATH,
     DEFAULT_USER_SEARCH_PATH,
@@ -439,6 +440,42 @@ class TikhubUserSearchTests(unittest.TestCase):
         self.assertEqual(video["desc"], "new video")
         self.assertEqual(video["digg_count"], 88)
         self.assertEqual(video["comment_count"], 7)
+
+    def test_one_video_refresh_can_bypass_cached_download_url(self):
+        store.create_target_video(
+            "refresh-one-video",
+            "refresh-user",
+            {
+                "aweme_id": "refresh-one-video",
+                "desc": "cached video",
+                "download_url": "https://old.example/download.mp4",
+                "play_url": "https://old.example/play.mp4",
+            },
+        )
+        upstream = {
+            "data": {
+                "aweme_detail": {
+                    "aweme_id": "refresh-one-video",
+                    "desc": "fresh video",
+                    "video": {
+                        "download_addr": {"url_list": ["https://fresh.example/download.mp4"]},
+                        "play_addr": {"url_list": ["https://fresh.example/play.mp4"]},
+                    },
+                }
+            }
+        }
+
+        with patch.object(TikhubDouyinApiAdapter, "_request_json", return_value=upstream) as request_json:
+            result = TikhubDouyinApiAdapter({"api_key": "test"}).get_one_video(
+                "refresh-one-video",
+                prefer_cache=False,
+            )
+
+        request_json.assert_called_once()
+        spec = request_json.call_args.args[0]
+        self.assertEqual(spec.path, DEFAULT_ONE_VIDEO_PATH)
+        self.assertEqual(result["video"]["download_url"], "https://fresh.example/download.mp4")
+        self.assertEqual(store.get_target_video("refresh-one-video")["download_url"], "https://fresh.example/download.mp4")
 
     def test_favorites_use_tikhub_collection_endpoint(self):
         seen = []

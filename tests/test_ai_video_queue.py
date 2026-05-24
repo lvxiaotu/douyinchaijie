@@ -160,6 +160,21 @@ class AiVideoQueueTests(unittest.TestCase):
         self.assertLessEqual(len(snapshot["backlog"]), 3)
         self.assertEqual(snapshot["max_concurrent"], 3)
 
+    def test_requeue_stale_job_returns_task_to_pending(self):
+        self.create_task_and_job(1)
+        job = video_analysis_queue.claim_next_ai_video_job("worker-1")
+        task_store.update_task("video-task-1", status="running", progress=42, message="downloading")
+
+        with patch.object(video_analysis_queue, "now_ts", return_value=int(job["heartbeat_at"]) + 61):
+            recovered = video_analysis_queue.requeue_stale_ai_video_jobs(stale_seconds=60)
+
+        self.assertEqual(recovered, 1)
+        self.assertEqual(video_analysis_queue.get_ai_video_job("video-task-1")["status"], "stale_requeued")
+        task = task_store.get_task("video-task-1")
+        self.assertEqual(task["status"], "pending")
+        self.assertEqual(task["progress"], 42)
+        self.assertIn("重新排队", task["message"])
+
     def test_queue_status_includes_worker_runtime_state(self):
         snapshot = video_analysis_queue.queue_snapshot(backlog_limit=2)
         self.assertIn("workers", snapshot)

@@ -129,6 +129,12 @@ class FakeDownloadResponse:
         yield self._content
 
 
+class BrokenDownloadResponse(FakeDownloadResponse):
+    def iter_content(self, chunk_size=1):
+        yield b"partial-video"
+        raise TimeoutError("stalled stream")
+
+
 class FlakyDownloadSession:
     def __init__(self):
         self.calls = 0
@@ -351,6 +357,50 @@ class AiVideoP3Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(session.calls, 2)
+
+    def test_evidence_refreshes_douyin_video_url_after_forbidden_download(self):
+        root = Path(self.tmp.name)
+        evidence_dir = root / "evidence" / "job-refresh"
+        evidence_dir.mkdir(parents=True)
+        pipeline = VideoEvidencePipeline(output_dir=root)
+        calls = []
+
+        def fake_download(url, **_kwargs):
+            calls.append(url)
+            if url == "https://stale.example/video.mp4":
+                return FakeDownloadResponse(status_code=403)
+            return FakeDownloadResponse(status_code=200, content=b"fresh-video")
+
+        video = {"aweme_id": "aweme-refresh", "source_video_url": "https://stale.example/video.mp4"}
+        with (
+            patch("integrations.ai_video_analysis.evidence_pipeline.get_with_retries", side_effect=fake_download),
+            patch.object(pipeline, "refresh_douyin_video_urls", return_value=["https://fresh.example/video.mp4"]) as refresh_urls,
+        ):
+            path = pipeline.resolve_video_file(video, evidence_dir=evidence_dir)
+
+        self.assertEqual(path.read_bytes(), b"fresh-video")
+        self.assertEqual(calls, ["https://stale.example/video.mp4", "https://fresh.example/video.mp4"])
+        refresh_urls.assert_called_once_with(video)
+
+    def test_evidence_discards_partial_video_when_stream_download_stalls(self):
+        root = Path(self.tmp.name)
+        evidence_dir = root / "evidence" / "job-stalled"
+        evidence_dir.mkdir(parents=True)
+        pipeline = VideoEvidencePipeline(output_dir=root)
+        target = evidence_dir / "aweme-stalled.mp4"
+
+        with patch(
+            "integrations.ai_video_analysis.evidence_pipeline.get_with_retries",
+            return_value=BrokenDownloadResponse(status_code=200, content=b"ignored"),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "stalled stream"):
+                pipeline.resolve_video_file(
+                    {"aweme_id": "aweme-stalled", "source_video_url": "https://example.test/stalled.mp4"},
+                    evidence_dir=evidence_dir,
+                )
+
+        self.assertFalse(target.exists())
+        self.assertFalse(target.with_name(f"{target.name}.part").exists())
 
     def test_ffmpeg_command_stops_when_cancel_requested(self):
         pipeline = VideoEvidencePipeline(output_dir=Path(self.tmp.name))

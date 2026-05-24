@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { compactNumber, normalizeModelRuns } from "../../utils/appUtils";
 import {
-  buildEvidenceRows,
   buildInteractionSnapshot,
   buildRadarItems,
   buildSummaryStats,
@@ -18,7 +17,6 @@ import {
   seekStartSeconds,
 } from "../../utils/aiVideoAnalysisView";
 import { rewriteAiVideoRemake, saveAiVideoRemakeExport, sendAiVideoRemakeToScript } from "../../services/api";
-import { ModelRunSummary } from "./ModelRunSummary";
 import { CommentIntelligence, PsychologyBreakdown, RemakeLab, ResultOverview, SectionRows, SegmentTimeline, VideoTranscriptSyncPanel } from "./AnalysisResultSections";
 import { useAiVideoEvidence } from "./useAiVideoEvidence";
 import { useDouyinInteractions } from "./useDouyinInteractions";
@@ -101,10 +99,6 @@ export function AnalysisResultModal({ task, onClose, pageMode = false }) {
   );
   const summaryStats = useMemo(
     () => buildSummaryStats({ result, evidence, segmentCount: segmentBreakdowns.length, modelRunCount: modelRuns.length }),
-    [result, evidence, segmentBreakdowns.length, modelRuns.length],
-  );
-  const evidenceRows = useMemo(
-    () => buildEvidenceRows({ result, evidence, segmentCount: segmentBreakdowns.length, modelRunCount: modelRuns.length }),
     [result, evidence, segmentBreakdowns.length, modelRuns.length],
   );
   function stopTranscriptVideo(unload = false) {
@@ -337,8 +331,6 @@ export function AnalysisResultModal({ task, onClose, pageMode = false }) {
 
           <div className="content-lab-workspace">
             <CommentIntelligence snapshot={interactionSnapshot} loading={liveInteractionStatus.loading} error={liveInteractionStatus.error} />
-            <SectionRows title="证据概览" rows={evidenceRows} />
-            <ModelRunSummary runs={modelRuns} compact />
             {actionStatus && (
               <div className={`content-lab-action-status ${actionStatus.startsWith("error:") ? "error" : ""}`} role="status">
                 {actionStatus.startsWith("error:")

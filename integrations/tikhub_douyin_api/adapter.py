@@ -434,8 +434,8 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         video = result.get("video") if isinstance(result.get("video"), dict) else {}
         return {**result, "aweme_id": aweme_id, "detail": video}
 
-    def get_one_video(self, aweme_id: str, region: str = "US") -> dict[str, Any]:
-        cached_video = get_target_video(aweme_id)
+    def get_one_video(self, aweme_id: str, region: str = "US", *, prefer_cache: bool = True) -> dict[str, Any]:
+        cached_video = get_target_video(aweme_id) if prefer_cache else None
         if cached_video:
             return {
                 "status": "ok",
