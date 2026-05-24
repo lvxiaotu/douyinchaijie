@@ -374,7 +374,10 @@ def update_task(task_id: str, **updates: Any) -> dict[str, Any] | None:
     assignments = ", ".join(f"{key} = %s" for key in normalized)
     values = list(normalized.values()) + [task_id]
     with connect() as connection:
-        cursor = connection.execute(f"UPDATE tasks SET {assignments} WHERE id = %s", values)
+        cursor = connection.execute(
+            f"UPDATE tasks SET {assignments} WHERE id = %s AND deleted_at IS NULL AND COALESCE(status, '') <> 'superseded'",
+            values,
+        )
     if cursor.rowcount == 0:
         return None
     if {"status", "progress", "message", "error"} & set(normalized):

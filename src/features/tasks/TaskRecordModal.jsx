@@ -31,11 +31,7 @@ export function TaskRecordModal({
     ? new Date(task.updated_at * 1000).toLocaleString("zh-CN")
     : task.updated || "";
   const commentCollection = task.commentCollection;
-  const canRetryComments =
-    type === "analysis" &&
-    commentCollection?.status === "failed" &&
-    task.status !== "running" &&
-    task.status !== "pending";
+  const canRetryComments = type === "analysis" && commentCollection?.status === "failed";
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>

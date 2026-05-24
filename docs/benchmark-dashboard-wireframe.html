@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>短视频对标分析工作台线框</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #18202a;
+      background: #f5f7fb;
+    }
+    header {
+      height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      background: #ffffff;
+      border-bottom: 1px solid #dde3ec;
+    }
+    .brand { font-weight: 700; }
+    .tabs, .filters, .row { display: flex; gap: 10px; align-items: center; }
+    .tab, .chip, button {
+      border: 1px solid #cfd7e3;
+      background: #fff;
+      border-radius: 6px;
+      padding: 7px 11px;
+      font-size: 13px;
+    }
+    .tab.active, .chip.active, button.primary {
+      background: #1f6feb;
+      border-color: #1f6feb;
+      color: #fff;
+    }
+    main { padding: 20px 24px 28px; }
+    .filters { margin-bottom: 16px; flex-wrap: wrap; }
+    .grid { display: grid; gap: 14px; }
+    .metrics { grid-template-columns: repeat(5, minmax(120px, 1fr)); }
+    .layout { grid-template-columns: 1.2fr 1fr; margin-top: 14px; }
+    .wide { grid-template-columns: 1fr 1fr 1fr; margin-top: 14px; }
+    .card {
+      background: #fff;
+      border: 1px solid #dde3ec;
+      border-radius: 8px;
+      padding: 14px;
+      min-width: 0;
+    }
+    .metric strong {
+      display: block;
+      font-size: 24px;
+      margin-top: 6px;
+    }
+    h2, h3 { margin: 0 0 12px; font-size: 16px; }
+    h3 { font-size: 14px; }
+    .muted { color: #6b7584; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid #edf1f6; text-align: left; }
+    th { color: #6b7584; font-weight: 600; }
+    .bar {
+      height: 8px;
+      border-radius: 4px;
+      background: #edf1f6;
+      overflow: hidden;
+    }
+    .bar span { display: block; height: 100%; background: #22a06b; }
+    .author {
+      display: grid;
+      grid-template-columns: 44px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid #edf1f6;
+    }
+    .avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: #dbe7ff;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+    }
+    .mode {
+      border: 1px dashed #b9c4d3;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+      background: #fbfcff;
+    }
+    .drawer {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      width: 360px;
+      background: #18202a;
+      color: #fff;
+      border-radius: 8px;
+      padding: 14px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.25);
+    }
+    .drawer .muted { color: #b9c4d3; }
+    @media (max-width: 980px) {
+      .metrics, .layout, .wide { grid-template-columns: 1fr; }
+      header { height: auto; gap: 12px; align-items: flex-start; flex-direction: column; padding: 14px; }
+      main { padding: 14px; }
+      .drawer { position: static; width: auto; margin: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">短视频对标分析工作台</div>
+    <nav class="tabs">
+      <span class="tab active">总览</span>
+      <span class="tab">排行榜</span>
+      <span class="tab">博主对标</span>
+      <span class="tab">模式库</span>
+    </nav>
+  </header>
+
+  <main>
+    <section class="filters">
+      <span class="chip active">玄学塔罗</span>
+      <span class="chip">全部类型</span>
+      <span class="chip">动漫解说</span>
+      <span class="chip">原创 Vlog</span>
+      <span class="chip">好物种草</span>
+      <span class="chip">知识教程</span>
+    </section>
+
+    <section class="grid metrics">
+      <div class="card metric"><span class="muted">拆解任务</span><strong>148</strong></div>
+      <div class="card metric"><span class="muted">去重视频</span><strong>112</strong></div>
+      <div class="card metric"><span class="muted">博主数</span><strong>38</strong></div>
+      <div class="card metric"><span class="muted">分段拆解</span><strong>1040</strong></div>
+      <div class="card metric"><span class="muted">平均复刻分</span><strong>89</strong></div>
+    </section>
+
+    <section class="grid layout">
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <h2>内容排行榜</h2>
+          <div class="tabs">
+            <span class="tab active">综合互动</span>
+            <span class="tab">小号效率</span>
+            <span class="tab">收藏价值</span>
+            <span class="tab">评论驱动</span>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>视频</th><th>博主</th><th>互动倾向</th><th>动作</th></tr></thead>
+          <tbody>
+            <tr><td>通灵占卜 金桃花的长相？</td><td>微安塔罗</td><td><div class="bar"><span style="width:93%"></span></div></td><td><button>看证据</button></td></tr>
+            <tr><td>刷到就是私占 时来运转</td><td>彼得塔罗</td><td><div class="bar"><span style="width:90%"></span></div></td><td><button>看证据</button></td></tr>
+            <tr><td>你的守护灵现在有提醒</td><td>明日塔罗</td><td><div class="bar"><span style="width:88%"></span></div></td><td><button>看证据</button></td></tr>
+          </tbody>
+        </table>
+        <p class="muted">点击视频进入轻详情，再跳到任务中心完整拆解。</p>
+      </div>
+
+      <div class="card">
+        <h2>博主对标</h2>
+        <div class="author"><div class="avatar">微</div><div><b>微安塔罗</b><br><span class="muted">私占感强，收藏与分享高</span></div><button>看视频</button></div>
+        <div class="author"><div class="avatar">栖</div><div><b>栖栖塔罗CC</b><br><span class="muted">教学/牌意内容，收藏倾向高</span></div><button>看视频</button></div>
+        <div class="author"><div class="avatar">彼</div><div><b>彼得塔罗</b><br><span class="muted">短句召唤式标题，复刻成本低</span></div><button>看视频</button></div>
+      </div>
+    </section>
+
+    <section class="grid wide">
+      <div class="card">
+        <h2>内容模式库</h2>
+        <div class="mode"><b>刷到就是私占</b><br><span class="muted">强缘分暗示 + 情绪承诺 + 评论/私信引导</span></div>
+        <div class="mode"><b>守护灵提醒</b><br><span class="muted">神秘主体 + 近期转机 + 用户自我代入</span></div>
+      </div>
+      <div class="card">
+        <h2>类型迁移</h2>
+        <p class="muted">同一套看板支持其他垂类，只替换垂类标签和模式字段。</p>
+        <table>
+          <tbody>
+            <tr><td>动漫解说</td><td>冲突、爽点、人物命运</td></tr>
+            <tr><td>原创 Vlog</td><td>人设、场景、真实情绪</td></tr>
+            <tr><td>好物种草</td><td>痛点、信任、转化路径</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>指标说明</h2>
+        <p class="muted">互动强度指数是可配置排序指标，不是科学定律。</p>
+        <p>点赞、评论、收藏、分享分别保留；综合分只用于快速粗排。</p>
+      </div>
+    </section>
+  </main>
+
+  <aside class="drawer">
+    <h3>视频轻详情抽屉</h3>
+    <p class="muted">从排行榜或博主页打开</p>
+    <p><b>开头 3 秒：</b>刷到即有缘，制造私占感。</p>
+    <p><b>可复刻点：</b>固定机位 + 牌面特写 + 情绪化口播。</p>
+    <button class="primary">打开任务中心完整拆解</button>
+  </aside>
+</body>
+</html>

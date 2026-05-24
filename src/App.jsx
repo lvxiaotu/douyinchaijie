@@ -1,9 +1,10 @@
 import React, { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
-import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchive, fetchAiProductionReverseArchives, fetchAiPromptReverseArchive, fetchAiPromptReverseArchives, fetchAiVideoArchive, fetchAiVideoArchives, fetchTask, fetchTasks, fetchWorkbench, retryAiVideoComments } from "./services/api";
+import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchive, fetchAiProductionReverseArchives, fetchAiPromptReverseArchive, fetchAiPromptReverseArchives, fetchAiVideoArchive, fetchAiVideoArchives, fetchTask, fetchTasks, fetchWorkbench, retryAiProductionReverseJob, retryAiPromptReverseJob, retryAiVideoComments, retryAiVideoQueueJob, retryTextToAssetsJob } from "./services/api";
 import { fallbackWorkbench } from "./workbenchSeed";
 import { Database, FolderCog, Languages, MoonStar, RefreshCw, SunMedium } from "lucide-react";
 import { Badge, ToolCard } from "./components/common/index";
 import { THEME_STORAGE_KEY, UI_VERSION, jianyingEditorItems, navItems, sections, settingItems } from "./constants/appConfig";
+import { BenchmarkDashboard } from "./features/benchmark";
 import { DouyinCollectorPanel } from "./features/douyin";
 import { DouyinTargetPanel } from "./features/douyinTarget";
 import { DraftInspectorPanel, JianyingEditorSdkPanel, JianyingNaturalScriptPanel } from "./features/jianying";
@@ -14,7 +15,7 @@ import { RunningHubTtsPanel } from "./features/runningHub/RunningHubTtsPanel";
 import { AiProductionReverseSettingsPanel, AiPromptReverseSettingsPanel, AiProviderSettingsPanel, AiVideoSettingsPanel, DouyinSettingsPanel, JianyingDraftSettingsPanel } from "./features/settings";
 import { TaskRecordModal, TaskStatusRow } from "./features/tasks";
 import { TextToAssetsPanel, TextToAssetsResultModal } from "./features/textToAssets";
-import { archiveIdSet, archivePresentation, groupTasksByStatus, normalizeAnalysisTask, normalizeCommercialAnalysisResult, normalizeProductionReverseTask, normalizePromptReverseTask, normalizeTextToAssetsTask, preferredTaskStatus } from "./utils/appUtils";
+import { archiveIdSet, archivePresentation, groupTasksByStatus, hasCommentCollectionFailure, normalizeAnalysisTask, normalizeCommercialAnalysisResult, normalizeProductionReverseTask, normalizePromptReverseTask, normalizeTextToAssetsTask, preferredTaskStatus } from "./utils/appUtils";
 
 const TaskListLimit = 5000;
 
@@ -340,6 +341,51 @@ export function App() {
     setProductionReverseArchives((current) => current.filter((item) => item.task_id !== task.id && item.id !== task.id));
   }
 
+  async function openBenchmarkTask(taskId) {
+    if (!taskId) return;
+    try {
+      const fullTask = await fetchTask(taskId);
+      openResultPage(normalizeAnalysisTask(fullTask), "analysis");
+    } catch (err) {
+      setTaskSyncError(`对标视频任务详情加载失败：${err.message || err}`);
+      setActiveSection("taskCenter");
+    }
+  }
+
+  async function retryTaskInList(task, retryTask, normalizeTask, setTasks, label, actionLabel = "重试") {
+    try {
+      const response = await retryTask(task.id);
+      const latest = normalizeTask(response.task || (await fetchTask(task.id)));
+      setTasks((current) => [latest, ...current.filter((item) => item.id !== latest.id)]);
+      setTaskSyncError("");
+    } catch (err) {
+      setTaskSyncError(`${label}${actionLabel}失败：${err.message || err}`);
+    }
+  }
+
+  function handleRestartAnalysisTask(task) {
+    return retryTaskInList(task, retryAiVideoQueueJob, normalizeAnalysisTask, setAnalysisTasks, "AI 视频拆解", "重新开始");
+  }
+
+  function handleRetryAnalysisTask(task) {
+    if (hasCommentCollectionFailure(task) && !["error", "failed", "failed_final"].includes(task.status)) {
+      return handleRetryAnalysisComments(task);
+    }
+    return retryTaskInList(task, retryAiVideoQueueJob, normalizeAnalysisTask, setAnalysisTasks, "AI 视频拆解");
+  }
+
+  function handleRetryPromptReverseTask(task) {
+    return retryTaskInList(task, retryAiPromptReverseJob, normalizePromptReverseTask, setPromptReverseTasks, "AI 提示词反推");
+  }
+
+  function handleRetryProductionReverseTask(task) {
+    return retryTaskInList(task, retryAiProductionReverseJob, normalizeProductionReverseTask, setProductionReverseTasks, "AI 制作方式反推");
+  }
+
+  function handleRetryTextToAssetsTask(task) {
+    return retryTaskInList(task, retryTextToAssetsJob, normalizeTextToAssetsTask, setTextToAssetsTasks, "一句话转素材");
+  }
+
   async function handleGlobalRefresh() {
     setRefreshing(true);
     const [taskResult, workbenchResult, archiveResult] = await Promise.allSettled([
@@ -576,6 +622,10 @@ export function App() {
         )}
       </section>
     );
+  } else if (activeSection === "benchmark") {
+    sectionContent = (
+      <BenchmarkDashboard onOpenTask={openBenchmarkTask} />
+    );
   } else if (activeSection === "taskCenter") {
     sectionContent = (
       activeResultPage ? (
@@ -603,38 +653,43 @@ export function App() {
             <div className="task-board-rows">
               <TaskStatusRow
                 title="AI 视频拆解"
-                desc="展示 AI 视频拆解的进行中、已完成和异常任务。"
+                desc="展示 AI 视频拆解的等待中、进行中、已完成和异常任务。"
                 groups={analysisTaskGroups}
                 activeStatus={activeAnalysisStatus}
                 onChangeStatus={setActiveAnalysisStatus}
                 onOpenTask={(task) => openTaskRecord("analysis", "AI 视频拆解", task)}
+                onRestartTask={handleRestartAnalysisTask}
+                onRetryTask={handleRetryAnalysisTask}
                 onDeleteTask={handleDeleteAnalysisTask}
               />
               <TaskStatusRow
                 title="AI 提示词反推"
-                desc="展示提示词反推的进行中、已完成和异常任务。"
+                desc="展示提示词反推的等待中、进行中、已完成和异常任务。"
                 groups={promptReverseTaskGroups}
                 activeStatus={activePromptStatus}
                 onChangeStatus={setActivePromptStatus}
                 onOpenTask={(task) => openTaskRecord("prompt", "AI 提示词反推", task)}
+                onRetryTask={handleRetryPromptReverseTask}
                 onDeleteTask={handleDeletePromptReverseTask}
               />
               <TaskStatusRow
                 title="AI 制作方式反推"
-                desc="展示制作方式反推的进行中、已完成和异常任务。"
+                desc="展示制作方式反推的等待中、进行中、已完成和异常任务。"
                 groups={productionReverseTaskGroups}
                 activeStatus={activeProductionStatus}
                 onChangeStatus={setActiveProductionStatus}
                 onOpenTask={(task) => openTaskRecord("production", "AI 制作方式反推", task)}
+                onRetryTask={handleRetryProductionReverseTask}
                 onDeleteTask={handleDeleteProductionReverseTask}
               />
               <TaskStatusRow
                 title="一句话转素材"
-                desc="展示 Text-to-Assets 的进行中、已完成和异常任务。"
+                desc="展示 Text-to-Assets 的等待中、进行中、已完成和异常任务。"
                 groups={textToAssetsTaskGroups}
                 activeStatus={activeTextToAssetsStatus}
                 onChangeStatus={setActiveTextToAssetsStatus}
                 onOpenTask={(task) => openTaskRecord("text_to_assets", "一句话转素材", task)}
+                onRetryTask={handleRetryTextToAssetsTask}
                 onDeleteTask={handleDeleteTextToAssetsTask}
               />
             </div>

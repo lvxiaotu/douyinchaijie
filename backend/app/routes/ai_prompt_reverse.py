@@ -162,6 +162,32 @@ def create_prompt_reverse_job(payload: PromptReverseRequest, background_tasks: B
         ) from exc
 
 
+@router.post("/jobs/{task_id}/retry")
+def retry_prompt_reverse_job(task_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.get("type") != "ai_prompt_reverse":
+        raise HTTPException(status_code=400, detail="Only AI prompt reverse tasks can be retried here")
+    if task.get("status") not in {"failed", "error"}:
+        raise HTTPException(status_code=409, detail="Only failed AI prompt reverse tasks can be retried")
+
+    video = (task.get("payload") or {}).get("video") or {}
+    if not video:
+        raise HTTPException(status_code=400, detail="Retry requires the original video payload")
+
+    retried = update_task(
+        task_id,
+        status="pending",
+        progress=0,
+        message="已重新加入提示词反推队列",
+        result_json=None,
+        error=None,
+    )
+    background_tasks.add_task(run_prompt_reverse_task, task_id, video, task.get("provider") or None)
+    return {"status": "ok", "task": retried}
+
+
 @router.get("/archives")
 def archives(
     limit: int = 100,

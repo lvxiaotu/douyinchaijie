@@ -30,6 +30,15 @@ export async function fetchWorkbench() {
   return response.json();
 }
 
+async function getJson(path) {
+  const response = await fetch(`${API_BASE}${path}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
 async function postJson(path, payload) {
   const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
@@ -59,6 +68,119 @@ async function postJson(path, payload) {
 
 export function fetchDouyinUserProfile(userUrl) {
   return postJson("/api/integrations/douyin/user-profile", { user_url: userUrl });
+}
+
+export async function fetchBenchmarkOverview(options = {}) {
+  const params = new URLSearchParams();
+  if (options.genre) params.set("genre", options.genre);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return getJson(`/api/benchmark/overview${query}`);
+}
+
+export async function fetchBenchmarkVideos(options = {}) {
+  const params = new URLSearchParams();
+  if (options.genre) params.set("genre", options.genre);
+  if (options.rankType) params.set("rank_type", options.rankType);
+  if (options.authorId) params.set("author_id", options.authorId);
+  if (options.patternId) params.set("pattern_id", options.patternId);
+  if (options.query) params.set("q", options.query);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.offset) params.set("offset", String(options.offset));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return getJson(`/api/benchmark/videos${query}`);
+}
+
+export async function fetchBenchmarkVideo(videoId) {
+  return getJson(`/api/benchmark/videos/${encodeURIComponent(videoId)}`);
+}
+
+export async function fetchBenchmarkAuthors(options = {}) {
+  const params = new URLSearchParams();
+  if (options.genre) params.set("genre", options.genre);
+  if (options.sort) params.set("sort", options.sort);
+  if (options.query) params.set("q", options.query);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.offset) params.set("offset", String(options.offset));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return getJson(`/api/benchmark/authors${query}`);
+}
+
+export function fetchBenchmarkAuthor(authorId) {
+  return getJson(`/api/benchmark/authors/${encodeURIComponent(authorId)}`);
+}
+
+export function analyzeBenchmarkAuthorProfile(authorId, options = {}) {
+  return postJson(`/api/benchmark/authors/${encodeURIComponent(authorId)}/profile-analysis`, {
+    provider: options.provider || null,
+  });
+}
+
+export async function fetchBenchmarkPatterns(options = {}) {
+  const params = new URLSearchParams();
+  if (options.genre) params.set("genre", options.genre);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.offset) params.set("offset", String(options.offset));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return getJson(`/api/benchmark/patterns${query}`);
+}
+
+export function fetchBenchmarkPattern(patternId, options = {}) {
+  const params = new URLSearchParams();
+  if (options.genre) params.set("genre", options.genre);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return getJson(`/api/benchmark/patterns/${encodeURIComponent(patternId)}${query}`);
+}
+
+export async function fetchBenchmarkCommentInsights(options = {}) {
+  const params = new URLSearchParams();
+  if (options.genre) params.set("genre", options.genre);
+  if (options.authorId) params.set("author_id", options.authorId);
+  if (options.patternId) params.set("pattern_id", options.patternId);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return getJson(`/api/benchmark/comments/insights${query}`);
+}
+
+export function updateBenchmarkPattern(patternId, values) {
+  return fetch(`${API_BASE}/api/benchmark/patterns/${encodeURIComponent(patternId)}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(values),
+  }).then(async (response) => {
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(JSON.stringify(data?.detail || data, null, 2));
+    }
+    return data;
+  });
+}
+
+export function fetchBenchmarkMetricConfig() {
+  return getJson("/api/benchmark/metric-config");
+}
+
+export function updateBenchmarkMetricConfig(publicEngagementWeights, options = {}) {
+  return fetch(`${API_BASE}/api/benchmark/metric-config`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      public_engagement_weights: publicEngagementWeights,
+      reindex: options.reindex !== false,
+    }),
+  }).then(async (response) => {
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(JSON.stringify(data?.detail || data, null, 2));
+    }
+    return data;
+  });
+}
+
+export function reindexBenchmark(mode = "incremental") {
+  return postJson("/api/benchmark/reindex", { mode });
 }
 
 export function fetchDouyinUserVideos({ userUrl, secUserId, maxItems, pageSize, maxCursor }) {
@@ -446,6 +568,18 @@ export function createTextToAssetsJob(payload) {
     title: payload.title || undefined,
     provider: payload.provider || undefined,
   });
+}
+
+export function retryAiPromptReverseJob(taskId) {
+  return postJson(`/api/tools/ai-prompt-reverse/jobs/${encodeURIComponent(taskId)}/retry`, {});
+}
+
+export function retryAiProductionReverseJob(taskId) {
+  return postJson(`/api/tools/ai-production-reverse/jobs/${encodeURIComponent(taskId)}/retry`, {});
+}
+
+export function retryTextToAssetsJob(taskId) {
+  return postJson(`/api/tools/text-to-assets/jobs/${encodeURIComponent(taskId)}/retry`, {});
 }
 
 export async function fetchTasks(taskType, options = {}) {

@@ -11,6 +11,7 @@ from .routes.ai_provider_config import router as ai_provider_router
 from .routes.ai_production_reverse import router as ai_production_reverse_router
 from .routes.ai_video_analysis import router as ai_video_analysis_router
 from .routes.ai_prompt_reverse import router as ai_prompt_reverse_router
+from .routes.benchmark import router as benchmark_router
 from .routes.douyin import router as douyin_router
 from .routes.jianying import router as jianying_router
 from .routes.jianying_editor_sdk import router as jianying_editor_sdk_router
@@ -29,7 +30,16 @@ app = FastAPI(title="Personal Ops Workbench API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=[
+        "http://127.0.0.1:4173",
+        "http://localhost:4173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:5174",
+        "http://localhost:5174",
+        "http://127.0.0.1:5175",
+        "http://localhost:5175",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,6 +78,7 @@ app.include_router(ai_provider_router)
 app.include_router(ai_video_analysis_router)
 app.include_router(ai_prompt_reverse_router)
 app.include_router(ai_production_reverse_router)
+app.include_router(benchmark_router)
 app.include_router(tasks_router)
 app.include_router(video_script_router)
 app.include_router(text_to_assets_router)

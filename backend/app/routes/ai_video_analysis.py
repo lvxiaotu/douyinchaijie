@@ -856,7 +856,7 @@ def retry_job(task_id: str) -> dict[str, Any]:
             video=video,
             provider=task.get("provider") or active_ai_provider(adapter().provider),
         )
-    update_task(task_id, status="pending", progress=0, message="已重新加入 AI 视频拆解队列", error=None)
+    update_task(task_id, status="pending", progress=0, message="已重新加入 AI 视频拆解队列", result_json=None, error=None)
     return {"status": "ok", "job": job, "queue": queue_stats(task_id=task_id)}
 
 
@@ -867,10 +867,6 @@ def retry_job_comments(task_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Task not found")
     if task.get("type") != "ai_video_analysis":
         raise HTTPException(status_code=400, detail="Only AI video analysis tasks can retry comments here")
-
-    job = get_ai_video_job(task_id)
-    if job and job.get("status") in {"running", "claimed"}:
-        raise HTTPException(status_code=409, detail="AI video task is still running. Wait for the current run to finish before retrying comments.")
 
     def report(progress: int, message: str) -> None:
         update_task(task_id, progress=max(int(task.get("progress") or 0), progress), message=message)

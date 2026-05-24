@@ -12,7 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.app.ai_provider_state import active_ai_provider
-from backend.app.task_store import create_task, update_task
+from backend.app.task_store import create_task, get_task, update_task
 from integrations.video_pipeline.script_generator import VideoScriptGenerator
 
 from .douyin import read_env_map, write_env_values
@@ -1576,3 +1576,31 @@ def create_text_to_assets_job(payload: TextToAssetsRequest, background_tasks: Ba
                 "hint": "Check AI provider config for Text-to-Assets.",
             },
         ) from exc
+
+
+@router.post("/jobs/{task_id}/retry")
+def retry_text_to_assets_job(task_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.get("type") != "text_to_assets":
+        raise HTTPException(status_code=400, detail="Only Text-to-Assets tasks can be retried here")
+    if task.get("status") not in {"failed", "error"}:
+        raise HTTPException(status_code=409, detail="Only failed Text-to-Assets tasks can be retried")
+
+    payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+    try:
+        retry_payload = TextToAssetsRequest(**payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Retry requires the original Text-to-Assets payload: {exc}") from exc
+
+    retried = update_task(
+        task_id,
+        status="pending",
+        progress=0,
+        message="已重新加入一句话转素材队列",
+        result_json=None,
+        error=None,
+    )
+    background_tasks.add_task(run_text_to_assets_task, task_id, retry_payload)
+    return {"status": "ok", "task": retried}

@@ -229,7 +229,11 @@ export function formatTimestamp(value) {
 }
 
 export function videoTitle(video) {
-  return video?.desc || video?.title || video?.aweme_id || video?.id || "未命名视频";
+  for (const value of [video?.desc, video?.title, video?.aweme_id, video?.id]) {
+    const text = String(value || "").trim();
+    if (text) return text;
+  }
+  return "未命名视频";
 }
 
 export function parseJsonString(value) {
@@ -650,7 +654,7 @@ export function normalizeAnalysisTask(task, normalizeResult = normalizeCommercia
   return {
     ...task,
     id: task.id,
-    title: task.title || videoTitle(task.payload?.video || {}),
+    title: String(task.title || "").trim() || videoTitle(task.payload?.video || {}),
     status: task.status === "failed" ? "error" : task.status,
     progress: task.progress || 0,
     updated: updated.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
@@ -747,11 +751,21 @@ export function archiveIdSet(archives) {
   return new Set(archives.map((item) => item.task_id || item.id).filter(Boolean));
 }
 
+export function hasCommentCollectionFailure(task) {
+  return task?.commentCollection?.status === "failed";
+}
+
 export function groupTasksByStatus(tasks) {
+  const isError = (task) =>
+    ["error", "failed", "failed_final"].includes(task.status) || hasCommentCollectionFailure(task);
+
   return {
-    running: tasks.filter((task) => ["pending", "running", "claimed", "queued", "retry_waiting", "stale_requeued"].includes(task.status)),
-    done: tasks.filter((task) => task.status === "done"),
-    error: tasks.filter((task) => ["error", "failed", "failed_final"].includes(task.status)),
+    pending: tasks.filter(
+      (task) => !isError(task) && ["pending", "queued", "retry_waiting", "stale_requeued"].includes(task.status),
+    ),
+    running: tasks.filter((task) => !isError(task) && ["running", "claimed"].includes(task.status)),
+    done: tasks.filter((task) => !isError(task) && task.status === "done"),
+    error: tasks.filter(isError),
   };
 }
 
@@ -760,7 +774,7 @@ export function preferredTaskStatus(groups, currentStatus) {
     return currentStatus;
   }
   const fallback = taskBoardStatuses.find(([key]) => (groups[key] || []).length > 0);
-  return fallback?.[0] || "running";
+  return fallback?.[0] || "pending";
 }
 
 export function archivePresentation(item) {

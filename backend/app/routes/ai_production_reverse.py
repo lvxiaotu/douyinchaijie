@@ -161,6 +161,32 @@ def create_production_reverse_job(payload: ProductionReverseRequest, background_
         ) from exc
 
 
+@router.post("/jobs/{task_id}/retry")
+def retry_production_reverse_job(task_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.get("type") != "ai_production_reverse":
+        raise HTTPException(status_code=400, detail="Only AI production reverse tasks can be retried here")
+    if task.get("status") not in {"failed", "error"}:
+        raise HTTPException(status_code=409, detail="Only failed AI production reverse tasks can be retried")
+
+    video = (task.get("payload") or {}).get("video") or {}
+    if not video:
+        raise HTTPException(status_code=400, detail="Retry requires the original video payload")
+
+    retried = update_task(
+        task_id,
+        status="pending",
+        progress=0,
+        message="已重新加入制作方式反推队列",
+        result_json=None,
+        error=None,
+    )
+    background_tasks.add_task(run_production_reverse_task, task_id, video, task.get("provider") or None)
+    return {"status": "ok", "task": retried}
+
+
 @router.get("/archives")
 def archives(
     limit: int = 100,

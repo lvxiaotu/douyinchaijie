@@ -10,7 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.app.postgres_store import ensure_columns, pg_connection, run_once
-from backend.app.task_store import get_task_summary, load_json
+from backend.app.task_store import get_task_summary, load_json, update_task
 from backend.app.video_task_limiter import video_task_concurrency_limit
 
 ACTIVE_STATUSES = {"claimed", "running"}
@@ -556,6 +556,7 @@ def active_job_count(connection: Any | None = None) -> int:
 
 def claim_next_ai_video_job(worker_id: str) -> dict[str, Any] | None:
     init_ai_video_queue_db()
+    requeue_stale_ai_video_jobs()
     now = now_ts()
     limit = video_task_concurrency_limit()
     with queue_connection() as connection:
@@ -819,7 +820,7 @@ def requeue_stale_ai_video_jobs(stale_seconds: int | None = None) -> int:
     cutoff = now_ts() - max(60, stale_after)
     now = now_ts()
     with queue_connection() as connection:
-        cursor = connection.execute(
+        rows = connection.execute(
             """
             UPDATE ai_video_jobs
             SET status = 'stale_requeued',
@@ -835,10 +836,20 @@ def requeue_stale_ai_video_jobs(stale_seconds: int | None = None) -> int:
               AND (heartbeat_at IS NULL OR heartbeat_at < %s)
               AND cancel_requested = false
               AND deleted_at IS NULL
+            RETURNING task_id, progress
             """,
             (now, cutoff),
-        )
-    return int(cursor.rowcount or 0)
+        ).fetchall()
+    for row in rows:
+        task = get_task_summary(str(row["task_id"]))
+        if task and task.get("status") == "running":
+            update_task(
+                str(row["task_id"]),
+                status="pending",
+                progress=min(99, int(row["progress"] or task.get("progress") or 0)),
+                message="AI 视频拆解 worker 心跳超时，任务已重新排队",
+            )
+    return len(rows)
 
 
 def queue_position(task_id: str) -> int | None:
