@@ -97,6 +97,9 @@ data/runtime/error/<namespace>/<YYYYMMDD>/*.json
 ├─ backend/app/                     FastAPI 后端
 ├─ integrations/                    第三方工具与业务适配层
 │  ├─ douyin_download_api/          抖音下载服务适配器
+│  ├─ douyin_legacy_tikhub/         老 TikHub 抖音接口显式别名
+│  ├─ douyin_spider_provider/       新 Douyin_Spider 抖音接口与 sidecar
+│  ├─ douyin_provider/              抖音接口聚合层与 fallback
 │  ├─ ai_video_analysis/            AI 视频拆解
 │  ├─ ai_prompt_reverse/            AI 提示词反推
 │  ├─ jianying_draft/               剪映草稿生成
@@ -119,7 +122,7 @@ data/runtime/error/<namespace>/<YYYYMMDD>/*.json
 1. 启动后端
 2. 启动前端
 
-如果你要使用抖音采集能力，还需要额外启动上游 `Douyin_TikTok_Download_API` 服务。
+如果你要使用新的 `Douyin_Spider` 抖音采集接口，还需要额外启动 `8131` sidecar。旧的 `Douyin_TikTok_Download_API` 是 `8123` 服务，只在仍使用旧下载适配层时需要。
 
 ### 1. 安装依赖
 
@@ -189,7 +192,8 @@ python scripts/migrate_sqlite_to_postgres.py --bootstrap --truncate --verify
 说明：
 
 - `.env` 不应提交到 Git。
-- 抖音采集依赖 `DY_COOKIES` 和上游下载服务。
+- 新 `Douyin_Spider` 抖音采集依赖 `DY_COOKIES` 和本地 `8131` sidecar。
+- 旧 `Douyin_TikTok_Download_API` 下载适配层才依赖 `DOUYIN_DOWNLOAD_API_BASE=http://127.0.0.1:8123`。
 - 抖音可替换接口通过 `DOUYIN_PROVIDER_MODE=tikhub|spider_first|spider` 切换；搜索固定保留 TikHub。
 - 新 `Douyin_Spider` 默认通过 sidecar 隔离运行。启动命令：`python -m uvicorn integrations.douyin_spider_provider.sidecar_server:app --host 127.0.0.1 --port 8131`。
 - AI 相关工具优先读取通用 `AI_*` 配置。
@@ -221,9 +225,58 @@ npm run dev
 http://127.0.0.1:5173
 ```
 
-### 5. 可选：启动抖音上游服务
+### 5. 可选：启动 Douyin_Spider 新接口 sidecar
 
-如果你要调用抖音相关接口，请单独启动上游项目：
+当 `DOUYIN_PROVIDER_MODE=spider` 或 `DOUYIN_PROVIDER_MODE=spider_first` 时，建议先启动新接口 sidecar：
+
+```powershell
+.\.venv\Scripts\activate
+python -m uvicorn integrations.douyin_spider_provider.sidecar_server:app --host 127.0.0.1 --port 8131
+```
+
+验证 sidecar 进程：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8131/health
+Invoke-RestMethod http://127.0.0.1:8131/status
+```
+
+验证主后端能调用新接口：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8010/api/integrations/douyin-spider/status
+Invoke-RestMethod http://127.0.0.1:8010/api/integrations/douyin-provider/status
+```
+
+启动关系：
+
+```text
+前端 5173 -> 主后端 8010 -> Douyin_Spider sidecar 8131
+```
+
+`8131` 不直接给前端调用，只给主后端隔离运行 `Douyin_Spider`。如果要完全避免 TikHub 消耗，使用 `DOUYIN_PROVIDER_MODE=spider`；如果要更稳妥地先试新接口，使用 `DOUYIN_PROVIDER_MODE=spider_first`。
+
+最小接口测试：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8010/api/integrations/douyin-provider/one-video `
+  -ContentType "application/json" `
+  -Body '{"aweme_id":"这里替换成真实 aweme_id"}'
+```
+
+如果 `8131` 端口被占用，确认是本项目遗留进程后可停止：
+
+```powershell
+Get-NetTCPConnection -LocalPort 8131 -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  ForEach-Object { Stop-Process -Id $_ -Force }
+```
+
+### 6. 可选：启动旧抖音下载上游服务
+
+如果你仍要调用 `DOUYIN_DOWNLOAD_API_BASE` 对应的旧下载适配层，请单独启动旧上游项目：
 
 ```powershell
 cd integrations\douyin_download_api\vendor\Douyin_TikTok_Download_API
@@ -242,6 +295,7 @@ http://127.0.0.1:8123/docs
 ```text
 5173  前端 Vite
 8010  主后端 FastAPI
+8131  Douyin_Spider 新接口 sidecar
 8123  Douyin_TikTok_Download_API
 ```
 
@@ -269,6 +323,36 @@ POST /api/integrations/douyin/favorites/items
 POST /api/integrations/douyin/favorites/download
 GET  /api/integrations/douyin/media-proxy
 ```
+
+抖音新旧接口显式分层：
+
+```text
+GET  /api/integrations/douyin-provider/status
+GET  /api/integrations/douyin-provider/metrics
+POST /api/integrations/douyin-provider/one-video
+POST /api/integrations/douyin-provider/user-profile
+POST /api/integrations/douyin-provider/user-videos
+POST /api/integrations/douyin-provider/work-detail
+POST /api/integrations/douyin-provider/video-comments
+POST /api/integrations/douyin-provider/video-comment-replies
+POST /api/integrations/douyin-provider/favorites/items
+POST /api/integrations/douyin-provider/favorites/download
+
+GET  /api/integrations/douyin-spider/status
+POST /api/integrations/douyin-spider/one-video
+POST /api/integrations/douyin-spider/user-profile
+POST /api/integrations/douyin-spider/user-videos
+POST /api/integrations/douyin-spider/work-detail
+POST /api/integrations/douyin-spider/video-comments
+POST /api/integrations/douyin-spider/video-comment-replies
+POST /api/integrations/douyin-spider/favorites/items
+POST /api/integrations/douyin-spider/favorites/download
+
+GET  /api/integrations/douyin-legacy-tikhub/status
+POST /api/integrations/douyin-legacy-tikhub/user-search
+```
+
+`/api/integrations/douyin/*` 是兼容入口，当前也接入聚合层；新开发优先看 `/api/integrations/douyin-provider/*`，调试新接口时使用 `/api/integrations/douyin-spider/*`。
 
 ### 抖音对标与 AI 拆解
 

@@ -94,6 +94,7 @@ export function normalizeDouyinVideoItem(item) {
     author,
     cover,
     videoUrl,
+    awemeId: item?.aweme_id || item?.id || source?.aweme_id || source?.id || "",
     images: Array.isArray(source?.images) ? source.images : [],
     desc: item?.desc || source?.desc || item?.title || source?.title || "",
     shareUrl: source?.share_info?.share_url || item?.share_url || source?.share_url || "",

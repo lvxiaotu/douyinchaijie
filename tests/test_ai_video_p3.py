@@ -392,7 +392,7 @@ class AiVideoP3Tests(unittest.TestCase):
         with patch(
             "integrations.ai_video_analysis.evidence_pipeline.get_with_retries",
             return_value=BrokenDownloadResponse(status_code=200, content=b"ignored"),
-        ):
+        ), patch.object(pipeline, "refresh_douyin_video_urls", return_value=[]):
             with self.assertRaisesRegex(TimeoutError, "stalled stream"):
                 pipeline.resolve_video_file(
                     {"aweme_id": "aweme-stalled", "source_video_url": "https://example.test/stalled.mp4"},
@@ -401,6 +401,32 @@ class AiVideoP3Tests(unittest.TestCase):
 
         self.assertFalse(target.exists())
         self.assertFalse(target.with_name(f"{target.name}.part").exists())
+
+    def test_evidence_switches_candidate_after_stream_timeout(self):
+        root = Path(self.tmp.name)
+        evidence_dir = root / "evidence" / "job-stream-timeout"
+        evidence_dir.mkdir(parents=True)
+        pipeline = VideoEvidencePipeline(output_dir=root)
+        calls = []
+
+        def fake_download(url, **_kwargs):
+            calls.append(url)
+            if url == "https://slow.example/video.mp4":
+                return BrokenDownloadResponse(status_code=200, content=b"ignored")
+            return FakeDownloadResponse(status_code=200, content=b"fresh-video")
+
+        with patch("integrations.ai_video_analysis.evidence_pipeline.get_with_retries", side_effect=fake_download):
+            path = pipeline.resolve_video_file(
+                {
+                    "aweme_id": "aweme-stream-timeout",
+                    "play_url": "https://slow.example/video.mp4",
+                    "download_url": "https://fresh.example/video.mp4",
+                },
+                evidence_dir=evidence_dir,
+            )
+
+        self.assertEqual(path.read_bytes(), b"fresh-video")
+        self.assertEqual(calls, ["https://slow.example/video.mp4", "https://fresh.example/video.mp4"])
 
     def test_ffmpeg_command_stops_when_cancel_requested(self):
         pipeline = VideoEvidencePipeline(output_dir=Path(self.tmp.name))

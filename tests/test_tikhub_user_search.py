@@ -474,8 +474,10 @@ class TikhubUserSearchTests(unittest.TestCase):
         request_json.assert_called_once()
         spec = request_json.call_args.args[0]
         self.assertEqual(spec.path, DEFAULT_ONE_VIDEO_PATH)
-        self.assertEqual(result["video"]["download_url"], "https://fresh.example/download.mp4")
-        self.assertEqual(store.get_target_video("refresh-one-video")["download_url"], "https://fresh.example/download.mp4")
+        self.assertEqual(result["video"]["download_url"], "https://fresh.example/play.mp4")
+        self.assertEqual(result["video"]["source_video_url"], "https://fresh.example/play.mp4")
+        self.assertEqual(result["download_urls"]["download_addr"], "https://fresh.example/download.mp4")
+        self.assertEqual(store.get_target_video("refresh-one-video")["download_url"], "https://fresh.example/play.mp4")
 
     def test_favorites_use_tikhub_collection_endpoint(self):
         seen = []
@@ -511,7 +513,8 @@ class TikhubUserSearchTests(unittest.TestCase):
 
         self.assertEqual(result["endpoint"], DEFAULT_USER_COLLECTION_VIDEOS_PATH)
         self.assertEqual(result["items"][0]["aweme_id"], "fav-1")
-        self.assertEqual(result["items"][0]["download_url"], "https://example.test/download.mp4")
+        self.assertEqual(result["items"][0]["download_url"], "https://example.test/play.mp4")
+        self.assertEqual(result["items"][0]["download_urls"]["download_addr"], "https://example.test/download.mp4")
         self.assertEqual(len(seen), 1)
 
     def test_download_favorites_downloads_media_urls_locally(self):
@@ -561,6 +564,45 @@ class TikhubUserSearchTests(unittest.TestCase):
         self.assertTrue(saved_path.exists())
         self.assertEqual(saved_path.read_bytes(), b"video-bytes")
         self.assertEqual(result["skipped"], [])
+
+    def test_downloadable_video_urls_prefer_play_candidates_before_download_addr(self):
+        adapter = TikhubDouyinApiAdapter({"api_key": "test"})
+        item = adapter._normalize_video(
+            {
+                "aweme_id": "fav-candidates-1",
+                "video": {
+                    "play_addr": {"url_list": ["https://play.example.test/video.mp4"]},
+                    "play_addr_h264": {"url_list": ["https://h264.example.test/video.mp4"]},
+                    "play_addr_bytevc1": {"url_list": ["https://bytevc1.example.test/video.mp4"]},
+                    "download_addr": {"url_list": ["https://download.example.test/video.mp4"]},
+                },
+            }
+        )
+
+        urls = adapter._downloadable_video_urls(item)
+
+        self.assertEqual(item["source_video_url"], "https://play.example.test/video.mp4")
+        self.assertEqual(item["download_url"], "https://play.example.test/video.mp4")
+        self.assertEqual(urls[:4], [
+            "https://play.example.test/video.mp4",
+            "https://h264.example.test/video.mp4",
+            "https://bytevc1.example.test/video.mp4",
+            "https://download.example.test/video.mp4",
+        ])
+
+    def test_download_media_urls_switches_candidates_after_403(self):
+        adapter = TikhubDouyinApiAdapter({"api_key": "test"})
+
+        with patch.object(adapter, "_download_media_url", side_effect=[RuntimeError("403"), "saved.mp4"]) as download:
+            path, used_url = adapter._download_media_urls(
+                ["https://stale.example.test/video.mp4", "https://fresh.example.test/video.mp4"],
+                "fav-switch-1",
+                item={"aweme_id": "fav-switch-1"},
+            )
+
+        self.assertEqual(path, "saved.mp4")
+        self.assertEqual(used_url, "https://fresh.example.test/video.mp4")
+        self.assertEqual(download.call_count, 2)
 
     def test_url_id_helpers_use_tikhub_web_endpoints(self):
         def fake_request(adapter, spec):

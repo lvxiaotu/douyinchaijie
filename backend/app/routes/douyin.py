@@ -382,10 +382,12 @@ def media_proxy(
     request: Request,
     url: str = Query(...),
     referer: str | None = Query(default=None),
+    aweme_id: str | None = Query(default=None),
 ):
     return proxy_remote_media(
         url=url,
         referer=referer,
+        aweme_id=aweme_id,
         request=request,
         namespace="douyin-media-proxy",
         default_referer="https://www.douyin.com/",

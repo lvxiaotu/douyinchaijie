@@ -20,7 +20,6 @@ from integrations.ai_video_analysis.model_gateway import (
     normalized_usage,
     resolve_ai_video_provider_route,
 )
-from integrations.ai_video_analysis.http_policy import default_max_retries, default_timeout_seconds, get_with_retries
 from integrations.ai_video_analysis.prompt_builder import (
     DEFAULT_ANALYSIS_PROMPT,
     analysis_prompt as build_analysis_prompt,
@@ -673,10 +672,6 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
             if value and Path(value).exists():
                 return Path(value)
 
-        url = video.get("source_video_url") or video.get("video_url")
-        if not url:
-            raise RuntimeError("No local video file or source_video_url found for Gemini upload.")
-
         media_dir = self.output_dir / "media"
         media_dir.mkdir(parents=True, exist_ok=True)
         aweme_id = str(video.get("aweme_id") or video.get("id") or int(time.time()))
@@ -684,28 +679,14 @@ class AiVideoAnalysisAdapter(IntegrationAdapter):
         if target.exists() and target.stat().st_size > 0:
             return target
 
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            "Referer": (video.get("share_info") or {}).get("share_url") or "https://www.douyin.com/",
-            "Accept": "*/*",
-        }
-        response = get_with_retries(
-            url,
-            headers=headers,
-            stream=True,
-            timeout=default_timeout_seconds("download"),
-            max_retries=default_max_retries("download"),
-            cancel_check=lambda: self._check_cancelled(str(video.get("task_id") or video.get("job_id") or "")) if (video.get("task_id") or video.get("job_id")) else None,
-        )
-        response.raise_for_status()
-        with target.open("wb") as file:
-            for chunk in response.iter_content(chunk_size=1024 * 512):
-                if chunk:
-                    file.write(chunk)
+        helper = VideoEvidencePipeline(output_dir=self.output_dir)
+        task_id = str(video.get("task_id") or video.get("job_id") or "")
+        if task_id:
+            helper.cancel_check = lambda: self._check_cancelled(task_id)
+        urls = helper.video_url_candidates(video)
+        if not urls:
+            raise RuntimeError("No local video file or source_video_url found for Gemini upload.")
+        helper.download_video_file(video, urls, target, headers=helper.video_download_headers(video))
         return target
 
     def _analysis_prompt(self, video: dict[str, Any]) -> str:

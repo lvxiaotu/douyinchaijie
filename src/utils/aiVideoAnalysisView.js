@@ -70,10 +70,12 @@ export function firstNumberValue(...values) {
   return fallback;
 }
 
-export function proxiedDouyinMediaUrl(url) {
+export function proxiedDouyinMediaUrl(url, options = {}) {
   if (!url) return "";
   if (/^\/api\//.test(url) || url.startsWith("blob:") || url.startsWith("data:")) return url;
-  return `/api/media/proxy?url=${encodeURIComponent(url)}&referer=${encodeURIComponent("https://www.douyin.com/")}`;
+  const awemeId = options.awemeId || "";
+  const referer = options.referer || (awemeId ? `https://www.douyin.com/video/${awemeId}` : "https://www.douyin.com/");
+  return `/api/media/proxy?url=${encodeURIComponent(url)}&referer=${encodeURIComponent(referer)}&aweme_id=${encodeURIComponent(awemeId)}`;
 }
 
 export function resolveSourceVideoUrl(task, evidenceDataset) {
@@ -81,19 +83,20 @@ export function resolveSourceVideoUrl(task, evidenceDataset) {
   if (mediaUrl) return mediaUrl;
   const video = task?.video || task?.payload?.video || task?.raw?.video || {};
   const nestedVideo = video?.video || video?.video_data || {};
+  const awemeId = firstTextValue(video.aweme_id, video.id, nestedVideo.aweme_id, nestedVideo.id);
   const sourceUrl = firstUrlValue(
-    video.source_video_url,
-    video.video_url,
-    video.download_url,
     video.play_url,
+    video.video_url,
     video.nwm_video_url_HQ,
     video.wm_video_url_HQ,
     nestedVideo.play_addr,
-    nestedVideo.download_addr,
     nestedVideo.nwm_video_url_HQ,
     nestedVideo.wm_video_url_HQ,
+    video.source_video_url,
+    video.download_url,
+    nestedVideo.download_addr,
   );
-  return proxiedDouyinMediaUrl(sourceUrl);
+  return proxiedDouyinMediaUrl(sourceUrl, { awemeId, referer: video.share_url || video.work_url });
 }
 
 export function resolvePosterUrl(task) {

@@ -12,6 +12,9 @@ import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+import requests
 
 from integrations.ai_video_analysis.audio_publication import configured_publisher_mode, tos_config_status
 from integrations.ai_video_analysis.http_policy import default_max_retries, env_float, env_int, get_with_retries
@@ -296,18 +299,59 @@ class VideoEvidencePipeline:
 
         if progress:
             progress(14, "开始下载视频到证据包目录")
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            "Referer": (video.get("share_info") or {}).get("share_url") or "https://www.douyin.com/",
-            "Accept": "*/*",
-        }
-        response = self.download_video_response(video, urls, headers=headers, progress=progress)
-        self.write_video_response(response, target, progress=progress)
+        headers = self.video_download_headers(video)
+        self.download_video_file(video, urls, target, headers=headers, progress=progress)
         return target
+
+    def download_video_file(
+        self,
+        video: dict[str, Any],
+        urls: list[str],
+        target: Path,
+        *,
+        headers: dict[str, str],
+        progress: Callable[[int, str], None] | None = None,
+    ) -> None:
+        attempted: set[str] = set()
+        refreshed = False
+        candidate_urls = urls
+        last_error: Exception | None = None
+        while True:
+            response = self.try_video_urls(video, candidate_urls, headers=headers, attempted=attempted)
+            if response is None:
+                if not refreshed:
+                    refreshed = True
+                    if progress:
+                        progress(14, "视频下载地址不可用，正在重新获取抖音下载地址。")
+                    candidate_urls = self.refresh_douyin_video_urls(video)
+                    if candidate_urls:
+                        continue
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("没有可下载的视频地址。")
+
+            if getattr(response, "status_code", 0) in VIDEO_URL_REFRESH_STATUS_CODES:
+                self.close_response(response)
+                if not refreshed:
+                    refreshed = True
+                    if progress:
+                        progress(14, "视频直链失效，正在重新获取抖音下载地址。")
+                    candidate_urls = self.refresh_douyin_video_urls(video)
+                    if candidate_urls:
+                        continue
+                response.raise_for_status()
+
+            try:
+                response.raise_for_status()
+                self.write_video_response(response, target, progress=progress)
+                return
+            except Exception as exc:
+                last_error = exc
+                self.close_response(response)
+                if not self.should_retry_video_download_error(exc):
+                    raise
+                if progress:
+                    progress(14, "视频下载流超时或中断，正在切换备用地址。")
 
     def write_video_response(
         self,
@@ -351,26 +395,68 @@ class VideoEvidencePipeline:
             self.close_response(response)
 
     def video_url_candidates(self, video: dict[str, Any]) -> list[str]:
+        raw = video.get("raw") if isinstance(video.get("raw"), dict) else {}
+        raw_video = raw.get("video") if isinstance(raw.get("video"), dict) else {}
+        normalized_video = video.get("video") if isinstance(video.get("video"), dict) else {}
+        download_urls = video.get("download_urls") if isinstance(video.get("download_urls"), dict) else {}
         return self.unique_video_urls(
             [
+                video.get("play_url"),
+                video.get("video_url"),
+                download_urls.get("play_addr"),
+                download_urls.get("play_addr_h264"),
+                download_urls.get("play_addr_bytevc1"),
+                normalized_video.get("play_addr"),
+                normalized_video.get("play_addr_h264"),
+                normalized_video.get("play_addr_bytevc1"),
+                raw_video.get("play_addr"),
+                raw_video.get("play_addr_h264"),
+                raw_video.get("play_addr_bytevc1"),
                 video.get("source_video_url"),
                 video.get("download_url"),
-                video.get("video_url"),
-                video.get("play_url"),
+                download_urls.get("download_addr"),
+                normalized_video.get("download_addr"),
+                raw_video.get("download_addr"),
             ]
         )
 
-    @staticmethod
-    def unique_video_urls(values: list[Any]) -> list[str]:
+    @classmethod
+    def unique_video_urls(cls, values: list[Any]) -> list[str]:
         urls: list[str] = []
         seen: set[str] = set()
         for value in values:
-            url = str(value or "").strip()
-            if not url or url in seen:
-                continue
-            urls.append(url)
-            seen.add(url)
+            for url in cls.iter_video_url_values(value):
+                if url in seen:
+                    continue
+                urls.append(url)
+                seen.add(url)
         return urls
+
+    @classmethod
+    def iter_video_url_values(cls, value: Any):
+        if isinstance(value, str):
+            url = value.strip()
+            if url.startswith(("http://", "https://")):
+                yield url
+            return
+        if isinstance(value, dict):
+            for key in (
+                "url_list",
+                "url_list_1",
+                "urls",
+                "url",
+                "download_url",
+                "play_url",
+                "source_video_url",
+                "main_url",
+                "backup_url",
+            ):
+                if key in value:
+                    yield from cls.iter_video_url_values(value.get(key))
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                yield from cls.iter_video_url_values(item)
 
     def download_video_response(
         self,
@@ -381,7 +467,7 @@ class VideoEvidencePipeline:
         progress: Callable[[int, str], None] | None = None,
     ):
         attempted: set[str] = set()
-        failed_response = self.try_video_urls(urls, headers=headers, attempted=attempted)
+        failed_response = self.try_video_urls(video, urls, headers=headers, attempted=attempted)
         if failed_response is None:
             raise RuntimeError("没有可下载的视频地址。")
         if getattr(failed_response, "status_code", 0) not in VIDEO_URL_REFRESH_STATUS_CODES:
@@ -391,7 +477,7 @@ class VideoEvidencePipeline:
         if progress:
             progress(14, "视频直链失效，正在重新获取抖音下载地址。")
         refreshed_urls = self.refresh_douyin_video_urls(video)
-        refreshed_response = self.try_video_urls(refreshed_urls, headers=headers, attempted=attempted)
+        refreshed_response = self.try_video_urls(video, refreshed_urls, headers=headers, attempted=attempted)
         if refreshed_response is not None and getattr(refreshed_response, "status_code", 0) not in VIDEO_URL_REFRESH_STATUS_CODES:
             self.close_response(failed_response)
             refreshed_response.raise_for_status()
@@ -402,25 +488,32 @@ class VideoEvidencePipeline:
         failed_response.raise_for_status()
         return failed_response
 
-    def try_video_urls(self, urls: list[str], *, headers: dict[str, str], attempted: set[str]):
+    def try_video_urls(self, video: dict[str, Any], urls: list[str], *, headers: dict[str, str], attempted: set[str]):
         last_response = None
+        last_error: Exception | None = None
         for url in urls:
             if url in attempted:
                 continue
             attempted.add(url)
-            response = get_with_retries(
-                url,
-                headers=headers,
-                stream=True,
-                timeout=self.video_download_timeout(),
-                max_retries=default_max_retries("download"),
-                cancel_check=self.check_cancelled,
-            )
+            try:
+                response = get_with_retries(
+                    url,
+                    headers=self.video_download_headers(video, url=url, base=headers),
+                    stream=True,
+                    timeout=self.video_download_timeout(),
+                    max_retries=default_max_retries("download"),
+                    cancel_check=self.check_cancelled,
+                )
+            except Exception as exc:
+                last_error = exc
+                continue
             if getattr(response, "status_code", 0) not in VIDEO_URL_REFRESH_STATUS_CODES:
                 self.close_response(last_response)
                 return response
             self.close_response(last_response)
             last_response = response
+        if last_response is None and last_error is not None:
+            raise last_error
         return last_response
 
     def refresh_douyin_video_urls(self, video: dict[str, Any]) -> list[str]:
@@ -444,16 +537,103 @@ class VideoEvidencePipeline:
         download_urls = refreshed.get("download_urls") if isinstance(refreshed.get("download_urls"), dict) else {}
         return self.unique_video_urls(
             [
-                download_urls.get("download_addr"),
-                refreshed_video.get("download_url"),
-                refreshed_video.get("source_video_url"),
                 download_urls.get("play_addr"),
                 download_urls.get("play_addr_h264"),
-                refreshed_video.get("play_url"),
                 download_urls.get("play_addr_bytevc1"),
+                refreshed_video.get("play_url"),
                 refreshed_video.get("video_url"),
+                refreshed_video.get("source_video_url"),
+                refreshed_video.get("download_url"),
+                download_urls.get("download_addr"),
             ]
         )
+
+    def video_download_headers(
+        self,
+        video: dict[str, Any],
+        *,
+        url: str | None = None,
+        base: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        headers = dict(base or {})
+        referer = self.video_referer(video)
+        headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/132.0.0.0 Safari/537.36"
+                ),
+                "Referer": referer,
+                "Origin": "https://www.douyin.com",
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Sec-Fetch-Dest": "video",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Site": "cross-site",
+                "Connection": "keep-alive",
+            }
+        )
+        range_header = os.getenv("AI_VIDEO_DOWNLOAD_RANGE_HEADER", "bytes=0-").strip()
+        if range_header:
+            headers["Range"] = range_header
+        cookie = self.video_download_cookie(url)
+        if cookie:
+            headers["Cookie"] = cookie
+        return headers
+
+    @staticmethod
+    def video_referer(video: dict[str, Any]) -> str:
+        share_info = video.get("share_info") if isinstance(video.get("share_info"), dict) else {}
+        referer = str(
+            share_info.get("share_url")
+            or video.get("share_url")
+            or video.get("work_url")
+            or ""
+        ).strip()
+        if referer:
+            return referer
+        aweme_id = str(video.get("aweme_id") or video.get("id") or "").strip()
+        if aweme_id:
+            return f"https://www.douyin.com/video/{aweme_id}"
+        return "https://www.douyin.com/"
+
+    @staticmethod
+    def video_download_cookie(url: str | None = None) -> str:
+        include_cookie = os.getenv("AI_VIDEO_DOWNLOAD_INCLUDE_DOUYIN_COOKIE", "true").strip().lower()
+        if include_cookie in {"0", "false", "no"}:
+            return ""
+        if url:
+            host = urlparse(url).hostname or ""
+            if not any(marker in host for marker in ("douyin", "zjcdn", "byte", "bytedance", "snssdk")):
+                return ""
+        for name in ("DY_COOKIES", "DOUYIN_SPIDER_COOKIE", "TIKHUB_DOUYIN_WEB_COOKIE", "DOUYIN_WEB_COOKIE"):
+            cookie = str(os.getenv(name) or "").strip().strip('"').strip("'")
+            if cookie:
+                return cookie.replace("\\n", "").replace("\\r", "").replace("\r", "").replace("\n", "").strip()
+        return ""
+
+    @staticmethod
+    def should_retry_video_download_error(exc: Exception) -> bool:
+        if exc.__class__.__name__ == "AiVideoTaskCancelled":
+            return False
+        if isinstance(exc, (TimeoutError, requests.RequestException)):
+            return True
+        if isinstance(exc, RuntimeError):
+            message = str(exc).lower()
+            return any(
+                marker in message
+                for marker in (
+                    "download",
+                    "content",
+                    "stream",
+                    "stalled",
+                    "timed out",
+                    "timeout",
+                    "文件内容",
+                )
+            )
+        return False
 
     @staticmethod
     def close_response(response: Any) -> None:

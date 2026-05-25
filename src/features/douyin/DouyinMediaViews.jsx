@@ -37,11 +37,11 @@ export function DouyinVideoView({ item, compact = false, onBreakdown, onPromptRe
   const [breakdownError, setBreakdownError] = useState("");
   const [reverseLoading, setReverseLoading] = useState(false);
   const [productionLoading, setProductionLoading] = useState(false);
-  const { stats, author, cover, videoUrl, images, desc, shareUrl } = normalizeDouyinVideoItem(item);
+  const { stats, author, cover, videoUrl, images, desc, shareUrl, awemeId } = normalizeDouyinVideoItem(item);
   const proxiedVideoUrl = videoUrl
     ? `${API_BASE}/api/media/proxy?url=${encodeURIComponent(videoUrl)}&referer=${encodeURIComponent(
-        shareUrl || "https://www.douyin.com/",
-      )}`
+        shareUrl || (awemeId ? `https://www.douyin.com/video/${awemeId}` : "https://www.douyin.com/"),
+      )}&aweme_id=${encodeURIComponent(awemeId || "")}`
     : "";
 
   async function handleBreakdown() {

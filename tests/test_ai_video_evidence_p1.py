@@ -146,6 +146,30 @@ class AiVideoEvidenceP1Tests(unittest.TestCase):
         self.assertEqual([frame["source"] for frame in selected], ["scene", "chunk_start", "scene"])
         self.assertEqual([frame["time"] for frame in selected], [2, 4, 5])
 
+    def test_video_url_candidates_prefer_nested_play_urls(self):
+        pipe = self.pipeline()
+        urls = pipe.video_url_candidates(
+            {
+                "download_url": "https://download.example/video.mp4",
+                "raw": {
+                    "video": {
+                        "play_addr": {
+                            "url_list": [
+                                "https://play.example/first.mp4",
+                                "https://play.example/second.mp4",
+                            ]
+                        },
+                        "download_addr": {"url_list": ["https://raw-download.example/video.mp4"]},
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(urls[0], "https://play.example/first.mp4")
+        self.assertIn("https://play.example/first.mp4", urls)
+        self.assertIn("https://play.example/second.mp4", urls)
+        self.assertGreater(urls.index("https://download.example/video.mp4"), urls.index("https://play.example/first.mp4"))
+
     def test_record_model_run_persists(self):
         record_ai_model_run(
             task_id="task-1",

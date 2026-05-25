@@ -695,11 +695,11 @@ def _analysis_video_payload(video: dict[str, Any], target_user: dict[str, Any] |
             "aweme_id": video.get("aweme_id") or video.get("id"),
             "desc": video.get("desc") or source.get("desc") or "",
             "cover_url": video.get("cover_url") or source.get("cover_url") or "",
-            "source_video_url": video.get("download_url")
-            or video.get("play_url")
+            "source_video_url": video.get("play_url")
+            or video.get("download_url")
             or source.get("source_video_url")
-            or source.get("download_url")
-            or source.get("play_url"),
+            or source.get("play_url")
+            or source.get("download_url"),
             "video_url": video.get("play_url") or video.get("download_url") or source.get("video_url"),
             "statistics": source.get("statistics")
             or {
@@ -1234,7 +1234,7 @@ def collect_videos(payload: CollectVideosRequest) -> dict[str, Any]:
                             "desc": video.get("desc", ""),
                             "cover_url": video.get("cover_url") or "",
                             "play_url": video.get("play_url") or "",
-                            "download_url": video.get("download_url") or video.get("source_video_url") or "",
+                            "download_url": video.get("source_video_url") or video.get("download_url") or "",
                             "create_time": video.get("create_time"),
                             "digg_count": video.get("digg_count"),
                             "comment_count": video.get("comment_count"),

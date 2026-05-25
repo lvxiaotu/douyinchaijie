@@ -530,16 +530,16 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
 
         for index, item in enumerate(videos, start=1):
             aweme_id = str(item.get("aweme_id") or item.get("id") or index)
-            url = self._downloadable_video_url(item)
-            if not url:
+            urls = self._downloadable_video_urls(item)
+            if not urls:
                 skipped.append({"aweme_id": aweme_id, "reason": "missing_download_url"})
                 continue
             try:
-                saved_path = self._download_media_url(url, aweme_id)
+                saved_path, used_url = self._download_media_urls(urls, aweme_id, item=item)
             except Exception as exc:
                 skipped.append({"aweme_id": aweme_id, "reason": f"{type(exc).__name__}: {exc}"})
                 continue
-            downloaded.append({"aweme_id": aweme_id, "path": saved_path, "source_url": url})
+            downloaded.append({"aweme_id": aweme_id, "path": saved_path, "source_url": used_url, "source_urls": urls})
 
         manifest = {
             "status": "ok",
@@ -558,33 +558,38 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         return manifest
 
     def _downloadable_video_url(self, item: dict[str, Any]) -> str:
+        urls = self._downloadable_video_urls(item)
+        return urls[0] if urls else ""
+
+    def _downloadable_video_urls(self, item: dict[str, Any]) -> list[str]:
         raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
         video = item.get("video") if isinstance(item.get("video"), dict) else {}
         raw_video = raw.get("video") if isinstance(raw.get("video"), dict) else {}
-        return str(
-            item.get("download_url")
-            or item.get("source_video_url")
-            or self._first_url(video.get("download_addr"))
-            or self._first_url(raw_video.get("download_addr"))
-            or item.get("play_url")
-            or self._first_url(video.get("play_addr"))
-            or self._first_url(video.get("play_addr_h264"))
-            or self._first_url(raw_video.get("play_addr"))
-            or self._first_url(raw_video.get("play_addr_h264"))
-            or ""
+        download_urls = item.get("download_urls") if isinstance(item.get("download_urls"), dict) else {}
+        return self._unique_urls(
+            [
+                item.get("play_url"),
+                item.get("video_url"),
+                download_urls.get("play_addr"),
+                download_urls.get("play_addr_h264"),
+                download_urls.get("play_addr_bytevc1"),
+                download_urls.get("aweme_play"),
+                self._all_urls(video.get("play_addr")),
+                self._all_urls(video.get("play_addr_h264")),
+                self._all_urls(video.get("play_addr_bytevc1")),
+                self._all_urls(raw_video.get("play_addr")),
+                self._all_urls(raw_video.get("play_addr_h264")),
+                self._all_urls(raw_video.get("play_addr_bytevc1")),
+                item.get("source_video_url"),
+                item.get("download_url"),
+                download_urls.get("download_addr"),
+                self._all_urls(video.get("download_addr")),
+                self._all_urls(raw_video.get("download_addr")),
+            ]
         )
 
     def _download_media_url(self, url: str, fallback_name: str) -> str:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://www.douyin.com/",
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        }
+        headers = self._download_headers(fallback_name, url)
         response: requests.Response | None = None
         try:
             response = requests.get(url, headers=headers, timeout=300, stream=True)
@@ -601,15 +606,104 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
                 response_text=response.text[:4000] if response is not None else "",
                 extra={"phase": "download_media_request"},
             )
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
             raise
 
         file_name = self._download_filename(response, fallback_name)
         target = self._unique_download_path(file_name)
-        with target.open("wb") as file:
-            for chunk in response.iter_content(chunk_size=1024 * 512):
-                if chunk:
-                    file.write(chunk)
+        partial = target.with_name(f"{target.name}.part")
+        partial.unlink(missing_ok=True)
+        downloaded = 0
+        try:
+            with partial.open("wb") as file:
+                for chunk in response.iter_content(chunk_size=1024 * 512):
+                    if chunk:
+                        file.write(chunk)
+                        downloaded += len(chunk)
+            if downloaded <= 0:
+                raise RuntimeError("Media download response returned no content.")
+            partial.replace(target)
+        except Exception:
+            partial.unlink(missing_ok=True)
+            raise
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
         return str(target)
+
+    def _download_media_urls(self, urls: list[str], fallback_name: str, *, item: dict[str, Any]) -> tuple[str, str]:
+        attempted: set[str] = set()
+        last_error: Exception | None = None
+        for url in urls:
+            if url in attempted:
+                continue
+            attempted.add(url)
+            try:
+                return self._download_media_url(url, fallback_name), url
+            except Exception as exc:
+                last_error = exc
+
+        refreshed_urls = self._refresh_downloadable_video_urls(fallback_name, item)
+        for url in refreshed_urls:
+            if url in attempted:
+                continue
+            attempted.add(url)
+            try:
+                return self._download_media_url(url, fallback_name), url
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No downloadable media URL succeeded.")
+
+    def _refresh_downloadable_video_urls(self, aweme_id: str, item: dict[str, Any]) -> list[str]:
+        if not str(aweme_id or "").strip():
+            return []
+        try:
+            refreshed = self.get_one_video(str(aweme_id), prefer_cache=False)
+        except Exception:
+            return []
+        refreshed_video = refreshed.get("video") if isinstance(refreshed.get("video"), dict) else {}
+        download_urls = refreshed.get("download_urls") if isinstance(refreshed.get("download_urls"), dict) else {}
+        merged = {
+            **item,
+            **refreshed_video,
+            "download_urls": download_urls or refreshed_video.get("download_urls") or item.get("download_urls"),
+            "raw": refreshed.get("raw") or refreshed_video.get("raw") or item.get("raw"),
+        }
+        return self._downloadable_video_urls(merged)
+
+    def _download_headers(self, fallback_name: str, url: str) -> dict[str, str]:
+        referer = self._work_url(fallback_name) if str(fallback_name or "").strip().isdigit() else "https://www.douyin.com/"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+            ),
+            "Referer": referer,
+            "Origin": "https://www.douyin.com",
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Sec-Fetch-Dest": "video",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "cross-site",
+            "Connection": "keep-alive",
+        }
+        range_header = str(os.getenv("DOUYIN_DOWNLOAD_RANGE_HEADER") or "bytes=0-").strip()
+        if range_header:
+            headers["Range"] = range_header
+        if self.douyin_web_cookie and self._should_send_cookie_to_media(url):
+            headers["Cookie"] = self.douyin_web_cookie
+        return headers
+
+    @staticmethod
+    def _should_send_cookie_to_media(url: str) -> bool:
+        host = urlparse(str(url or "")).hostname or ""
+        return any(marker in host for marker in ("douyin", "zjcdn", "byte", "bytedance", "snssdk"))
 
     def _download_filename(self, response: requests.Response, fallback_name: str) -> str:
         disposition = response.headers.get("content-disposition", "")
@@ -1254,8 +1348,7 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
     def _extract_download_urls(self, data: dict[str, Any]) -> dict[str, Any]:
         video = self._extract_one_video(data)
         raw = video.get("raw") if isinstance(video.get("raw"), dict) else {}
-        video_data = raw.get("video") if isinstance(raw.get("video"), dict) else {}
-        return {"play_addr": self._first_url(video_data.get("play_addr")), "play_addr_h264": self._first_url(video_data.get("play_addr_h264")), "play_addr_bytevc1": self._first_url(video_data.get("play_addr_bytevc1")), "download_addr": self._first_url(video_data.get("download_addr"))}
+        return self._extract_download_urls_from_aweme(raw)
 
     def _normalize_user(self, item: dict[str, Any]) -> dict[str, Any]:
         user = self._extract_user_info(item)
@@ -1486,10 +1579,15 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         return ""
 
     def _normalize_video(self, item: dict[str, Any]) -> dict[str, Any]:
+        item = item if isinstance(item, dict) else {}
         stats = item.get("statistics") or item.get("stats") or {}
         video = item.get("video") if isinstance(item.get("video"), dict) else {}
-        play_url = self._first_url(video.get("play_addr")) or self._first_url(video.get("play_addr_h264"))
-        download_url = self._first_url(video.get("download_addr")) or play_url
+        play_url = (
+            self._first_url(video.get("play_addr"))
+            or self._first_url(video.get("play_addr_h264"))
+            or self._first_url(video.get("play_addr_bytevc1"))
+        )
+        download_url = play_url or self._first_url(video.get("download_addr"))
         cover_url = self._first_url(video.get("cover")) or self._first_url(video.get("origin_cover")) or self._first_url(video.get("dynamic_cover"))
         play_count = self._to_int(
             stats.get("play_count")
@@ -1516,7 +1614,9 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             "cover_url": cover_url,
             "play_url": play_url,
             "download_url": download_url,
-            "source_video_url": download_url or play_url,
+            "source_video_url": play_url or download_url,
+            "download_urls": self._extract_download_urls_from_aweme(item),
+            "share_url": self._work_url(str(item.get("aweme_id") or item.get("id") or "")) if item.get("aweme_id") or item.get("id") else "",
             "raw": item,
         }
 
@@ -1592,6 +1692,20 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
             return avatar
         return None
 
+    def _extract_download_urls_from_aweme(self, aweme: dict[str, Any]) -> dict[str, Any]:
+        video = aweme.get("video") if isinstance(aweme.get("video"), dict) else {}
+        uri = self._video_uri(video)
+        aweme_play = f"https://aweme.snssdk.com/aweme/v1/play/?video_id={uri}&ratio=1080p&line=0" if uri else ""
+        aweme_playwm = f"https://aweme.snssdk.com/aweme/v1/playwm/?video_id={uri}&radio=1080p&line=0" if uri else ""
+        return {
+            "play_addr": self._first_url(video.get("play_addr")),
+            "play_addr_h264": self._first_url(video.get("play_addr_h264")),
+            "play_addr_bytevc1": self._first_url(video.get("play_addr_bytevc1")),
+            "download_addr": self._first_url(video.get("download_addr")),
+            "aweme_play": aweme_play,
+            "aweme_playwm": aweme_playwm,
+        }
+
     def _first_url(self, value: Any) -> Any:
         if isinstance(value, dict):
             for key in ("url_list", "url"):
@@ -1605,6 +1719,49 @@ class TikhubDouyinApiAdapter(IntegrationAdapter):
         if isinstance(value, str):
             return value
         return None
+
+    @classmethod
+    def _all_urls(cls, value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value] if value.startswith(("http://", "https://")) else []
+        if isinstance(value, list):
+            urls: list[str] = []
+            for item in value:
+                urls.extend(cls._all_urls(item))
+            return urls
+        if isinstance(value, dict):
+            urls: list[str] = []
+            for key in ("url_list", "url_list_1", "urls", "url", "main_url", "backup_url"):
+                if key in value:
+                    urls.extend(cls._all_urls(value.get(key)))
+            return urls
+        return []
+
+    @classmethod
+    def _unique_urls(cls, values: list[Any]) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            candidates = value if isinstance(value, list) else cls._all_urls(value)
+            for url in candidates:
+                normalized = str(url or "").strip()
+                if not normalized or normalized in seen:
+                    continue
+                urls.append(normalized)
+                seen.add(normalized)
+        return urls
+
+    @staticmethod
+    def _video_uri(video: dict[str, Any]) -> str:
+        for key in ("play_addr", "play_addr_h264", "play_addr_bytevc1", "download_addr"):
+            value = video.get(key)
+            if isinstance(value, dict) and value.get("uri"):
+                return str(value.get("uri") or "")
+        return str(video.get("uri") or video.get("video_id") or "").strip()
+
+    @staticmethod
+    def _work_url(aweme_id: str) -> str:
+        return f"https://www.douyin.com/video/{aweme_id}"
 
     def _extract_value(self, data: Any, keys: list[str]) -> str:
         if data in [None, ""]:

@@ -186,6 +186,172 @@ DOUYIN_SPIDER_API_BASE=http://127.0.0.1:8131
 DOUYIN_SPIDER_VENDOR_PATH=./integrations/douyin_spider_provider/vendor/Douyin_Spider
 ```
 
+## 新接口启动说明
+
+新接口分成两个进程：
+
+```text
+前端 React -> 主后端 8010 -> Douyin_Spider sidecar 8131 -> 抖音 Web
+```
+
+前端不直接访问 `8131`。`8131` 只给主后端调用，用来隔离 `Douyin_Spider` 的 Python/Node 依赖和导入副作用。
+
+### 1. 准备依赖
+
+在项目根目录安装主项目依赖：
+
+```powershell
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+如果是新机器或 vendor 依赖缺失，再补一次 `Douyin_Spider` 自身依赖：
+
+```powershell
+pip install -r integrations\douyin_spider_provider\vendor\Douyin_Spider\requirements.txt
+Push-Location integrations\douyin_spider_provider\vendor\Douyin_Spider
+npm install
+Pop-Location
+```
+
+### 2. 配置 `.env`
+
+使用新接口或新接口优先时，至少需要：
+
+```env
+DY_COOKIES=
+DOUYIN_PROVIDER_MODE=spider_first
+DOUYIN_SPIDER_EXECUTION_MODE=sidecar
+DOUYIN_SPIDER_API_BASE=http://127.0.0.1:8131
+DOUYIN_SPIDER_VENDOR_PATH=./integrations/douyin_spider_provider/vendor/Douyin_Spider
+DOUYIN_SPIDER_TIMEOUT=60
+```
+
+推荐灰度模式：
+
+```env
+DOUYIN_PROVIDER_MODE=spider_first
+```
+
+强制只走新接口：
+
+```env
+DOUYIN_PROVIDER_MODE=spider
+```
+
+一键回滚老接口：
+
+```env
+DOUYIN_PROVIDER_MODE=tikhub
+```
+
+注意：
+
+- `DY_COOKIES` 是 `Douyin_Spider` 的主要登录态来源，缺失或过期会导致 sidecar `ready=false` 或接口 403/空数据。
+- 搜索接口仍固定走 legacy TikHub，不受 `DOUYIN_PROVIDER_MODE=spider` 影响。
+- `spider_first` 模式下，Spider 失败会 fallback TikHub；如果完全不想消耗 TikHub，请改成 `spider`。
+- 切换 `.env` 后需要重启主后端；sidecar 的地址或 vendor 路径变化时也要重启 sidecar。
+
+### 3. 启动 Douyin_Spider sidecar
+
+单独开一个终端，在项目根目录运行：
+
+```powershell
+.\.venv\Scripts\activate
+python -m uvicorn integrations.douyin_spider_provider.sidecar_server:app --host 127.0.0.1 --port 8131
+```
+
+本地开发需要热重载时可加 `--reload`，但稳定验证或批量任务建议不加，减少多进程重载带来的干扰。
+
+健康检查：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8131/health
+Invoke-RestMethod http://127.0.0.1:8131/status
+```
+
+`/health` 只表示 sidecar 进程活着；`/status` 才会检查 vendor 文件、Node 依赖和 Cookie 等运行条件。
+
+### 4. 启动主后端
+
+再开一个终端启动主后端：
+
+```powershell
+.\.venv\Scripts\activate
+python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8010
+```
+
+验证主后端是否能连上新接口：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8010/api/integrations/douyin-spider/status
+Invoke-RestMethod http://127.0.0.1:8010/api/integrations/douyin-provider/status
+```
+
+`/api/integrations/douyin-spider/status` 是新接口直连状态；`/api/integrations/douyin-provider/status` 是聚合层状态，会同时返回当前模式、legacy、spider、fallback 和 metrics。
+
+### 5. 启动前端
+
+```powershell
+npm run dev
+```
+
+前端仍只需要访问：
+
+```text
+http://127.0.0.1:5173
+```
+
+前端请求会进入主后端 `8010`，再由主后端按 `DOUYIN_PROVIDER_MODE` 决定走 legacy TikHub、新 Spider sidecar，或 `spider_first` fallback。
+
+### 6. 最小接口验证
+
+先测状态，再测一个轻量接口：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8010/api/integrations/douyin-provider/status
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8010/api/integrations/douyin-provider/one-video `
+  -ContentType "application/json" `
+  -Body '{"aweme_id":"这里替换成真实 aweme_id"}'
+```
+
+如果只想绕过聚合层，直接验证新接口：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8010/api/integrations/douyin-spider/one-video `
+  -ContentType "application/json" `
+  -Body '{"aweme_id":"这里替换成真实 aweme_id"}'
+```
+
+### 7. 端口占用处理
+
+如果 `8131` 被占用，可先查占用进程：
+
+```powershell
+Get-NetTCPConnection -LocalPort 8131 -ErrorAction SilentlyContinue |
+  Select-Object LocalAddress,LocalPort,State,OwningProcess
+```
+
+确认是本项目遗留进程后再停止：
+
+```powershell
+Get-NetTCPConnection -LocalPort 8131 -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  ForEach-Object { Stop-Process -Id $_ -Force }
+```
+
+同理，主后端是 `8010`，前端是 `5173`。
+
+### 8. 和旧 8123 服务的关系
+
+`8131` 是当前新 `Douyin_Spider` provider sidecar。
+
+`8123` 是旧的 `Douyin_TikTok_Download_API` 上游服务，只在仍使用 `DOUYIN_DOWNLOAD_API_BASE` 对应旧下载适配层时需要。新 Spider provider 的用户主页、作品、详情、评论、评论回复、收藏列表、收藏下载不依赖 `8123`。
+
 ## 需要改造的调用点
 
 | 文件 | 改造点 |

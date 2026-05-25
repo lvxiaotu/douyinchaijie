@@ -434,10 +434,10 @@ def list_ai_video_chunks(task_id: str) -> list[dict[str, Any]]:
 
 def video_source_url(video: dict[str, Any]) -> str:
     return str(
-        video.get("source_video_url")
-        or video.get("download_url")
+        video.get("play_url")
         or video.get("video_url")
-        or video.get("play_url")
+        or video.get("source_video_url")
+        or video.get("download_url")
         or ""
     )
 
