@@ -10,7 +10,13 @@ from pydantic import BaseModel, Field
 from dotenv import dotenv_values
 
 from backend.app.routes.media_proxy import proxy_remote_media
-from integrations.tikhub_douyin_api import TikhubDouyinApiAdapter
+from integrations.douyin_provider.factory import (
+    VALID_PROVIDER_MODES,
+    configured_provider_mode,
+    get_douyin_provider,
+    get_douyin_provider_status,
+)
+from integrations.douyin_spider_provider.adapter import DouyinSpiderApiError
 from integrations.tikhub_douyin_api.adapter import TikhubApiError
 
 router = APIRouter(prefix="/api/integrations/douyin", tags=["douyin"])
@@ -20,7 +26,7 @@ ENV_PATH = ROOT / ".env"
 
 
 class UserProfileRequest(BaseModel):
-    user_url: str = Field(..., description="Douyin user page URL")
+    user_url: str | None = Field(default=None, description="Douyin user page URL")
     sec_user_id: str | None = Field(default=None, description="Douyin sec_user_id")
 
 
@@ -68,10 +74,15 @@ class DouyinConfigPayload(BaseModel):
     api_base: str = Field(default="https://api.tikhub.io")
     output_dir: str = Field(default="./data/runtime/douyin/downloads")
     cookie: str = Field(default="")
+    provider_mode: str = Field(default="tikhub")
+    spider_api_base: str = Field(default="http://127.0.0.1:8131")
+    spider_execution_mode: str = Field(default="sidecar")
+    spider_vendor_path: str = Field(default="./integrations/douyin_spider_provider/vendor/Douyin_Spider")
+    observability_enabled: bool = Field(default=True)
 
 
-def tikhub_adapter() -> TikhubDouyinApiAdapter:
-    return TikhubDouyinApiAdapter()
+def douyin_adapter() -> Any:
+    return get_douyin_provider()
 
 
 def _is_upstream_unavailable(exc: Exception) -> bool:
@@ -107,6 +118,17 @@ def integration_error(exc: Exception) -> HTTPException:
                 "error_type": type(exc).__name__,
                 "message": str(exc),
                 "hint": "检查 TIKHUB_API_KEY、TikHub 额度或接口参数。",
+                "upstream": exc.to_dict(),
+            },
+        )
+    if isinstance(exc, DouyinSpiderApiError):
+        logger.warning("Douyin Spider integration failed: %s", exc)
+        return HTTPException(
+            status_code=502,
+            detail={
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "hint": "检查 DOUYIN_PROVIDER_MODE、DOUYIN_SPIDER_VENDOR_PATH、DY_COOKIES、Node 依赖或接口参数。",
                 "upstream": exc.to_dict(),
             },
         )
@@ -167,19 +189,42 @@ def encode_env_value(value: str) -> str:
     return value
 
 
+def provider_config_snapshot(env: dict[str, str]) -> dict[str, Any]:
+    mode = str(env.get("DOUYIN_PROVIDER_MODE") or configured_provider_mode()).strip().lower()
+    if mode not in VALID_PROVIDER_MODES:
+        mode = "tikhub"
+    active_provider = {
+        "tikhub": "tikhub-douyin-api",
+        "spider": "douyin-spider-provider",
+        "spider_first": "douyin-provider-fallback",
+    }.get(mode, "tikhub-douyin-api")
+    return {
+        "provider": "douyin-provider",
+        "mode": mode,
+        "active": {"id": active_provider},
+        "search_provider": "legacy-tikhub",
+        "modes": sorted(VALID_PROVIDER_MODES),
+    }
+
+
 @router.get("/status")
 def status() -> dict[str, Any]:
-    instance = tikhub_adapter()
-    errors = instance.validate_config()
+    provider_status = get_douyin_provider_status()
+    active = provider_status.get("active") if isinstance(provider_status.get("active"), dict) else {}
+    errors = active.get("errors") if isinstance(active.get("errors"), list) else []
+    env = read_env_map()
     return {
-        "id": instance.manifest.id,
-        "name": instance.manifest.name,
-        "repo_url": instance.manifest.repo_url,
+        "id": "douyin-provider",
+        "name": "Douyin Provider",
         "ready": not errors,
         "errors": errors,
-        "api_base": instance.api_base,
-        "provider": "tikhub",
-        "output_dir": str(instance.output_dir),
+        "api_base": env.get("TIKHUB_API_BASE", "https://api.tikhub.io"),
+        "provider": "douyin-provider",
+        "provider_mode": provider_status.get("mode") or configured_provider_mode(),
+        "active_provider": active.get("id") or "",
+        "provider_status": provider_status,
+        "search_provider": "legacy-tikhub",
+        "output_dir": env.get("DOUYIN_OUTPUT_DIR", "./data/runtime/douyin/downloads"),
         "media_proxy": "local",
     }
 
@@ -187,25 +232,64 @@ def status() -> dict[str, Any]:
 @router.get("/config")
 def get_config() -> dict[str, Any]:
     env = read_env_map()
+    snapshot = provider_config_snapshot(env)
     return {
         "api_base": env.get("TIKHUB_API_BASE", "https://api.tikhub.io"),
         "output_dir": env.get("DOUYIN_OUTPUT_DIR", "./data/runtime/douyin/downloads"),
         "cookie": env.get("TIKHUB_DOUYIN_WEB_COOKIE") or env.get("DOUYIN_WEB_COOKIE") or "",
         "has_cookie": bool(env.get("TIKHUB_DOUYIN_WEB_COOKIE") or env.get("DOUYIN_WEB_COOKIE")),
+        "provider_mode": snapshot["mode"],
+        "provider_modes": sorted(VALID_PROVIDER_MODES),
+        "spider_api_base": env.get("DOUYIN_SPIDER_API_BASE", "http://127.0.0.1:8131"),
+        "spider_execution_mode": env.get("DOUYIN_SPIDER_EXECUTION_MODE", "sidecar"),
+        "spider_vendor_path": env.get("DOUYIN_SPIDER_VENDOR_PATH", "./integrations/douyin_spider_provider/vendor/Douyin_Spider"),
+        "observability_enabled": (env.get("DOUYIN_PROVIDER_OBSERVABILITY_ENABLED", "true").lower() not in {"0", "false", "no"}),
+        "provider_event_log": env.get("DOUYIN_PROVIDER_EVENT_LOG", "./data/runtime/douyin/provider_events.jsonl"),
+        "search_provider": "legacy-tikhub",
+        "provider_status": snapshot,
     }
 
 
 @router.post("/config")
 def save_config(payload: DouyinConfigPayload) -> dict[str, Any]:
+    provider_mode = str(payload.provider_mode or "tikhub").strip().lower()
+    if provider_mode not in VALID_PROVIDER_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_type": "InvalidProviderMode",
+                "message": f"Unsupported DOUYIN_PROVIDER_MODE: {payload.provider_mode}",
+                "allowed": sorted(VALID_PROVIDER_MODES),
+            },
+        )
+    spider_execution_mode = str(payload.spider_execution_mode or "sidecar").strip().lower()
+    if spider_execution_mode not in {"sidecar", "inprocess"}:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_type": "InvalidSpiderExecutionMode",
+                "message": f"Unsupported DOUYIN_SPIDER_EXECUTION_MODE: {payload.spider_execution_mode}",
+                "allowed": ["sidecar", "inprocess"],
+            },
+        )
     try:
         write_env_values(
             {
                 "TIKHUB_API_BASE": payload.api_base,
                 "DOUYIN_OUTPUT_DIR": payload.output_dir,
                 "TIKHUB_DOUYIN_WEB_COOKIE": payload.cookie,
+                "DOUYIN_PROVIDER_MODE": provider_mode,
+                "DOUYIN_SPIDER_API_BASE": payload.spider_api_base,
+                "DOUYIN_SPIDER_EXECUTION_MODE": spider_execution_mode,
+                "DOUYIN_SPIDER_VENDOR_PATH": payload.spider_vendor_path,
+                "DOUYIN_PROVIDER_OBSERVABILITY_ENABLED": "true" if payload.observability_enabled else "false",
             }
         )
-        return {"status": "ok", "config": get_config(), "upstream_cookie_sync": {"synced": False, "reason": "配置已保存；TikHub Cookie 会在收藏请求中随请求发送。"}}
+        return {
+            "status": "ok",
+            "config": get_config(),
+            "upstream_cookie_sync": {"synced": False, "reason": "配置已保存；搜索仍固定走 TikHub，可替换接口按 provider 模式切换。"},
+        }
     except Exception as exc:
         raise integration_error(exc) from exc
 
@@ -213,8 +297,8 @@ def save_config(payload: DouyinConfigPayload) -> dict[str, Any]:
 @router.post("/user-profile")
 def user_profile(payload: UserProfileRequest) -> dict[str, Any]:
     try:
-        instance = tikhub_adapter()
-        sec_user_id = payload.sec_user_id or instance.get_sec_user_id(payload.user_url)
+        instance = douyin_adapter()
+        sec_user_id = payload.sec_user_id or instance.get_sec_user_id(payload.user_url or "")
         return instance.get_user_profile(sec_user_id)
     except Exception as exc:
         raise integration_error(exc) from exc
@@ -223,7 +307,7 @@ def user_profile(payload: UserProfileRequest) -> dict[str, Any]:
 @router.post("/user-videos")
 def user_videos(payload: UserVideosRequest) -> dict[str, Any]:
     try:
-        instance = tikhub_adapter()
+        instance = douyin_adapter()
         sec_user_id = payload.sec_user_id or (instance.get_sec_user_id(payload.user_url) if payload.user_url else "")
         count = payload.max_items or payload.page_size
         return instance.get_user_videos(
@@ -238,7 +322,7 @@ def user_videos(payload: UserVideosRequest) -> dict[str, Any]:
 @router.post("/work-detail")
 def work_detail(payload: WorkDetailRequest) -> dict[str, Any]:
     try:
-        return tikhub_adapter().get_work_detail(payload.work_url, region=payload.region)
+        return douyin_adapter().get_work_detail(payload.work_url, region=payload.region)
     except Exception as exc:
         raise integration_error(exc) from exc
 
@@ -246,7 +330,7 @@ def work_detail(payload: WorkDetailRequest) -> dict[str, Any]:
 @router.post("/video-comments")
 def video_comments(payload: VideoCommentsRequest) -> dict[str, Any]:
     try:
-        return tikhub_adapter().get_video_comments(
+        return douyin_adapter().get_video_comments(
             aweme_id=payload.aweme_id,
             max_items=payload.max_items,
             page_size=payload.page_size,
@@ -259,7 +343,7 @@ def video_comments(payload: VideoCommentsRequest) -> dict[str, Any]:
 @router.post("/video-comment-replies")
 def video_comment_replies(payload: VideoCommentRepliesRequest) -> dict[str, Any]:
     try:
-        return tikhub_adapter().get_video_comment_replies(
+        return douyin_adapter().get_video_comment_replies(
             item_id=payload.item_id,
             comment_id=payload.comment_id,
             max_items=payload.max_items,
@@ -273,7 +357,7 @@ def video_comment_replies(payload: VideoCommentRepliesRequest) -> dict[str, Any]
 @router.post("/favorites/download")
 def download_favorites(payload: FavoriteDownloadRequest) -> dict[str, Any]:
     try:
-        return tikhub_adapter().download_favorite_videos(
+        return douyin_adapter().download_favorite_videos(
             max_items=payload.max_items,
             page_size=payload.page_size,
         )
@@ -284,7 +368,7 @@ def download_favorites(payload: FavoriteDownloadRequest) -> dict[str, Any]:
 @router.post("/favorites/items")
 def favorite_items(payload: FavoriteItemsRequest) -> dict[str, Any]:
     try:
-        return tikhub_adapter().get_favorite_videos(
+        return douyin_adapter().get_favorite_videos(
             max_items=payload.max_items,
             page_size=payload.page_size,
             max_cursor=payload.max_cursor,

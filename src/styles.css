@@ -6118,7 +6118,19 @@ textarea {
   color: var(--text);
 }
 
+.douyin-settings-form .checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+}
+
 .settings-form .checkbox-field input {
+  width: 16px;
+  height: 16px;
+}
+
+.douyin-settings-form .checkbox-field input {
   width: 16px;
   height: 16px;
 }

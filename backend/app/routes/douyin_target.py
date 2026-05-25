@@ -45,7 +45,7 @@ from backend.app.tiktok_target_store import (
     update_target_task_from_ai_task,
     upsert_target_user,
 )
-from integrations.tikhub_douyin_api import TikhubDouyinApiAdapter
+from integrations.douyin_provider.factory import get_douyin_provider, get_douyin_search_provider
 from integrations.tikhub_douyin_api.adapter import TikhubApiError
 
 router = APIRouter(prefix="/api/tools/douyin-target", tags=["douyin-target"])
@@ -841,9 +841,14 @@ def _author_identity_from_video(video: dict[str, Any]) -> set[str]:
     return identities
 
 
+def _collector_id(adapter: Any) -> str:
+    manifest = getattr(adapter, "manifest", None)
+    return str(getattr(manifest, "id", "") or adapter.__class__.__name__)
+
+
 def _collect_video_comment_snapshot(
     video: dict[str, Any],
-    adapter: TikhubDouyinApiAdapter,
+    adapter: Any,
     payload: CollectCommentsRequest,
 ) -> dict[str, Any]:
     video_id = str(video.get("id") or "")
@@ -858,7 +863,7 @@ def _collect_video_comment_snapshot(
             [],
             status="done",
             raw_ai={
-                "collector": "tikhub-douyin-api",
+                "collector": _collector_id(adapter),
                 "comment_pages": [],
                 "request": payload.model_dump(),
                 "sampling_plan": sampling_plan,
@@ -917,7 +922,7 @@ def _collect_video_comment_snapshot(
         normalized,
         status="done",
         raw_ai={
-            "collector": "tikhub-douyin-api",
+            "collector": _collector_id(adapter),
             "comment_pages": result.get("raw_pages", []),
             "request": payload.model_dump(),
             "sampling_plan": sampling_plan,
@@ -927,7 +932,7 @@ def _collect_video_comment_snapshot(
 
 @router.post("/search")
 def search(payload: TargetSearchRequest) -> dict[str, Any]:
-    tikhub = TikhubDouyinApiAdapter()
+    tikhub = get_douyin_search_provider()
     try:
         result = tikhub.search_users(
             keyword=payload.keyword,
@@ -1112,7 +1117,7 @@ def collect_comments(payload: CollectCommentsRequest) -> dict[str, Any]:
     else:
         raise HTTPException(status_code=400, detail="set_id or video_ids is required")
 
-    adapter = TikhubDouyinApiAdapter()
+    adapter = get_douyin_provider()
     saved = []
     errors = []
     for video in target_videos:
@@ -1193,7 +1198,7 @@ def collect_videos(payload: CollectVideosRequest) -> dict[str, Any]:
     if not target_set:
         raise HTTPException(status_code=404, detail="Target set not found")
     users = [user for user in target_set.get("users", []) if not payload.user_ids or user["id"] in payload.user_ids]
-    adapter = TikhubDouyinApiAdapter()
+    adapter = get_douyin_provider()
     saved = []
     errors = []
     for user in users:

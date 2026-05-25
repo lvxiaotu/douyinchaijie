@@ -12,7 +12,7 @@ from backend.app.tiktok_target_store import (
     replace_target_video_comments,
     resolve_target_video,
 )
-from integrations.tikhub_douyin_api import TikhubDouyinApiAdapter
+from integrations.douyin_provider.factory import get_douyin_provider
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -90,6 +90,11 @@ def short_error(exc: Exception | str) -> str:
     if "fetch_user_post_videos" in text and "HTTP 400" in text:
         return "TikHub Douyin Web 作品接口拒绝该账号标识，请确认 sec_user_id 或 Cookie"
     return text[:300] + ("..." if len(text) > 300 else "")
+
+
+def _collector_id(adapter: Any) -> str:
+    manifest = getattr(adapter, "manifest", None)
+    return str(getattr(manifest, "id", "") or adapter.__class__.__name__)
 
 
 def comment_like_ratio(video: dict[str, Any]) -> float:
@@ -220,7 +225,7 @@ def _collect_progress(
 
 def collect_video_comment_snapshot(
     video: dict[str, Any],
-    adapter: TikhubDouyinApiAdapter | None = None,
+    adapter: Any | None = None,
     options: Any | None = None,
     *,
     progress: ProgressCallback | None = None,
@@ -233,7 +238,8 @@ def collect_video_comment_snapshot(
     if not aweme_id:
         raise RuntimeError("missing aweme_id")
 
-    adapter = adapter or TikhubDouyinApiAdapter()
+    adapter = adapter or get_douyin_provider()
+    collector = _collector_id(adapter)
     author_ids = author_identity_from_video(video)
     sampling_plan = comment_sampling_plan(video, normalized_options)
     _progress(progress, 12, f"开始获取评论数据：目标 {sampling_plan['max_comments']} 条")
@@ -243,7 +249,7 @@ def collect_video_comment_snapshot(
             [],
             status="done",
             raw_ai={
-                "collector": "tikhub-douyin-api",
+                "collector": collector,
                 "comment_pages": [],
                 "request": normalized_options,
                 "sampling_plan": sampling_plan,
@@ -332,7 +338,7 @@ def collect_video_comment_snapshot(
         normalized,
         status="done",
         raw_ai={
-            "collector": "tikhub-douyin-api",
+            "collector": collector,
             "comment_pages": result.get("raw_pages", []),
             "request": normalized_options,
             "sampling_plan": sampling_plan,

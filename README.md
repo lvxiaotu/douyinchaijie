@@ -158,6 +158,11 @@ VITE_API_BASE=http://127.0.0.1:8010
 DOUYIN_DOWNLOAD_API_BASE=http://127.0.0.1:8123
 DOUYIN_OUTPUT_DIR=./data/runtime/douyin/downloads
 DY_COOKIES=
+DOUYIN_PROVIDER_MODE=tikhub
+DOUYIN_SPIDER_EXECUTION_MODE=sidecar
+DOUYIN_SPIDER_API_BASE=http://127.0.0.1:8131
+DOUYIN_SPIDER_VENDOR_PATH=./integrations/douyin_spider_provider/vendor/Douyin_Spider
+DOUYIN_PROVIDER_OBSERVABILITY_ENABLED=true
 
 AI_MODEL_PROVIDER=gemini
 AI_ACCESS_MODE=official
@@ -169,8 +174,8 @@ AI_MODEL=gemini-2.5-flash
 AI_VIDEO_OUTPUT_DIR=./data/runtime/ai_video_analysis
 AI_PROMPT_REVERSE_OUTPUT_DIR=./data/runtime/ai_prompt_reverse
 
-FFMPEG_BINARY=ffmpeg
-FFPROBE_BINARY=ffprobe
+FFMPEG_BINARY=./ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe
+FFPROBE_BINARY=./ffmpeg-8.1.1-essentials_build/bin/ffprobe.exe
 LOCAL_VIDEO_MODEL_ENDPOINT=
 ```
 
@@ -185,8 +190,11 @@ python scripts/migrate_sqlite_to_postgres.py --bootstrap --truncate --verify
 
 - `.env` 不应提交到 Git。
 - 抖音采集依赖 `DY_COOKIES` 和上游下载服务。
+- 抖音可替换接口通过 `DOUYIN_PROVIDER_MODE=tikhub|spider_first|spider` 切换；搜索固定保留 TikHub。
+- 新 `Douyin_Spider` 默认通过 sidecar 隔离运行。启动命令：`python -m uvicorn integrations.douyin_spider_provider.sidecar_server:app --host 127.0.0.1 --port 8131`。
 - AI 相关工具优先读取通用 `AI_*` 配置。
-- 剪映与视频分析链路建议提前准备好 `ffmpeg` 和 `ffprobe`。
+- 剪映、AI 视频拆解和 AI 提示词反推都依赖 `ffmpeg`/`ffprobe`。Windows 本地开发优先使用项目内置的 `./ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe` 与 `./ffmpeg-8.1.1-essentials_build/bin/ffprobe.exe`；如果服务器已把二者加入 PATH，也可以配置为 `ffmpeg` / `ffprobe`。
+- `ffmpeg` 负责抽音频、截帧；`ffprobe` 负责读取视频时长。`ffprobe` 找不到时，AI 证据管线会把时长读成 `0.0`；如果同时遇到无语音或 ASR 返回空转写，就无法按时长做视觉切段，可能出现 `RuntimeError: 转写结果为空，无法进行分段爆款拆解。`
 
 ### 3. 启动后端
 
@@ -318,6 +326,12 @@ POST /api/tools/ai-video-analysis/jobs
 GET  /api/tools/ai-video-analysis/archives
 GET  /api/tools/ai-video-analysis/archives/{archive_id}
 ```
+
+证据管线会先下载/定位视频，再用 `ffmpeg` 抽取音频和关键帧、用 `ffprobe` 读取时长。纯音乐、无对白、噪声较重的视频可能让 ASR 返回空转写；只要 `ffprobe` 能正确读到时长，系统会按 `AI_VIDEO_SILENT_SEGMENT_SECONDS` 做无语音视觉切段。若任务报 `转写结果为空，无法进行分段爆款拆解`，优先检查：
+
+- `.env` 中 `FFPROBE_BINARY` 指向的文件是否存在。
+- 失败任务的 `data/runtime/ai_video_analysis/evidence/{task_id}/analysis_evidence.json` 中 `metadata.duration` 是否为 `0.0`。
+- 是否开启了 `AI_VIDEO_RESUME_ENABLED=true` 并复用了旧的空 `transcript.json` / `keyframes.json`；修复依赖后可删除对应 evidence 目录或临时关闭 resume 后重跑。
 
 ### AI 提示词反推
 

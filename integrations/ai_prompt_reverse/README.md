@@ -33,7 +33,11 @@ AI_VIDEO_SEGMENT_SECONDS=90
 AI_VIDEO_SILENT_SEGMENT_SECONDS=6
 AI_VIDEO_KEYFRAME_INTERVAL_SECONDS=30
 AI_VIDEO_RESUME_ENABLED=true
+FFMPEG_BINARY=./ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe
+FFPROBE_BINARY=./ffmpeg-8.1.1-essentials_build/bin/ffprobe.exe
 ```
+
+反推工具和 AI 视频拆解共用同一套证据管线，所以也需要 `ffmpeg` 和 `ffprobe`。`ffmpeg` 用于抽音频和关键帧，`ffprobe` 用于读取视频时长。若 `ffprobe` 不可用，视频时长会被记录为 `0.0`；当 ASR 对纯画面、音乐、无对白视频返回空转写时，就无法触发按 `AI_VIDEO_SILENT_SEGMENT_SECONDS` 的视觉切段兜底。
 
 模型连接复用“AI 模型”全局配置。Gemini Key 和模型示例：
 

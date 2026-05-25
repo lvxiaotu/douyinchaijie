@@ -564,6 +564,9 @@ VOLCENGINE_ASR_ENABLE_PAUSE_POINTS=true
 AI_VIDEO_CHUNK_CONCURRENCY_PER_VIDEO=1
 AI_VIDEO_GLOBAL_VISION_CONCURRENCY=3
 
+FFMPEG_BINARY=./ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe
+FFPROBE_BINARY=./ffmpeg-8.1.1-essentials_build/bin/ffprobe.exe
+
 # Third-party relay. Do not commit real API keys.
 AI_VIDEO_RELAY_PROVIDER=yunwu
 AI_VIDEO_RELAY_API_FORMAT=gemini_generate_content
@@ -582,6 +585,13 @@ AI_VIDEO_VISION_MODEL=gemini-2.5-flash
 AI_VIDEO_SUMMARY_PROVIDER=deepseek
 AI_VIDEO_SUMMARY_MODEL=deepseek-v4-flash
 ```
+
+运行时依赖说明：
+
+- `ffmpeg` 负责抽音频、截关键帧和高亮截图。
+- `ffprobe` 负责读取视频总时长。它缺失时不会马上中断任务，但会让 `duration=0.0`。
+- 如果 ASR 返回空转写，同时 `duration=0.0`，无语音视觉切段无法生成片段，分段拆解会失败并出现 `RuntimeError: 转写结果为空，无法进行分段爆款拆解。`
+- 修复 `FFPROBE_BINARY` 后，重跑失败任务前需要清理对应 `data/runtime/ai_video_analysis/evidence/{task_id}`，或临时关闭 `AI_VIDEO_RESUME_ENABLED`，避免继续复用旧的空证据文件。
 
 代码层面要把上限从当前 4 改成 3：
 

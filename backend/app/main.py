@@ -13,6 +13,9 @@ from .routes.ai_video_analysis import router as ai_video_analysis_router
 from .routes.ai_prompt_reverse import router as ai_prompt_reverse_router
 from .routes.benchmark import router as benchmark_router
 from .routes.douyin import router as douyin_router
+from .routes.douyin_legacy_tikhub import router as douyin_legacy_tikhub_router
+from .routes.douyin_provider import router as douyin_provider_router
+from .routes.douyin_spider import router as douyin_spider_router
 from .routes.jianying import router as jianying_router
 from .routes.jianying_editor_sdk import router as jianying_editor_sdk_router
 from .routes.media_proxy import router as media_proxy_router
@@ -73,6 +76,9 @@ def stop_workers() -> None:
 
 
 app.include_router(douyin_router)
+app.include_router(douyin_legacy_tikhub_router)
+app.include_router(douyin_provider_router)
+app.include_router(douyin_spider_router)
 app.include_router(media_proxy_router)
 app.include_router(ai_provider_router)
 app.include_router(ai_video_analysis_router)

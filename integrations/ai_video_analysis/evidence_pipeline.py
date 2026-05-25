@@ -429,9 +429,9 @@ class VideoEvidencePipeline:
             return []
 
         try:
-            from integrations.tikhub_douyin_api import TikhubDouyinApiAdapter
+            from integrations.douyin_provider.factory import get_douyin_provider
 
-            refreshed = TikhubDouyinApiAdapter().get_one_video(aweme_id, prefer_cache=False)
+            refreshed = get_douyin_provider().get_one_video(aweme_id, prefer_cache=False)
         except Exception:
             return []
 

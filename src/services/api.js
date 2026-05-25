@@ -236,6 +236,11 @@ export function saveDouyinConfig(config) {
     api_base: config.apiBase,
     output_dir: config.outputDir,
     cookie: config.cookie,
+    provider_mode: config.providerMode,
+    spider_api_base: config.spiderApiBase,
+    spider_execution_mode: config.spiderExecutionMode,
+    spider_vendor_path: config.spiderVendorPath,
+    observability_enabled: config.observabilityEnabled,
   });
 }
 

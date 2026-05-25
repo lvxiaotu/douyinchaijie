@@ -29,12 +29,14 @@ AI_VIDEO_GRID_COLUMNS=3
 AI_VIDEO_GRID_MAX_FRAMES=9
 AI_VIDEO_GRID_CELL_WIDTH=320
 AI_VIDEO_GRID_CELL_HEIGHT=180
-FFMPEG_BINARY=ffmpeg
-FFPROBE_BINARY=ffprobe
+FFMPEG_BINARY=./ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe
+FFPROBE_BINARY=./ffmpeg-8.1.1-essentials_build/bin/ffprobe.exe
 GEMINI_API_KEY=
 OPENAI_API_KEY=
 LOCAL_VIDEO_MODEL_ENDPOINT=
 ```
+
+`FFMPEG_BINARY` 和 `FFPROBE_BINARY` 也可以写成系统 PATH 中的 `ffmpeg` / `ffprobe`。Windows 本地开发推荐使用项目内置的 `ffmpeg-8.1.1-essentials_build`，避免后端进程找不到二进制文件。
 
 ## 长视频证据包流程
 
@@ -46,6 +48,20 @@ LOCAL_VIDEO_MODEL_ENDPOINT=
 4. 按 `AI_VIDEO_SEGMENT_SECONDS` 切成多个分析片段；如果没有识别到语音，则按 `AI_VIDEO_SILENT_SEGMENT_SECONDS` 秒数进行视觉切段。
 5. 按片段抽关键帧，并生成带时间戳的关键帧网格图。
 6. 每个片段携带转写文本和网格图先做一次小拆解，再汇总成全局爆款公式。
+
+`ffmpeg` 和 `ffprobe` 在这个流程里职责不同：
+
+- `ffmpeg`：下载视频后的音频抽取、关键帧截取、截图生成。
+- `ffprobe`：读取视频总时长，用于进度估算，以及无语音视频的视觉切段兜底。
+
+如果 `ffprobe` 找不到，当前管线不会立刻失败，而是把视频时长记为 `0.0`。当 ASR 仍能识别出文本时，分段可以继续依赖转写时间戳；当视频本身无对白、音乐为主、噪声过重，或 Doubao/Whisper 返回空转写时，视觉切段需要视频时长，此时 `duration=0.0` 会导致 `analysis_segments=[]`，后续分段拆解会报 `RuntimeError: 转写结果为空，无法进行分段爆款拆解。`
+
+排查步骤：
+
+1. 确认 `.env` 中 `FFPROBE_BINARY` 指向真实存在的 `ffprobe.exe`，例如 `./ffmpeg-8.1.1-essentials_build/bin/ffprobe.exe`。
+2. 用 `ffprobe -v error -show_entries format=duration -of json <video.mp4>` 验证该视频能读出 `duration`。
+3. 打开 `data/runtime/ai_video_analysis/evidence/{task_id}/analysis_evidence.json`，检查 `metadata.duration`、`transcript.segments` 和 `analysis_segments`。
+4. 如果之前在依赖缺失时已经生成过空证据包，删除对应 `evidence/{task_id}` 目录，或临时设置 `AI_VIDEO_RESUME_ENABLED=false` 后重跑，避免复用旧的空 `transcript.json` / `keyframes.json`。
 
 `AI_VIDEO_PIPELINE_MODE` 可选值：
 
