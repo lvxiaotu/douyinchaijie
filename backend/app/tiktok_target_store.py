@@ -531,6 +531,7 @@ def _init_db() -> None:
         ensure_columns(connection, "tiktok_target_video_interaction_insights", TARGET_VIDEO_INTERACTION_INSIGHT_COLUMNS)
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_users_keyword ON tiktok_target_users(keyword, status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_user ON tiktok_target_videos(user_id, selected)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_target_set_users_set ON tiktok_target_set_users(set_id, deleted_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_set ON tiktok_target_videos(set_id, selected)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_videos_metrics ON tiktok_target_videos(set_id, engagement_score DESC, digg_count DESC)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_target_tasks_status ON tiktok_target_tasks(status, created_at)")
@@ -1649,29 +1650,11 @@ def delete_target_set(set_id: str) -> bool:
     deleted_at = now()
     with connect() as connection:
         connection.execute(
-            """
-            UPDATE tiktok_target_video_comments
-            SET deleted_at = %s, updated_at = %s
-            WHERE deleted_at IS NULL
-              AND video_id IN (SELECT id FROM tiktok_target_videos WHERE set_id = %s)
-            """,
-            (deleted_at, deleted_at, set_id),
-        )
-        connection.execute(
-            """
-            UPDATE tiktok_target_video_interaction_insights
-            SET deleted_at = %s, updated_at = %s
-            WHERE deleted_at IS NULL
-              AND video_id IN (SELECT id FROM tiktok_target_videos WHERE set_id = %s)
-            """,
-            (deleted_at, deleted_at, set_id),
+            "UPDATE tiktok_target_set_users SET deleted_at = %s WHERE set_id = %s AND deleted_at IS NULL",
+            (deleted_at, set_id),
         )
         connection.execute(
             "UPDATE tiktok_target_tasks SET deleted_at = %s, status = 'deleted', updated_at = %s WHERE set_id = %s AND deleted_at IS NULL",
-            (deleted_at, deleted_at, set_id),
-        )
-        connection.execute(
-            "UPDATE tiktok_target_videos SET deleted_at = %s, updated_at = %s WHERE set_id = %s AND deleted_at IS NULL",
             (deleted_at, deleted_at, set_id),
         )
         cursor = connection.execute(
@@ -1710,13 +1693,17 @@ def list_target_sets(limit: int = 100) -> list[dict[str, Any]]:
         video_count_rows = connection.execute(
             f"""
             SELECT
-                set_id,
-                COUNT(*) AS video_count,
-                SUM(CASE WHEN analysis_status = 'done' THEN 1 ELSE 0 END) AS analyzed_count
-            FROM tiktok_target_videos
-            WHERE set_id IN ({id_placeholders})
-              AND deleted_at IS NULL
-            GROUP BY set_id
+                set_user.set_id,
+                COUNT(DISTINCT video.id) AS video_count,
+                COUNT(DISTINCT CASE WHEN video.analysis_status = 'done' THEN video.id END) AS analyzed_count
+            FROM tiktok_target_set_users AS set_user
+            JOIN tiktok_target_users AS target_user ON target_user.id = set_user.user_id
+            LEFT JOIN tiktok_target_videos AS video
+              ON video.user_id = target_user.id
+             AND video.deleted_at IS NULL
+            WHERE set_user.set_id IN ({id_placeholders})
+              AND set_user.deleted_at IS NULL
+            GROUP BY set_user.set_id
             """,
             set_ids,
         ).fetchall()
@@ -1807,7 +1794,7 @@ def create_target_video(video_id: str, user_id: str, payload: dict[str, Any]) ->
     resolved_cover_url = str(payload.get("cover_url") or existing.get("cover_url") or "")
     resolved_play_url = str(payload.get("play_url") or existing.get("play_url") or "")
     resolved_download_url = str(payload.get("download_url") or existing.get("download_url") or "")
-    resolved_set_id = str(payload.get("set_id") or existing.get("set_id") or "")
+    resolved_set_id = str(existing.get("set_id") or "")
     resolved_analysis_status = str(payload.get("analysis_status") or existing.get("analysis_status") or "none")
     resolved_analysis_task_id = str(payload.get("analysis_task_id") or existing.get("analysis_task_id") or "")
     resolved_is_top = bool(payload.get("is_top")) or bool(existing.get("is_top"))
@@ -1933,29 +1920,47 @@ def list_target_videos(
     user_id: str | None = None,
     selected: bool | None = None,
     analysis_status: str | None = None,
-    limit: int = 500,
+    limit: int | None = 500,
 ) -> list[dict[str, Any]]:
     init_db()
+    joins = []
     conditions = []
     values: list[Any] = []
     if set_id:
-        conditions.append("set_id = %s")
+        joins.append(
+            """
+            JOIN tiktok_target_set_users AS set_user
+              ON set_user.user_id = video.user_id
+             AND set_user.set_id = %s
+             AND set_user.deleted_at IS NULL
+            """
+        )
         values.append(set_id)
     if user_id:
-        conditions.append("user_id = %s")
+        conditions.append("video.user_id = %s")
         values.append(user_id)
     if selected is not None:
-        conditions.append("selected = %s")
+        conditions.append("video.selected = %s")
         values.append(1 if selected else 0)
     if analysis_status:
-        conditions.append("analysis_status = %s")
+        conditions.append("video.analysis_status = %s")
         values.append(analysis_status)
-    conditions.append("deleted_at IS NULL")
+    conditions.append("video.deleted_at IS NULL")
     where = f"WHERE {' AND '.join(conditions)}"
-    values.append(limit)
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT %s"
+        values.append(limit)
     with connect() as connection:
         rows = connection.execute(
-            f"SELECT * FROM tiktok_target_videos {where} ORDER BY selected DESC, digg_count DESC, create_time DESC LIMIT %s",
+            f"""
+            SELECT video.*
+            FROM tiktok_target_videos AS video
+            {' '.join(joins)}
+            {where}
+            ORDER BY video.selected DESC, video.digg_count DESC, video.create_time DESC
+            {limit_clause}
+            """,
             values,
         ).fetchall()
     return [row_to_target_video(row) for row in rows]

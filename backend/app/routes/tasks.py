@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.app.task_store import (
+    count_tasks_by_status,
     delete_task,
     get_task,
     list_task_events,
@@ -33,18 +34,27 @@ def attach_ai_video_model_runs(task: dict[str, Any]) -> dict[str, Any]:
 def tasks(
     task_type: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = Query(default=None),
     include_result: bool = Query(default=False),
     include_events: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
     rows = list_tasks(
         task_type=task_type,
         limit=limit,
+        offset=offset,
+        status=status,
         include_result=include_result,
         include_events=include_events,
     )
     if task_type == "ai_video_analysis" and include_result:
         return [attach_ai_video_model_runs(task) for task in rows]
     return rows
+
+
+@router.get("/counts")
+def task_counts(task_type: str | None = Query(default=None)) -> dict[str, Any]:
+    return count_tasks_by_status(task_type=task_type)
 
 
 @router.get("/{task_id}")

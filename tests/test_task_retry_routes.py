@@ -178,5 +178,72 @@ class TaskRetryRouteTests(unittest.TestCase):
         self.assertEqual(task["result"]["comment_collection"]["status"], "done")
 
 
+class TaskStoreListingTests(unittest.TestCase):
+    def setUp(self):
+        self.pg_schema = isolated_postgres_schema("task_store_listing")
+        self.pg_schema.__enter__()
+        task_store.init_db()
+
+    def tearDown(self):
+        gc.collect()
+        self.pg_schema.__exit__(None, None, None)
+
+    def _task(self, task_id: str, task_type: str, status: str):
+        task_store.create_task(
+            task_id=task_id,
+            task_type=task_type,
+            title=task_id,
+            provider="mock",
+            payload={"video": {"aweme_id": task_id}},
+        )
+        if status != "pending":
+            task_store.update_task(task_id, status=status, progress=100 if status in {"done", "completed"} else 0)
+
+    def test_list_tasks_filters_by_status_bucket_and_counts_all_statuses(self):
+        for index, status in enumerate(
+            ["pending", "queued", "running", "done", "completed", "failed_final", "cancelled"],
+        ):
+            self._task(f"analysis-{index}", "ai_video_analysis", status)
+        self._task("prompt-done", "ai_prompt_reverse", "done")
+
+        counts = task_store.count_tasks_by_status("ai_video_analysis")
+        done_tasks = task_store.list_tasks("ai_video_analysis", status="done", limit=10, include_events=False)
+        second_done_page = task_store.list_tasks(
+            "ai_video_analysis",
+            status="done",
+            limit=1,
+            offset=1,
+            include_events=False,
+        )
+
+        self.assertEqual(counts["pending"], 2)
+        self.assertEqual(counts["running"], 1)
+        self.assertEqual(counts["done"], 2)
+        self.assertEqual(counts["error"], 2)
+        self.assertEqual(counts["total"], 7)
+        self.assertEqual({task["status"] for task in done_tasks}, {"done", "completed"})
+        self.assertEqual(len(second_done_page), 1)
+
+    def test_done_task_listing_orders_by_latest_completion_time(self):
+        self._task("created-newer-completed-earlier", "ai_video_analysis", "done")
+        self._task("created-older-completed-later", "ai_video_analysis", "done")
+        with task_store.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET created_at = %s, updated_at = %s WHERE id = %s",
+                (200, 300, "created-newer-completed-earlier"),
+            )
+            connection.execute(
+                "UPDATE tasks SET created_at = %s, updated_at = %s WHERE id = %s",
+                (100, 500, "created-older-completed-later"),
+            )
+
+        tasks = task_store.list_tasks("ai_video_analysis", status="done", limit=2, include_events=False)
+
+        self.assertEqual(
+            [task["id"] for task in tasks],
+            ["created-older-completed-later", "created-newer-completed-earlier"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

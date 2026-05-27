@@ -756,17 +756,29 @@ export function hasCommentCollectionFailure(task) {
   return task?.commentCollection?.status === "failed";
 }
 
-export function groupTasksByStatus(tasks) {
-  const isError = (task) =>
-    ["error", "failed", "failed_final"].includes(task.status) || hasCommentCollectionFailure(task);
+export function taskStatusBucket(task) {
+  const status = task?.status;
+  if (["error", "failed", "failed_final", "cancelled"].includes(status) || hasCommentCollectionFailure(task)) {
+    return "error";
+  }
+  if (["pending", "queued", "retry_waiting", "stale_requeued"].includes(status)) {
+    return "pending";
+  }
+  if (["running", "claimed"].includes(status)) {
+    return "running";
+  }
+  if (["done", "completed"].includes(status)) {
+    return "done";
+  }
+  return "error";
+}
 
+export function groupTasksByStatus(tasks) {
   return {
-    pending: tasks.filter(
-      (task) => !isError(task) && ["pending", "queued", "retry_waiting", "stale_requeued"].includes(task.status),
-    ),
-    running: tasks.filter((task) => !isError(task) && ["running", "claimed"].includes(task.status)),
-    done: tasks.filter((task) => !isError(task) && task.status === "done"),
-    error: tasks.filter(isError),
+    pending: tasks.filter((task) => taskStatusBucket(task) === "pending"),
+    running: tasks.filter((task) => taskStatusBucket(task) === "running"),
+    done: tasks.filter((task) => taskStatusBucket(task) === "done"),
+    error: tasks.filter((task) => taskStatusBucket(task) === "error"),
   };
 }
 

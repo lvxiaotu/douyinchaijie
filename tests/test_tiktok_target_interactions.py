@@ -91,6 +91,48 @@ class TiktokTargetInteractionTests(unittest.TestCase):
         self.assertTrue(updated["source_json"]["old"])
         self.assertTrue(updated["source_json"]["new"])
 
+    def test_set_video_views_follow_accounts_not_video_set_id(self):
+        store.create_target_set("set-a", "Set A")
+        store.create_target_set("set-b", "Set B")
+        store.upsert_target_user(
+            "user-1",
+            {
+                "sec_user_id": "sec-user-1",
+                "unique_id": "user-one",
+                "nickname": "User One",
+            },
+        )
+        store.add_user_to_target_set("set-a", "user-1")
+        store.add_user_to_target_set("set-b", "user-1")
+
+        video = store.create_target_video(
+            "account-video",
+            "user-1",
+            {
+                "set_id": "legacy-set",
+                "aweme_id": "account-video",
+                "desc": "account owned video",
+                "digg_count": 20,
+                "selected": True,
+                "analysis_status": "done",
+            },
+        )
+
+        self.assertEqual(video["set_id"], "")
+        self.assertEqual([item["id"] for item in store.list_target_videos(set_id="set-a")], ["account-video"])
+        self.assertEqual([item["id"] for item in store.list_target_videos(set_id="set-b")], ["account-video"])
+
+        sets = {item["id"]: item for item in store.list_target_sets(limit=10)}
+        self.assertEqual(sets["set-a"]["video_count"], 1)
+        self.assertEqual(sets["set-a"]["analyzed_count"], 1)
+        self.assertEqual(sets["set-b"]["video_count"], 1)
+        self.assertEqual(sets["set-b"]["analyzed_count"], 1)
+
+        self.assertTrue(store.delete_target_set("set-a"))
+        self.assertIsNotNone(store.get_target_video("account-video"))
+        self.assertEqual(store.list_target_videos(set_id="set-a"), [])
+        self.assertEqual([item["id"] for item in store.list_target_videos(set_id="set-b")], ["account-video"])
+
     def test_target_user_upsert_reuses_existing_sec_user_id(self):
         original = store.upsert_target_user(
             "user-row-1",

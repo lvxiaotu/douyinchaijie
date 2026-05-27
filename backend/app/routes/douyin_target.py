@@ -123,7 +123,7 @@ class TargetSetUpdate(BaseModel):
 
 class VideoStrategy(BaseModel):
     mode: str = Field(default="top")
-    per_user_limit: int = Field(default=5, ge=1, le=20)
+    per_user_limit: int = Field(default=5, ge=1, le=50)
     fetch_count: int = Field(default=20, ge=1, le=50)
     sort_metric: str = Field(default="digg_count")
 
@@ -737,7 +737,12 @@ def _analysis_video_payload(video: dict[str, Any], target_user: dict[str, Any] |
     return payload
 
 
-def _analysis_target_context(video: dict[str, Any], target_user: dict[str, Any] | None = None) -> dict[str, Any]:
+def _analysis_target_context(
+    video: dict[str, Any],
+    target_user: dict[str, Any] | None = None,
+    *,
+    set_id: str | None = None,
+) -> dict[str, Any]:
     dataset = get_target_video_interaction_dataset(video["id"])
     insights = dataset.get("insights") or {}
     comments = dataset.get("comments") or []
@@ -760,7 +765,7 @@ def _analysis_target_context(video: dict[str, Any], target_user: dict[str, Any] 
     top_comments = sorted(top_comments, key=lambda item: int(item.get("digg_count") or 0), reverse=True)[:30]
     metrics = video.get("metrics") if isinstance(video.get("metrics"), dict) else {}
     return {
-        "set_id": video.get("set_id"),
+        "set_id": set_id or video.get("set_id"),
         "video_id": video.get("id"),
         "aweme_id": video.get("aweme_id"),
         "author": author,
@@ -1205,13 +1210,14 @@ def collect_videos(payload: CollectVideosRequest) -> dict[str, Any]:
         try:
             result = None
             attempts = []
+            fetch_count = max(payload.strategy.fetch_count, payload.strategy.per_user_limit)
             for candidate in _user_video_query_candidates(user):
                 attempts.append(candidate)
                 try:
                     result = adapter.get_user_videos(
                         sec_user_id=candidate.get("sec_user_id") or None,
                         unique_id=candidate.get("unique_id") or None,
-                        count=payload.strategy.fetch_count,
+                        count=fetch_count,
                     )
                     break
                 except Exception as exc:
@@ -1229,7 +1235,6 @@ def collect_videos(payload: CollectVideosRequest) -> dict[str, Any]:
                         aweme_id,
                         user["id"],
                         {
-                            "set_id": payload.set_id,
                             "aweme_id": aweme_id,
                             "desc": video.get("desc", ""),
                             "cover_url": video.get("cover_url") or "",
@@ -1258,7 +1263,7 @@ def enqueue_analysis(payload: EnqueueAnalysisRequest) -> dict[str, Any]:
     if payload.video_ids:
         target_videos = [video for video_id in payload.video_ids if (video := get_target_video(video_id))]
     elif payload.set_id:
-        target_videos = list_target_videos(set_id=payload.set_id, selected=True, limit=2000)
+        target_videos = list_target_videos(set_id=payload.set_id, selected=True, limit=None)
     else:
         raise HTTPException(status_code=400, detail="set_id or video_ids is required")
 
@@ -1279,7 +1284,8 @@ def enqueue_analysis(payload: EnqueueAnalysisRequest) -> dict[str, Any]:
 
         target_user = get_target_user(target_video.get("user_id") or "")
         analysis_video = _analysis_video_payload(target_video, target_user)
-        target_context = _analysis_target_context(target_video, target_user)
+        target_set_id = payload.set_id or target_video.get("set_id") or ""
+        target_context = _analysis_target_context(target_video, target_user, set_id=target_set_id)
         analysis_video["douyin_target_context"] = target_context
         comment_collection = {
             "enabled": payload.collect_comments,
@@ -1307,7 +1313,7 @@ def enqueue_analysis(payload: EnqueueAnalysisRequest) -> dict[str, Any]:
         enqueue_ai_video_job(task_id=task_id, video=analysis_video, provider=provider)
         target_task = create_target_task(
             f"target-task-{uuid4().hex}",
-            set_id=target_video.get("set_id") or payload.set_id,
+            set_id=target_set_id,
             user_id=target_video.get("user_id") or "",
             video_id=target_video["id"],
             ai_task_id=task_id,

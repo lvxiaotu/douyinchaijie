@@ -245,6 +245,7 @@ function DouyinOperationProgress({ operation }) {
 
 const FollowerRanges = [
   ["", "全部"],
+  ["1.5w+", "1.5W以上粉丝"],
   ["1-5w", "1-5W粉丝"],
   ["5-10w", "5-10W粉丝"],
   ["10-20w", "10-20W粉丝"],
@@ -289,7 +290,9 @@ function buildSearchPayload(filters) {
     payload.maxFollowers = 9999;
   }
 
-  if (followerThreshold !== "below_1w" && followerRange === "1-5w") {
+  if (followerThreshold !== "below_1w" && followerRange === "1.5w+") {
+    payload.minFollowers = 15000;
+  } else if (followerThreshold !== "below_1w" && followerRange === "1-5w") {
     payload.minFollowers = 10000;
     payload.maxFollowers = 50000;
   } else if (followerThreshold !== "below_1w" && followerRange === "5-10w") {
@@ -376,6 +379,7 @@ export function DouyinTargetPanel() {
   const [sets, setSets] = useState([]);
   const [activeSetId, setActiveSetId] = useState("");
   const [activeSet, setActiveSet] = useState(null);
+  const [loadingSetId, setLoadingSetId] = useState("");
   const [setForm, setSetForm] = useState(() => createSetDraft(InitialKeyword));
   const [strategy, setStrategy] = useState({
     mode: "top",
@@ -504,20 +508,27 @@ export function DouyinTargetPanel() {
 
   async function selectSet(setId) {
     setActiveSetId(setId);
+    setError("");
     if (setId) {
-      fetchDouyinTargetSet(setId)
-        .then((detail) => {
-          setActiveSet(detail);
-          setSetForm({
-            name: detail.name || "",
-            note: detail.note || "",
-            keyword: detail.keyword || "",
-            status: detail.status || "draft",
-          });
-        })
-        .catch((err) => setError(err.message));
+      setActiveSet(null);
+      setLoadingSetId(setId);
+      try {
+        const detail = await fetchDouyinTargetSet(setId);
+        setActiveSet(detail);
+        setSetForm({
+          name: detail.name || "",
+          note: detail.note || "",
+          keyword: detail.keyword || "",
+          status: detail.status || "draft",
+        });
+      } catch (err) {
+        setError(`无法加载当前合集：${err.message || String(err)}`);
+      } finally {
+        setLoadingSetId((current) => (current === setId ? "" : current));
+      }
       return;
     }
+    setLoadingSetId("");
     setActiveSet(null);
     setSetForm(createSetDraft(keyword));
   }
@@ -730,11 +741,22 @@ export function DouyinTargetPanel() {
       setError("请先选择或创建一个对标集合。");
       return;
     }
-    if (!activeUsers.length) {
+    let collectSet = activeSet;
+    if (!collectSet || !Array.isArray(collectSet.users) || !collectSet.users.length) {
+      try {
+        collectSet = await fetchDouyinTargetSet(activeSetId);
+        setActiveSet(collectSet);
+      } catch (err) {
+        setError(`无法加载当前合集账号，请确认后端已启动：${err.message || String(err)}`);
+        return;
+      }
+    }
+    const collectUsers = collectSet?.users || [];
+    if (!collectUsers.length) {
       setError("当前合集还没有账号，无法采集作品。");
       return;
     }
-    const totalUsers = activeUsers.length || 0;
+    const totalUsers = collectUsers.length || 0;
     startOperation({
       type: "collect",
       title: `采集合集「${activeSet?.name || activeSetId}」`,
@@ -755,7 +777,7 @@ export function DouyinTargetPanel() {
       let savedCount = 0;
       const failedUsers = [];
       let processedUsers = 0;
-      for (const user of activeUsers) {
+      for (const user of collectUsers) {
         const userTargetId = user.id || user.sec_user_id || user.sec_uid || user.uid || user.unique_id;
         const label = user.nickname || user.unique_id || userTargetId;
         updateOperation({
@@ -1089,15 +1111,15 @@ export function DouyinTargetPanel() {
               </label>
               <label>
                 每账号视频数
-                <input type="number" min="1" max="20" value={strategy.perUserLimit} onChange={(event) => setStrategy((current) => ({ ...current, perUserLimit: event.target.value }))} />
+                <input type="number" min="1" max="50" value={strategy.perUserLimit} onChange={(event) => setStrategy((current) => ({ ...current, perUserLimit: event.target.value }))} />
               </label>
               <label>
                 候选视频池
                 <input type="number" min="1" max="50" value={strategy.fetchCount} onChange={(event) => setStrategy((current) => ({ ...current, fetchCount: event.target.value }))} />
               </label>
               <div className="field-hint target-strategy-hint">每个账号先拉取多少条作品作为候选，再从候选里按策略选出上方数量的视频。</div>
-              <button className="text-button" type="button" onClick={handleCollectVideos} disabled={!activeSetId || busy === "collect"}>
-                {busy === "collect" ? "采集中..." : "采集并选择视频"}
+              <button className="text-button" type="button" onClick={handleCollectVideos} disabled={!activeSetId || Boolean(loadingSetId) || busy === "collect"}>
+                {busy === "collect" ? "采集中..." : loadingSetId ? "加载合集..." : "采集并选择视频"}
               </button>
               <button className="primary-button" type="button" onClick={handleEnqueue} disabled={!activeVideos.length || busy === "enqueue"}>
                 加入 AI 拆解

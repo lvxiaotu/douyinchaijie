@@ -17,6 +17,29 @@ MEDIA_DRAFT_COLUMNS = {
     "deleted_at": "deleted_at INTEGER",
 }
 
+TASK_STATUS_GROUPS = {
+    "pending": ("pending", "queued", "retry_waiting", "stale_requeued"),
+    "running": ("running", "claimed"),
+    "done": ("done", "completed"),
+    "error": ("error", "failed", "failed_final", "cancelled"),
+}
+
+
+def task_status_values(status: str | None = None) -> tuple[str, ...] | None:
+    if not status:
+        return None
+    normalized = str(status).strip()
+    if not normalized or normalized == "all":
+        return None
+    return TASK_STATUS_GROUPS.get(normalized, (normalized,))
+
+
+def task_order_clause(status: str | None = None) -> str:
+    statuses = task_status_values(status)
+    if statuses and set(statuses).issubset(set(TASK_STATUS_GROUPS["done"])):
+        return "updated_at DESC, created_at DESC"
+    return "created_at DESC"
+
 
 @contextmanager
 def connect() -> Iterator[Any]:
@@ -395,21 +418,28 @@ def list_tasks(
     task_type: str | None = None,
     limit: int = 100,
     *,
+    offset: int = 0,
+    status: str | None = None,
     include_result: bool = True,
     include_events: bool = True,
 ) -> list[dict[str, Any]]:
     init_db()
+    conditions = ["deleted_at IS NULL"]
+    values: list[Any] = []
+    if task_type:
+        conditions.append("type = %s")
+        values.append(task_type)
+    statuses = task_status_values(status)
+    if statuses:
+        conditions.append(f"status IN ({placeholders(len(statuses))})")
+        values.extend(statuses)
+    where = " AND ".join(conditions)
+    values.extend([limit, offset])
     with connect() as connection:
-        if task_type:
-            rows = connection.execute(
-                "SELECT * FROM tasks WHERE deleted_at IS NULL AND type = %s ORDER BY created_at DESC LIMIT %s",
-                (task_type, limit),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                "SELECT * FROM tasks WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT %s",
-                (limit,),
-            ).fetchall()
+        rows = connection.execute(
+            f"SELECT * FROM tasks WHERE {where} ORDER BY {task_order_clause(status)} LIMIT %s OFFSET %s",
+            values,
+        ).fetchall()
     if include_result or include_events:
         tasks = [row_to_task(row, include_events=include_events) for row in rows]
         if not include_events:
@@ -420,6 +450,38 @@ def list_tasks(
                 task["result"] = None
         return tasks
     return [row_to_task_summary(row) for row in rows]
+
+
+def count_tasks_by_status(task_type: str | None = None) -> dict[str, Any]:
+    init_db()
+    conditions = ["deleted_at IS NULL"]
+    values: list[Any] = []
+    if task_type:
+        conditions.append("type = %s")
+        values.append(task_type)
+    where = " AND ".join(conditions)
+    with connect() as connection:
+        rows = connection.execute(
+            f"SELECT status, COUNT(*) AS count FROM tasks WHERE {where} GROUP BY status",
+            values,
+        ).fetchall()
+    grouped = {key: 0 for key in TASK_STATUS_GROUPS}
+    raw: dict[str, int] = {}
+    for row in rows:
+        status = str(row["status"] or "")
+        count = int(row["count"] or 0)
+        raw[status] = count
+        matched = False
+        for group, statuses in TASK_STATUS_GROUPS.items():
+            if status in statuses:
+                grouped[group] += count
+                matched = True
+                break
+        if not matched:
+            grouped["error"] += count
+    grouped["total"] = sum(raw.values())
+    grouped["raw"] = raw
+    return grouped
 
 
 def get_task(task_id: str) -> dict[str, Any] | None:

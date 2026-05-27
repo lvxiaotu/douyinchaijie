@@ -467,6 +467,38 @@ class AiVideoQueueTests(unittest.TestCase):
         self.assertEqual(enqueued["skipped"], [])
         self.assertIsNotNone(tiktok_target_store.find_target_task_for_video("target-requeue-aweme", {"pending", "running", "done"}))
 
+    def test_enqueue_set_does_not_cap_selected_videos_at_two_thousand(self):
+        tiktok_target_store.create_target_set("set-large-enqueue", "Large enqueue")
+        tiktok_target_store.upsert_target_user(
+            "user-large-enqueue",
+            {"sec_user_id": "sec-large-enqueue", "unique_id": "large-enqueue"},
+        )
+        tiktok_target_store.add_user_to_target_set("set-large-enqueue", "user-large-enqueue")
+        for index in range(2001):
+            tiktok_target_store.create_target_video(
+                f"large-aweme-{index}",
+                "user-large-enqueue",
+                {
+                    "aweme_id": f"large-aweme-{index}",
+                    "desc": f"Large video {index}",
+                    "digg_count": index,
+                    "selected": True,
+                },
+            )
+
+        with patch("backend.app.routes.douyin_target.create_task") as create_task, patch(
+            "backend.app.routes.douyin_target.enqueue_ai_video_job"
+        ) as enqueue_job:
+            create_task.return_value = {"status": "pending"}
+            enqueue_job.return_value = {"status": "pending"}
+
+            enqueued = enqueue_analysis(EnqueueAnalysisRequest(set_id="set-large-enqueue", provider="mock"))
+
+        self.assertEqual(enqueued["count"], 2001)
+        self.assertEqual(enqueued["skipped"], [])
+        self.assertEqual(create_task.call_count, 2001)
+        self.assertEqual(enqueue_job.call_count, 2001)
+
     def test_enqueue_clears_stale_target_task_when_generic_task_was_deleted(self):
         tiktok_target_store.create_target_video(
             "target-stale-aweme",

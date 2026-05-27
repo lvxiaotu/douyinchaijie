@@ -1,5 +1,5 @@
-import React, { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
-import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchive, fetchAiProductionReverseArchives, fetchAiPromptReverseArchive, fetchAiPromptReverseArchives, fetchAiVideoArchive, fetchAiVideoArchives, fetchTask, fetchTasks, fetchWorkbench, retryAiProductionReverseJob, retryAiPromptReverseJob, retryAiVideoComments, retryAiVideoQueueJob, retryTextToAssetsJob } from "./services/api";
+import React, { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { archiveTask, createAiProductionReverseJob, createAiPromptReverseJob, createAiVideoBreakdownJob, deleteTask, fetchAiProductionReverseArchive, fetchAiProductionReverseArchives, fetchAiPromptReverseArchive, fetchAiPromptReverseArchives, fetchAiVideoArchive, fetchAiVideoArchives, fetchTask, fetchTaskCounts, fetchTasks, fetchWorkbench, retryAiProductionReverseJob, retryAiPromptReverseJob, retryAiVideoComments, retryAiVideoQueueJob, retryTextToAssetsJob } from "./services/api";
 import { fallbackWorkbench } from "./workbenchSeed";
 import { Database, FolderCog, Languages, MoonStar, RefreshCw, SunMedium } from "lucide-react";
 import { Badge, ToolCard } from "./components/common/index";
@@ -15,9 +15,33 @@ import { RunningHubTtsPanel } from "./features/runningHub/RunningHubTtsPanel";
 import { AiProductionReverseSettingsPanel, AiPromptReverseSettingsPanel, AiProviderSettingsPanel, AiVideoSettingsPanel, DouyinSettingsPanel, JianyingDraftSettingsPanel } from "./features/settings";
 import { TaskRecordModal, TaskStatusRow } from "./features/tasks";
 import { TextToAssetsPanel, TextToAssetsResultModal } from "./features/textToAssets";
-import { archiveIdSet, archivePresentation, groupTasksByStatus, hasCommentCollectionFailure, normalizeAnalysisTask, normalizeCommercialAnalysisResult, normalizeProductionReverseTask, normalizePromptReverseTask, normalizeTextToAssetsTask, preferredTaskStatus } from "./utils/appUtils";
+import { archiveIdSet, archivePresentation, groupTasksByStatus, hasCommentCollectionFailure, normalizeAnalysisTask, normalizeCommercialAnalysisResult, normalizeProductionReverseTask, normalizePromptReverseTask, normalizeTextToAssetsTask, taskStatusBucket } from "./utils/appUtils";
 
-const TaskListLimit = 5000;
+const TaskPageSize = 10;
+const EmptyTaskCounts = { pending: 0, running: 0, done: 0, error: 0, total: 0 };
+
+function normalizeTaskCounts(counts = {}) {
+  return {
+    pending: Number(counts.pending || 0),
+    running: Number(counts.running || 0),
+    done: Number(counts.done || 0),
+    error: Number(counts.error || 0),
+    total: Number(counts.total || 0),
+  };
+}
+
+function mergeTaskPage(current, status, nextTasks, append) {
+  const retained = current.filter((task) => taskStatusBucket(task) !== status);
+  const merged = append ? [...(groupTasksByStatus(current)[status] || []), ...nextTasks] : nextTasks;
+  const seen = new Set();
+  const unique = [];
+  merged.forEach((task) => {
+    if (!task?.id || seen.has(task.id)) return;
+    seen.add(task.id);
+    unique.push(task);
+  });
+  return [...retained, ...unique];
+}
 
 export function App() {
   const [activeSection, setActiveSection] = useState("dashboard");
@@ -25,10 +49,10 @@ export function App() {
   const [activeJianyingEditor, setActiveJianyingEditor] = useState("script");
   const [activeDouyinWorkbench, setActiveDouyinWorkbench] = useState("collector");
   const [activeToolId, setActiveToolId] = useState("");
-  const [activeAnalysisStatus, setActiveAnalysisStatus] = useState("running");
-  const [activePromptStatus, setActivePromptStatus] = useState("running");
-  const [activeProductionStatus, setActiveProductionStatus] = useState("running");
-  const [activeTextToAssetsStatus, setActiveTextToAssetsStatus] = useState("running");
+  const [activeAnalysisStatus, setActiveAnalysisStatus] = useState("");
+  const [activePromptStatus, setActivePromptStatus] = useState("");
+  const [activeProductionStatus, setActiveProductionStatus] = useState("");
+  const [activeTextToAssetsStatus, setActiveTextToAssetsStatus] = useState("");
   const [selectedTaskRecord, setSelectedTaskRecord] = useState(null);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
@@ -37,6 +61,11 @@ export function App() {
   const [promptReverseTasks, setPromptReverseTasks] = useState([]);
   const [productionReverseTasks, setProductionReverseTasks] = useState([]);
   const [textToAssetsTasks, setTextToAssetsTasks] = useState([]);
+  const [analysisTaskCounts, setAnalysisTaskCounts] = useState(EmptyTaskCounts);
+  const [promptReverseTaskCounts, setPromptReverseTaskCounts] = useState(EmptyTaskCounts);
+  const [productionReverseTaskCounts, setProductionReverseTaskCounts] = useState(EmptyTaskCounts);
+  const [textToAssetsTaskCounts, setTextToAssetsTaskCounts] = useState(EmptyTaskCounts);
+  const [taskPageLoading, setTaskPageLoading] = useState("");
   const [analysisArchives, setAnalysisArchives] = useState([]);
   const [promptReverseArchives, setPromptReverseArchives] = useState([]);
   const [productionReverseArchives, setProductionReverseArchives] = useState([]);
@@ -55,40 +84,124 @@ export function App() {
     if (typeof window === "undefined") return "light";
     return window.localStorage.getItem(THEME_STORAGE_KEY) || "light";
   });
+  const taskStatusesRef = useRef({});
+  const taskListsRef = useRef({});
+  taskStatusesRef.current = {
+    analysis: activeAnalysisStatus,
+    prompt: activePromptStatus,
+    production: activeProductionStatus,
+    textToAssets: activeTextToAssetsStatus,
+  };
+  taskListsRef.current = {
+    analysis: analysisTasks,
+    prompt: promptReverseTasks,
+    production: productionReverseTasks,
+    textToAssets: textToAssetsTasks,
+  };
   const hasTrackedActiveTasks = useMemo(
-    () =>
-      [...analysisTasks, ...promptReverseTasks, ...productionReverseTasks, ...textToAssetsTasks].some(
-        (task) => !["done", "error"].includes(task.status),
-      ),
-    [analysisTasks, promptReverseTasks, productionReverseTasks, textToAssetsTasks],
+    () => {
+      const countsHaveActiveTasks = [
+        analysisTaskCounts,
+        promptReverseTaskCounts,
+        productionReverseTaskCounts,
+        textToAssetsTaskCounts,
+      ].some((counts) => Number(counts.pending || 0) + Number(counts.running || 0) > 0);
+      const loadedRowsHaveActiveTasks = [
+        ...analysisTasks,
+        ...promptReverseTasks,
+        ...productionReverseTasks,
+        ...textToAssetsTasks,
+      ].some((task) => ["pending", "running"].includes(taskStatusBucket(task)));
+      return countsHaveActiveTasks || loadedRowsHaveActiveTasks;
+    },
+    [
+      analysisTaskCounts,
+      analysisTasks,
+      productionReverseTaskCounts,
+      productionReverseTasks,
+      promptReverseTaskCounts,
+      promptReverseTasks,
+      textToAssetsTaskCounts,
+      textToAssetsTasks,
+    ],
   );
 
-  async function refreshAnalysisTaskList(options = {}) {
-    const tasks = await fetchTasks("ai_video_analysis", { limit: TaskListLimit, ...options });
-    setAnalysisTasks(tasks.map((task) => normalizeAnalysisTask(task)));
+  async function refreshTaskPage({
+    taskType,
+    status,
+    append = false,
+    currentTasks,
+    setTasks,
+    setCounts,
+    normalizeTask,
+  }) {
+    const resolvedStatus = status || "";
+    const countsPromise = fetchTaskCounts(taskType);
+    const currentGroups = groupTasksByStatus(currentTasks);
+    const loadedCount = currentGroups[resolvedStatus]?.length || 0;
+    const pageLimit = append ? TaskPageSize : Math.max(TaskPageSize, Math.min(5000, loadedCount || TaskPageSize));
+    const tasksPromise = resolvedStatus
+      ? fetchTasks(taskType, {
+          status: resolvedStatus,
+          limit: pageLimit,
+          offset: append ? loadedCount : 0,
+        })
+      : Promise.resolve([]);
+    const [counts, tasks] = await Promise.all([countsPromise, tasksPromise]);
+    setCounts(normalizeTaskCounts(counts));
+    if (resolvedStatus) {
+      setTasks((current) => mergeTaskPage(current, resolvedStatus, tasks.map((task) => normalizeTask(task)), append));
+    }
     setTaskSyncError("");
     setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  }
+
+  async function refreshAnalysisTaskList(options = {}) {
+    await refreshTaskPage({
+      taskType: "ai_video_analysis",
+      status: options.status ?? taskStatusesRef.current.analysis,
+      append: Boolean(options.append),
+      currentTasks: taskListsRef.current.analysis || [],
+      setTasks: setAnalysisTasks,
+      setCounts: setAnalysisTaskCounts,
+      normalizeTask: normalizeAnalysisTask,
+    });
   }
 
   async function refreshPromptReverseTaskList(options = {}) {
-    const tasks = await fetchTasks("ai_prompt_reverse", { limit: TaskListLimit, ...options });
-    setPromptReverseTasks(tasks.map(normalizePromptReverseTask));
-    setTaskSyncError("");
-    setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    await refreshTaskPage({
+      taskType: "ai_prompt_reverse",
+      status: options.status ?? taskStatusesRef.current.prompt,
+      append: Boolean(options.append),
+      currentTasks: taskListsRef.current.prompt || [],
+      setTasks: setPromptReverseTasks,
+      setCounts: setPromptReverseTaskCounts,
+      normalizeTask: normalizePromptReverseTask,
+    });
   }
 
   async function refreshProductionReverseTaskList(options = {}) {
-    const tasks = await fetchTasks("ai_production_reverse", { limit: TaskListLimit, ...options });
-    setProductionReverseTasks(tasks.map(normalizeProductionReverseTask));
-    setTaskSyncError("");
-    setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    await refreshTaskPage({
+      taskType: "ai_production_reverse",
+      status: options.status ?? taskStatusesRef.current.production,
+      append: Boolean(options.append),
+      currentTasks: taskListsRef.current.production || [],
+      setTasks: setProductionReverseTasks,
+      setCounts: setProductionReverseTaskCounts,
+      normalizeTask: normalizeProductionReverseTask,
+    });
   }
 
   async function refreshTextToAssetsTaskList(options = {}) {
-    const tasks = await fetchTasks("text_to_assets", { limit: TaskListLimit, ...options });
-    setTextToAssetsTasks(tasks.map(normalizeTextToAssetsTask));
-    setTaskSyncError("");
-    setLastTaskRefresh(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    await refreshTaskPage({
+      taskType: "text_to_assets",
+      status: options.status ?? taskStatusesRef.current.textToAssets,
+      append: Boolean(options.append),
+      currentTasks: taskListsRef.current.textToAssets || [],
+      setTasks: setTextToAssetsTasks,
+      setCounts: setTextToAssetsTaskCounts,
+      normalizeTask: normalizeTextToAssetsTask,
+    });
   }
 
   async function refreshAllTaskLists(options = {}) {
@@ -409,6 +522,19 @@ export function App() {
     setRefreshing(false);
   }
 
+  async function loadTaskStatus(kind, status, refreshTaskList, append = false) {
+    if (!status) return;
+    const loadingKey = `${kind}:${status}`;
+    setTaskPageLoading(loadingKey);
+    try {
+      await refreshTaskList({ status, append });
+    } catch (err) {
+      setTaskSyncError(`任务加载失败：${err.message || err}`);
+    } finally {
+      setTaskPageLoading((current) => (current === loadingKey ? "" : current));
+    }
+  }
+
   function openSection(sectionId) {
     startTransition(() => {
       setActiveSection(sectionId);
@@ -533,34 +659,6 @@ export function App() {
   const productionReverseTaskGroups = useMemo(() => groupTasksByStatus(productionReverseTasks), [productionReverseTasks]);
   const textToAssetsTaskGroups = useMemo(() => groupTasksByStatus(textToAssetsTasks), [textToAssetsTasks]);
 
-  useEffect(() => {
-    const nextStatus = preferredTaskStatus(analysisTaskGroups, activeAnalysisStatus);
-    if (nextStatus !== activeAnalysisStatus) {
-      setActiveAnalysisStatus(nextStatus);
-    }
-  }, [analysisTaskGroups, activeAnalysisStatus]);
-
-  useEffect(() => {
-    const nextStatus = preferredTaskStatus(promptReverseTaskGroups, activePromptStatus);
-    if (nextStatus !== activePromptStatus) {
-      setActivePromptStatus(nextStatus);
-    }
-  }, [promptReverseTaskGroups, activePromptStatus]);
-
-  useEffect(() => {
-    const nextStatus = preferredTaskStatus(productionReverseTaskGroups, activeProductionStatus);
-    if (nextStatus !== activeProductionStatus) {
-      setActiveProductionStatus(nextStatus);
-    }
-  }, [productionReverseTaskGroups, activeProductionStatus]);
-
-  useEffect(() => {
-    const nextStatus = preferredTaskStatus(textToAssetsTaskGroups, activeTextToAssetsStatus);
-    if (nextStatus !== activeTextToAssetsStatus) {
-      setActiveTextToAssetsStatus(nextStatus);
-    }
-  }, [textToAssetsTaskGroups, activeTextToAssetsStatus]);
-
   const [title] = sections[activeSection] || ["AI 视频队列"];
 
   useEffect(() => {
@@ -644,7 +742,7 @@ export function App() {
             <div className="panel-header">
               <div>
                 <h2>任务中心</h2>
-                <p>任务按工具分行排列，点击状态切换列表，点击任务查看详情。</p>
+                <p>任务按工具分行排列，状态默认收起；点击状态只加载该状态的前 10 条。</p>
               </div>
               <Badge status={taskSyncError ? "error" : "running"}>
                 {taskSyncError || `自动刷新中${lastTaskRefresh ? ` · ${lastTaskRefresh}` : ""}`}
@@ -655,8 +753,15 @@ export function App() {
                 title="AI 视频拆解"
                 desc="展示 AI 视频拆解的等待中、进行中、已完成和异常任务。"
                 groups={analysisTaskGroups}
+                counts={analysisTaskCounts}
                 activeStatus={activeAnalysisStatus}
-                onChangeStatus={setActiveAnalysisStatus}
+                loadingStatus={taskPageLoading.startsWith("analysis:") ? taskPageLoading.split(":")[1] : ""}
+                pageSize={TaskPageSize}
+                onChangeStatus={(status) => {
+                  setActiveAnalysisStatus(status);
+                  loadTaskStatus("analysis", status, refreshAnalysisTaskList);
+                }}
+                onLoadMore={(status) => loadTaskStatus("analysis", status, refreshAnalysisTaskList, true)}
                 onOpenTask={(task) => openTaskRecord("analysis", "AI 视频拆解", task)}
                 onRestartTask={handleRestartAnalysisTask}
                 onRetryTask={handleRetryAnalysisTask}
@@ -666,8 +771,15 @@ export function App() {
                 title="AI 提示词反推"
                 desc="展示提示词反推的等待中、进行中、已完成和异常任务。"
                 groups={promptReverseTaskGroups}
+                counts={promptReverseTaskCounts}
                 activeStatus={activePromptStatus}
-                onChangeStatus={setActivePromptStatus}
+                loadingStatus={taskPageLoading.startsWith("prompt:") ? taskPageLoading.split(":")[1] : ""}
+                pageSize={TaskPageSize}
+                onChangeStatus={(status) => {
+                  setActivePromptStatus(status);
+                  loadTaskStatus("prompt", status, refreshPromptReverseTaskList);
+                }}
+                onLoadMore={(status) => loadTaskStatus("prompt", status, refreshPromptReverseTaskList, true)}
                 onOpenTask={(task) => openTaskRecord("prompt", "AI 提示词反推", task)}
                 onRetryTask={handleRetryPromptReverseTask}
                 onDeleteTask={handleDeletePromptReverseTask}
@@ -676,8 +788,15 @@ export function App() {
                 title="AI 制作方式反推"
                 desc="展示制作方式反推的等待中、进行中、已完成和异常任务。"
                 groups={productionReverseTaskGroups}
+                counts={productionReverseTaskCounts}
                 activeStatus={activeProductionStatus}
-                onChangeStatus={setActiveProductionStatus}
+                loadingStatus={taskPageLoading.startsWith("production:") ? taskPageLoading.split(":")[1] : ""}
+                pageSize={TaskPageSize}
+                onChangeStatus={(status) => {
+                  setActiveProductionStatus(status);
+                  loadTaskStatus("production", status, refreshProductionReverseTaskList);
+                }}
+                onLoadMore={(status) => loadTaskStatus("production", status, refreshProductionReverseTaskList, true)}
                 onOpenTask={(task) => openTaskRecord("production", "AI 制作方式反推", task)}
                 onRetryTask={handleRetryProductionReverseTask}
                 onDeleteTask={handleDeleteProductionReverseTask}
@@ -686,8 +805,15 @@ export function App() {
                 title="一句话转素材"
                 desc="展示 Text-to-Assets 的等待中、进行中、已完成和异常任务。"
                 groups={textToAssetsTaskGroups}
+                counts={textToAssetsTaskCounts}
                 activeStatus={activeTextToAssetsStatus}
-                onChangeStatus={setActiveTextToAssetsStatus}
+                loadingStatus={taskPageLoading.startsWith("textToAssets:") ? taskPageLoading.split(":")[1] : ""}
+                pageSize={TaskPageSize}
+                onChangeStatus={(status) => {
+                  setActiveTextToAssetsStatus(status);
+                  loadTaskStatus("textToAssets", status, refreshTextToAssetsTaskList);
+                }}
+                onLoadMore={(status) => loadTaskStatus("textToAssets", status, refreshTextToAssetsTaskList, true)}
                 onOpenTask={(task) => openTaskRecord("text_to_assets", "一句话转素材", task)}
                 onRetryTask={handleRetryTextToAssetsTask}
                 onDeleteTask={handleDeleteTextToAssetsTask}

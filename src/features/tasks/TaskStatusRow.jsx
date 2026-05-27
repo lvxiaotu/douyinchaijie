@@ -1,65 +1,98 @@
-import { useState } from "react";
 import { ChevronDown, RefreshCw, Trash2 } from "lucide-react";
 import { Badge } from "../../components/common/index";
 import { statusText, taskBoardStatuses } from "../../constants/appConfig";
-import { commentCollectionLabel, commentCollectionTone, preferredTaskStatus } from "../../utils/appUtils";
+import { commentCollectionLabel, commentCollectionTone } from "../../utils/appUtils";
+
+const emptyTextByStatus = {
+  pending: "当前没有等待中的任务。",
+  running: "当前没有进行中的任务。",
+  done: "当前没有已完成的任务。",
+  error: "当前没有异常任务。",
+};
+
+function statusCount(counts, groups, status) {
+  return Math.max(Number(counts?.[status] || 0), groups[status]?.length || 0);
+}
 
 export function TaskStatusRow({
   title,
   desc,
-  groups,
+  groups = {},
+  counts = {},
   activeStatus,
+  loadingStatus = "",
+  pageSize = 10,
   onChangeStatus,
+  onLoadMore,
   onOpenTask,
   onRestartTask,
   onRetryTask,
   onDeleteTask,
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const total = taskBoardStatuses.reduce((sum, [key]) => sum + (groups[key]?.length || 0), 0);
-  const resolvedStatus = preferredTaskStatus(groups, activeStatus);
-  const activeTasks = groups[resolvedStatus] || [];
-  const emptyText = {
-    pending: "当前没有等待中的任务。",
-    running: "当前没有进行中的任务。",
-    done: "当前没有已完成的任务。",
-    error: "当前没有异常任务。",
-  }[resolvedStatus];
+  const statusCounts = taskBoardStatuses.reduce(
+    (result, [key]) => ({
+      ...result,
+      [key]: statusCount(counts, groups, key),
+    }),
+    {},
+  );
+  const calculatedTotal = taskBoardStatuses.reduce((sum, [key]) => sum + statusCounts[key], 0);
+  const total = Math.max(Number(counts?.total || 0), calculatedTotal);
+  const resolvedStatus = activeStatus || "";
+  const activeTasks = resolvedStatus ? groups[resolvedStatus] || [] : [];
+  const activeTotal = resolvedStatus ? Math.max(statusCounts[resolvedStatus] || 0, activeTasks.length) : 0;
+  const loading = Boolean(resolvedStatus && loadingStatus === resolvedStatus);
+  const hasMore = Boolean(resolvedStatus && activeTasks.length < activeTotal);
+  const emptyText = emptyTextByStatus[resolvedStatus] || "点击上方状态查看任务。";
+
+  function handleStatusClick(status) {
+    onChangeStatus?.(resolvedStatus === status ? "" : status);
+  }
+
+  function handleListScroll(event) {
+    if (!hasMore || loading) return;
+    const target = event.currentTarget;
+    if (target.scrollHeight - target.scrollTop - target.clientHeight < 80) {
+      onLoadMore?.(resolvedStatus);
+    }
+  }
 
   return (
     <section className="panel task-row-panel">
-      <button
-        className={`panel-header task-row-header task-row-toggle ${expanded ? "expanded" : ""}`}
-        type="button"
-        onClick={() => setExpanded((current) => !current)}
-        aria-expanded={expanded}
-      >
+      <div className="panel-header task-row-header">
         <div>
           <h2>{title}</h2>
           <p>{desc}</p>
         </div>
-        <div className="task-row-toggle-meta">
+        <div className="task-row-summary">
           <Badge status={total ? "running" : "draft"}>{total ? `${total} 个任务` : "暂无任务"}</Badge>
-          <span className="task-row-toggle-label">{expanded ? "点击收起" : "点击展开"}</span>
-          <ChevronDown size={18} className={`task-row-toggle-icon ${expanded ? "expanded" : ""}`} />
+          <span>{resolvedStatus ? `已显示 ${activeTasks.length}/${activeTotal}` : "默认收起"}</span>
         </div>
-      </button>
-      {expanded && (
-        <>
-          <div className="task-status-tabs">
-            {taskBoardStatuses.map(([key, label]) => (
-              <button
-                className={`task-status-tab ${resolvedStatus === key ? "active" : ""}`}
-                key={key}
-                type="button"
-                onClick={() => onChangeStatus(key)}
-              >
-                <span>{label}</span>
-                <strong>{groups[key]?.length || 0}</strong>
-              </button>
-            ))}
+      </div>
+
+      <div className="task-status-tabs">
+        {taskBoardStatuses.map(([key, label]) => (
+          <button
+            className={`task-status-tab ${resolvedStatus === key ? "active" : ""}`}
+            key={key}
+            type="button"
+            aria-expanded={resolvedStatus === key}
+            onClick={() => handleStatusClick(key)}
+          >
+            <span>{label}</span>
+            <strong>{statusCounts[key]}</strong>
+            <ChevronDown size={16} className={`task-status-tab-icon ${resolvedStatus === key ? "expanded" : ""}`} />
+          </button>
+        ))}
+      </div>
+
+      {resolvedStatus && (
+        <div className="task-status-section">
+          <div className="task-status-section-head">
+            <Badge>{taskBoardStatuses.find(([key]) => key === resolvedStatus)?.[1] || "任务"}</Badge>
+            <span>每次加载 {pageSize} 条</span>
           </div>
-          <div className="task-row-list">
+          <div className="task-row-list" onScroll={handleListScroll}>
             {activeTasks.length ? (
               activeTasks.map((task) => {
                 const taskTitle = String(task.title || "").trim() || "未命名任务";
@@ -77,13 +110,11 @@ export function TaskStatusRow({
                     <div className="task-list-row-meta">
                       {commentLabel && (
                         <span className="task-list-row-comment-status" title={commentLabel}>
-                          <Badge status={commentCollectionTone(task.commentCollection)}>
-                            {commentLabel}
-                          </Badge>
+                          <Badge status={commentCollectionTone(task.commentCollection)}>{commentLabel}</Badge>
                         </span>
                       )}
-                      <Badge status={task.status}>{statusText[task.status] || task.status}</Badge>
-                      <span className="task-list-progress">{task.progress}%</span>
+                      <Badge status={task.status}>{statusText[task.status] || task.status || "未知"}</Badge>
+                      <span className="task-list-progress">{task.progress ?? 0}%</span>
                       <span>{task.updated}</span>
                       <div className="task-list-row-actions">
                         {["pending", "running"].includes(resolvedStatus) && onRestartTask && (
@@ -128,10 +159,22 @@ export function TaskStatusRow({
                 );
               })
             ) : (
-              <div className="empty-result">{emptyText}</div>
+              <div className="empty-result">{loading ? "任务加载中..." : emptyText}</div>
+            )}
+            {(hasMore || loading) && (
+              <div className="task-row-list-footer">
+                <button
+                  className="load-more-button"
+                  type="button"
+                  disabled={loading}
+                  onClick={() => onLoadMore?.(resolvedStatus)}
+                >
+                  {loading ? "加载中..." : `加载更多（已显示 ${activeTasks.length}/${activeTotal}）`}
+                </button>
+              </div>
             )}
           </div>
-        </>
+        </div>
       )}
     </section>
   );

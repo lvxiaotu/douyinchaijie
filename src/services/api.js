@@ -403,13 +403,15 @@ export async function deleteDouyinTargetSet(setId) {
 }
 
 export function collectDouyinTargetVideos(payload) {
+  const perUserLimit = Number(payload.perUserLimit || 5);
+  const fetchCount = Number(payload.fetchCount || 20);
   return postJson("/api/tools/douyin-target/videos/collect", {
     set_id: payload.setId,
     user_ids: payload.userIds || [],
     strategy: {
       mode: payload.mode || "top",
-      per_user_limit: Number(payload.perUserLimit || 5),
-      fetch_count: Number(payload.fetchCount || 20),
+      per_user_limit: perUserLimit,
+      fetch_count: Math.max(fetchCount, perUserLimit),
       sort_metric: payload.sortMetric || "digg_count",
     },
   });
@@ -591,10 +593,24 @@ export async function fetchTasks(taskType, options = {}) {
   const params = new URLSearchParams();
   if (taskType) params.set("task_type", taskType);
   if (options.limit) params.set("limit", String(options.limit));
+  if (options.offset) params.set("offset", String(options.offset));
+  if (options.status) params.set("status", String(options.status));
   if (options.includeResult) params.set("include_result", "true");
   if (options.includeEvents) params.set("include_events", "true");
   const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`${API_BASE}/api/tasks${query}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data?.detail || data, null, 2));
+  }
+  return data;
+}
+
+export async function fetchTaskCounts(taskType) {
+  const params = new URLSearchParams();
+  if (taskType) params.set("task_type", taskType);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${API_BASE}/api/tasks/counts${query}`);
   const data = await response.json();
   if (!response.ok) {
     throw new Error(JSON.stringify(data?.detail || data, null, 2));
