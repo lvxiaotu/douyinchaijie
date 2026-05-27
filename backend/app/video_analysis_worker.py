@@ -23,6 +23,7 @@ from backend.app.video_analysis_queue import (
     worker_host_id,
 )
 from backend.app.video_task_limiter import video_task_concurrency_limit
+from integrations.ai_video_analysis.evidence_pipeline import NonRetryableEvidenceError
 
 
 class ProgressWriteThrottler:
@@ -200,7 +201,7 @@ class VideoAnalysisCoordinator:
                     )
                     if current and current.get("cancel_requested"):
                         raise RuntimeError("AI_VIDEO_TASK_CANCELLED")
-                    update_task(task_id, status="running", progress=progress, message=message)
+                    update_task(task_id, status="running", progress=progress, message=message, error=None)
                     progress_throttler.mark_written(progress, message)
 
             report(5, "后台 worker 已认领 AI 视频拆解任务")
@@ -228,11 +229,12 @@ class VideoAnalysisCoordinator:
                 update_task(task_id, status="cancelled", progress=100, message="AI 视频拆解已取消", error=None)
                 return
             traceback.print_exc()
+            retryable = not isinstance(exc, NonRetryableEvidenceError)
             failed = fail_ai_video_job(
                 task_id,
                 error_code=type(exc).__name__,
                 error_message=str(exc),
-                retryable=True,
+                retryable=retryable,
             )
             if failed and failed.get("status") == "retry_waiting":
                 update_task(

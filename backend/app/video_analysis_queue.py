@@ -554,8 +554,40 @@ def active_job_count(connection: Any | None = None) -> int:
     return int(row["count"] if row else 0)
 
 
+def reconcile_completed_ai_video_jobs() -> int:
+    """Release queue locks for tasks that were already marked done."""
+    init_ai_video_queue_db()
+    now = now_ts()
+    with queue_connection() as connection:
+        rows = connection.execute(
+            """
+            UPDATE ai_video_jobs AS job
+            SET status = 'done',
+                stage = 'done',
+                progress = 100,
+                locked_by = '',
+                locked_at = NULL,
+                heartbeat_at = NULL,
+                retry_after = NULL,
+                error_code = '',
+                error_message = '',
+                updated_at = %s
+            FROM tasks
+            WHERE job.task_id = tasks.id
+              AND job.status IN ('claimed', 'running')
+              AND tasks.deleted_at IS NULL
+              AND tasks.status IN ('done', 'completed')
+              AND job.deleted_at IS NULL
+            RETURNING job.task_id
+            """,
+            (now,),
+        ).fetchall()
+    return len(rows)
+
+
 def claim_next_ai_video_job(worker_id: str) -> dict[str, Any] | None:
     init_ai_video_queue_db()
+    reconcile_completed_ai_video_jobs()
     requeue_stale_ai_video_jobs()
     now = now_ts()
     limit = video_task_concurrency_limit()
@@ -880,6 +912,7 @@ def queue_stats(*, task_id: str | None = None) -> dict[str, Any]:
 
 def queue_snapshot(*, task_id: str | None = None, backlog_limit: int = 20) -> dict[str, Any]:
     init_ai_video_queue_db()
+    reconcile_completed_ai_video_jobs()
     backlog_limit = max(1, min(int(backlog_limit or 20), 100))
     with queue_connection() as connection:
         rows = connection.execute(

@@ -362,7 +362,7 @@ def _media_type_for_path(path: Path) -> str:
 
 def run_breakdown_task(task_id: str, video: dict[str, Any], provider: str | None = None) -> None:
     def report(progress: int, message: str) -> None:
-        update_task(task_id, status="running", progress=progress, message=message)
+        update_task(task_id, status="running", progress=progress, message=message, error=None)
 
     semaphore = video_task_semaphore()
     limit = video_task_concurrency_limit()

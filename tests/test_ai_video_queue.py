@@ -71,6 +71,18 @@ class AiVideoQueueTests(unittest.TestCase):
         self.assertEqual(stats["active"], 3)
         self.assertEqual(stats["queued"], 2)
 
+    def test_done_task_releases_stuck_running_queue_slot(self):
+        self.create_task_and_job(1)
+        video_analysis_queue.claim_next_ai_video_job("worker-1")
+        task_store.update_task("video-task-1", status="done", progress=100, message="拆解完成")
+
+        stats = video_analysis_queue.queue_stats()
+        job = video_analysis_queue.get_ai_video_job("video-task-1")
+
+        self.assertEqual(stats["active"], 0)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["progress"], 100)
+
     def test_cancel_queued_job_marks_cancelled(self):
         self.create_task_and_job(1)
 

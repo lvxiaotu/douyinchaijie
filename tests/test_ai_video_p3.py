@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ from integrations.ai_video_analysis.doubao_asr import (
     doubao_asr_status,
     validate_doubao_asr_environment,
 )
-from integrations.ai_video_analysis.evidence_pipeline import VideoEvidencePipeline
+from integrations.ai_video_analysis.evidence_pipeline import AudioExtractionTimeoutError, VideoEvidencePipeline
 from integrations.ai_video_analysis.http_policy import get_with_retries
 from backend.app import short_video_analysis_store
 from backend.app.routes.ai_video_analysis import RemakeExportPayload, save_remake_export_route
@@ -443,6 +444,28 @@ class AiVideoP3Tests(unittest.TestCase):
             pipeline.run_command_capture(["python", "-c", "import time; time.sleep(30)"], timeout=30)
 
         self.assertGreaterEqual(calls["count"], 2)
+
+    def test_audio_extract_timeout_is_non_retryable_and_cleans_partial(self):
+        pipeline = VideoEvidencePipeline(output_dir=Path(self.tmp.name))
+        root = Path(self.tmp.name)
+        video_path = root / "video.mp4"
+        audio_path = root / "audio.wav"
+        video_path.write_bytes(b"fake-video")
+        audio_path.write_bytes(b"")
+
+        def timeout(command, error_message, *, timeout=300):
+            self.assertEqual(command[-3:-1], ["-f", "wav"])
+            self.assertTrue(str(command[-1]).endswith("audio.part.wav"))
+            Path(command[-1]).write_bytes(b"")
+            raise subprocess.TimeoutExpired(command, timeout)
+
+        with patch.object(pipeline, "run_command", side_effect=timeout):
+            with self.assertRaises(AudioExtractionTimeoutError):
+                pipeline.extract_audio(video_path, audio_path, duration=15)
+
+        self.assertFalse(audio_path.exists())
+        self.assertFalse(audio_path.with_name("audio.part.wav").exists())
+        self.assertFalse(audio_path.with_suffix(".wav.part").exists())
 
 
 if __name__ == "__main__":

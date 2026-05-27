@@ -24,6 +24,14 @@ from integrations.ai_video_analysis.transcribers import resolve_transcriber
 VIDEO_URL_REFRESH_STATUS_CODES = {401, 403, 404, 410}
 
 
+class NonRetryableEvidenceError(RuntimeError):
+    """Evidence errors that are deterministic for the current input file."""
+
+
+class AudioExtractionTimeoutError(NonRetryableEvidenceError):
+    pass
+
+
 class VideoEvidencePipeline:
     """Build transcript/keyframe evidence so long videos can be analyzed in chunks."""
 
@@ -682,8 +690,21 @@ class VideoEvidencePipeline:
     ) -> None:
         if not self.ffmpeg:
             raise RuntimeError("未找到 ffmpeg。请安装 FFmpeg，或在 .env 配置 FFMPEG_BINARY。")
+        if audio_path.exists() and audio_path.stat().st_size <= 0:
+            audio_path.unlink()
+        legacy_temp_audio_path = audio_path.with_suffix(f"{audio_path.suffix}.part")
+        if legacy_temp_audio_path.exists():
+            legacy_temp_audio_path.unlink()
+        suffix = audio_path.suffix or ".wav"
+        temp_audio_path = audio_path.with_name(f"{audio_path.stem}.part{suffix}")
+        if temp_audio_path.exists():
+            temp_audio_path.unlink()
         command = [
             self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
             "-y",
             "-i",
             str(video_path),
@@ -694,11 +715,43 @@ class VideoEvidencePipeline:
             "16000",
             "-acodec",
             "pcm_s16le",
-            str(audio_path),
+            "-f",
+            "wav",
+            str(temp_audio_path),
         ]
         if progress:
             progress(24, "FFmpeg 正在提取音频")
-        self.run_command(command, "FFmpeg 音频提取失败")
+        timeout = self.audio_extract_timeout(duration=duration)
+        try:
+            self.run_command(command, "FFmpeg 音频提取失败", timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            if temp_audio_path.exists():
+                temp_audio_path.unlink()
+            raise AudioExtractionTimeoutError(
+                f"FFmpeg audio extraction timed out after {int(timeout)} seconds. video={video_path.name}"
+            ) from exc
+        except Exception:
+            if temp_audio_path.exists() and temp_audio_path.stat().st_size <= 0:
+                temp_audio_path.unlink()
+            raise
+        if not self.valid_file(temp_audio_path):
+            if temp_audio_path.exists():
+                temp_audio_path.unlink()
+            raise NonRetryableEvidenceError("FFmpeg audio extraction produced an empty audio file.")
+        temp_audio_path.replace(audio_path)
+
+    @staticmethod
+    def audio_extract_timeout(*, duration: float = 0.0) -> int:
+        configured = env_int("AI_VIDEO_AUDIO_EXTRACT_TIMEOUT_SECONDS", 0)
+        if configured > 0:
+            return configured
+        base = env_int("AI_VIDEO_AUDIO_EXTRACT_BASE_TIMEOUT_SECONDS", 120)
+        per_minute = env_float("AI_VIDEO_AUDIO_EXTRACT_TIMEOUT_PER_VIDEO_MINUTE", 6.0)
+        max_timeout = env_int("AI_VIDEO_AUDIO_EXTRACT_MAX_TIMEOUT_SECONDS", 900)
+        if duration and duration > 0:
+            computed = base + int((float(duration) / 60.0) * max(per_minute, 0.0))
+            return max(30, min(computed, max_timeout))
+        return max(30, min(300, max_timeout))
 
     def transcribe(
         self,
@@ -971,6 +1024,10 @@ class VideoEvidencePipeline:
                 progress(percent, f"抽取关键帧 {index}/{total}：{self.format_time(seconds)} · {candidate.get('source') or 'frame'}")
             command = [
                 self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
                 "-y",
                 "-ss",
                 str(round(seconds, 2)),
@@ -984,7 +1041,9 @@ class VideoEvidencePipeline:
             ]
             try:
                 self.run_command(command, "FFmpeg 关键帧抽取失败", timeout=45)
-            except RuntimeError:
+            except (RuntimeError, subprocess.TimeoutExpired):
+                if image_path.exists() and image_path.stat().st_size <= 0:
+                    image_path.unlink()
                 continue
             if image_path.exists() and image_path.stat().st_size > 0:
                 keyframes.append(
@@ -1109,6 +1168,10 @@ class VideoEvidencePipeline:
         image_path.parent.mkdir(parents=True, exist_ok=True)
         command = [
             self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
             "-y",
             "-ss",
             str(round(max(0.0, seconds), 2)),
@@ -1296,7 +1359,7 @@ class VideoEvidencePipeline:
 
     def run_command_capture(self, command: list[str], *, timeout: int = 300, check: bool = False) -> subprocess.CompletedProcess:
         started = time.monotonic()
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             while True:
                 self.check_cancelled()
